@@ -98,6 +98,25 @@ fn open_fence_still_renders_incrementally() {
 }
 
 #[test]
+fn id_stable_across_cache_bail() {
+    // The cache holds the fence's id and reuses it on each fast-path append.
+    // When it bails (here, a `\r` mid-line), the full renderer takes over and
+    // must keep the *same* id via active_blocks reuse — otherwise the streaming
+    // UI would remount the block. Pin that invariant across the boundary.
+    let mut p = StreamParser::new();
+    p.append("```\n");
+    let id = p.append("first line\n").active[0].id; // cache armed, fast path
+    p.append("second line\n"); // fast path
+    let after_bail = p.append("third\rline\n"); // `\r` forces bail to full path
+    assert_eq!(after_bail.active.len(), 1, "still one open block after bail");
+    assert_eq!(after_bail.active[0].id, id, "id must survive the cache bail");
+    let more = p.append("fourth line\n"); // full path (cache stays off due to `\r`)
+    assert_eq!(more.active[0].id, id, "id stays stable after the bail");
+    let closed = p.append("```\n\n"); // closes onto the same id
+    assert_eq!(closed.newly_committed.last().unwrap().id, id, "closed fence keeps its id");
+}
+
+#[test]
 fn cache_handles_tiny_chunks_on_huge_fence() {
     // The scenario the cache exists for: a large fence streamed in 1-byte chunks
     // must equal the one-shot render (and finish quickly, though we only assert

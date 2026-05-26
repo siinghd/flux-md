@@ -52,6 +52,20 @@ fn ref_heavy(n: usize) -> String {
     s
 }
 
+fn long_paragraph(target: usize) -> String {
+    // One paragraph, no blank lines — a model writing a long explanation without
+    // breaks. Like an open code fence, it never commits, so the whole tail is
+    // re-rendered each append (but inline rendering can't be cached the same way,
+    // since late delimiters can change earlier output).
+    let mut s = String::with_capacity(target + 32);
+    let unit = "and then the system processes each token in sequence which means ";
+    while s.len() < target {
+        s.push_str(unit);
+    }
+    s.push('\n');
+    s
+}
+
 fn math_doc(target: usize) -> String {
     let unit = "The mass-energy relation $E = mc^2$ and the inline \\(a_1 + b_2\\) form.\n\n\
 $$\n\\sum_{i=1}^{n} x_i = \\frac{n(n+1)}{2}\n$$\n\n\
@@ -88,19 +102,22 @@ fn run_once(input: &str, chunk: usize, math: bool) -> Duration {
 }
 
 fn bench(name: &str, input: &str, chunk: usize, math: bool) {
-    // Warm up, then take the best of several runs (least noisy estimate).
+    // Warm up, then report best AND median over several runs — a gap between
+    // them flags noise, so a small regression in a fast case isn't mistaken for
+    // signal.
     run_once(input, chunk, math);
-    let mut best = Duration::MAX;
-    for _ in 0..7 {
-        let t = run_once(input, chunk, math);
-        if t < best {
-            best = t;
-        }
-    }
+    let mut runs: Vec<Duration> = (0..7).map(|_| run_once(input, chunk, math)).collect();
+    runs.sort();
+    let best = runs[0];
+    let median = runs[runs.len() / 2];
     let mb = input.len() as f64 / 1e6;
-    let ms = best.as_secs_f64() * 1e3;
-    let mbps = mb / best.as_secs_f64();
-    println!("{name:11} {:>9} B  chunk={chunk:>4}  best {ms:>8.2} ms  {mbps:>7.1} MB/s", input.len());
+    println!(
+        "{name:14} {:>9} B  chunk={chunk:>4}  best {:>8.2} ms  median {:>8.2} ms  {:>7.1} MB/s",
+        input.len(),
+        best.as_secs_f64() * 1e3,
+        median.as_secs_f64() * 1e3,
+        mb / best.as_secs_f64(),
+    );
 }
 
 fn main() {
@@ -109,11 +126,13 @@ fn main() {
     let code = big_code(200_000);
     let refs = ref_heavy(2_000);
     let math = math_doc(200_000);
+    let para = long_paragraph(200_000);
 
     // Small chunks = many appends = many tail re-parses (the demanding case).
     for &chunk in &[16usize, 256] {
         bench("mixed", &mixed, chunk, false);
         bench("big_code", &code, chunk, false);
+        bench("long_paragraph", &para, chunk, false);
         bench("ref_heavy", &refs, chunk, false);
         bench("math", &math, chunk, true);
         println!();
