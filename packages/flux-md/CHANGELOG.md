@@ -4,6 +4,19 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Performance
+
+- Streaming a long unbroken **plain** paragraph is now O(n) instead of O(n²): the
+  open paragraph caches its committed plain prefix and re-renders only the short
+  active tail. Measured on a 200 KB single paragraph — **34,167 ms → ~130 ms** at
+  16-byte chunks (~260×). Output is byte-identical. A paragraph whose inline
+  constructs (emphasis, code spans, links, inline math) begin *early* can't cache
+  its prefix past the first construct and still degrades to O(n²) — that prefix
+  isn't stable (a late `*` re-emphasizes earlier text); breaking the text into
+  paragraphs avoids it.
+
 ## 0.3.0
 
 ### Added
