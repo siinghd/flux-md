@@ -66,6 +66,24 @@ fn long_paragraph(target: usize) -> String {
     s
 }
 
+fn emphasis_paragraph(target: usize) -> String {
+    // One unbroken paragraph with emphasis/code/links sprinkled in. The cache
+    // can't commit past an early construct, so this stays O(n²) — included to
+    // report that the long-paragraph fix is honest about its coverage (plain
+    // paragraphs O(n); construct-laden ones unchanged).
+    let mut s = String::with_capacity(target + 64);
+    let mut i = 0usize;
+    while s.len() < target {
+        s.push_str("some words of ordinary explanation continue here and ");
+        if i % 5 == 0 {
+            s.push_str("**bold** and *italic* and `code` ");
+        }
+        i += 1;
+    }
+    s.push('\n');
+    s
+}
+
 fn math_doc(target: usize) -> String {
     let unit = "The mass-energy relation $E = mc^2$ and the inline \\(a_1 + b_2\\) form.\n\n\
 $$\n\\sum_{i=1}^{n} x_i = \\frac{n(n+1)}{2}\n$$\n\n\
@@ -127,12 +145,14 @@ fn main() {
     let refs = ref_heavy(2_000);
     let math = math_doc(200_000);
     let para = long_paragraph(200_000);
+    let emph = emphasis_paragraph(200_000);
 
     // Small chunks = many appends = many tail re-parses (the demanding case).
     for &chunk in &[16usize, 256] {
         bench("mixed", &mixed, chunk, false);
         bench("big_code", &code, chunk, false);
         bench("long_paragraph", &para, chunk, false);
+        bench("emphasis_para", &emph, chunk, false);
         bench("ref_heavy", &refs, chunk, false);
         bench("math", &math, chunk, true);
         println!();

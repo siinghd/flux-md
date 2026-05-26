@@ -9,7 +9,11 @@ use crate::render::{
     push_code_fence_open, render_block, render_footnote_section, LinkRef, RenderOpts,
 };
 use crate::blocks::BlockKind;
-use crate::scanner::{parse_link_ref_def, scan, RawBlockKind, RawBlock, ScanCtx};
+use crate::scanner::{
+    is_blank_line, is_setext_underline, line_end, parse_link_ref_def, scan, would_start_other_block,
+    RawBlock, RawBlockKind, ScanCtx,
+};
+use crate::inline::render_inline;
 use crate::url::escape_html;
 
 /// Collect link reference definitions from `text` into `refs`, recursing into
@@ -112,6 +116,8 @@ pub struct StreamParser {
     dir_auto: bool,
     /// Fast path for a long open code fence at the tail (see [`CodeFenceCache`]).
     code_cache: Option<CodeFenceCache>,
+    /// Fast path for a long open paragraph at the tail (see [`ParagraphCache`]).
+    para_cache: Option<ParagraphCache>,
 }
 
 #[derive(Default)]
@@ -143,6 +149,39 @@ struct CodeFenceCache {
     lines_upto: usize,
 }
 
+/// Incremental render state for a single open paragraph at the tail. Streaming
+/// a long paragraph is otherwise O(n²) — the whole growing, uncommitted
+/// paragraph is re-`render_inline`d each append. Unlike code, inline output is
+/// not prefix-stable (a late `*` can emphasize earlier text; a code span or
+/// link spans inter-word spaces). So this cache commits only a *plain* prefix:
+/// text up to the last top-level inter-word boundary that precedes the first
+/// space-spanning-construct character. That prefix is final (it contains no
+/// construct that future input can reach), so it's rendered once and only the
+/// short active tail is re-rendered. Long plain paragraphs (the realistic
+/// O(n²) trigger) become O(n); a paragraph whose constructs start early keeps
+/// today's behavior (no regression, no speedup).
+struct ParagraphCache {
+    /// Absolute byte offset of the paragraph start in `buffer`.
+    start: usize,
+    /// Stable id of the paragraph block.
+    id: u64,
+    /// Absolute offset; `buffer[start..cut]` is committed (plain, construct-free)
+    /// and rendered into `committed_inner`. Always at a clean word/line boundary.
+    cut: usize,
+    /// Rendered inline HTML of `buffer[start..cut]`.
+    committed_inner: String,
+}
+
+/// Characters that begin an inline construct able to span an inter-word space,
+/// so a cut must never advance past one: emphasis/strike (`* _ ~`), code spans
+/// (`` ` ``), links/images (`[`), autolinks/inline-HTML (`<`). When math is on,
+/// `$…$` and `\(…\)` also span spaces, so `$` and `\` join the set. Deliberately
+/// NOT included: `& \ ! ] >` — they settle within a single token, and any
+/// partial lives in the trailing token, which is never committed.
+fn is_paragraph_blocker(b: u8, math: bool) -> bool {
+    matches!(b, b'*' | b'_' | b'~' | b'`' | b'[' | b'<') || (math && matches!(b, b'$' | b'\\'))
+}
+
 impl StreamParser {
     pub fn new() -> Self {
         Self {
@@ -164,6 +203,7 @@ impl StreamParser {
             gfm_math: false,
             dir_auto: false,
             code_cache: None,
+            para_cache: None,
         }
     }
 
@@ -280,10 +320,13 @@ impl StreamParser {
     }
 
     fn reparse_tail(&mut self, finalizing: bool) -> Patch {
-        // Fast path: a long open code fence at the tail is extended in O(new
-        // bytes) instead of re-scanning + re-escaping the whole body each chunk.
+        // Fast paths: extend a long open code fence / paragraph at the tail in
+        // O(new bytes) instead of re-scanning + re-rendering the whole tail.
         if !finalizing {
             if let Some(patch) = self.try_incremental_code_fence() {
+                return patch;
+            }
+            if let Some(patch) = self.try_incremental_paragraph() {
                 return patch;
             }
         }
@@ -513,24 +556,34 @@ impl StreamParser {
         }
         self.active_blocks = new_active.clone();
 
-        // Arm (or disarm) the incremental code-fence cache. It applies only when
-        // the entire tail is now a single open code fence — the long-streamed-
-        // code-block case — so subsequent appends take the O(new bytes) path.
+        // Arm (or disarm) the tail fast-path caches. They apply only when the
+        // entire tail is now a single open block whose kind streams cheaply —
+        // an open code fence or an open paragraph — so subsequent appends take
+        // the O(new bytes) path instead of re-rendering the whole tail.
         self.code_cache = None;
+        self.para_cache = None;
         if !finalizing && new_active.len() == 1 {
-            if let RawBlockKind::CodeFence { terminated: false, info, .. } = &renderable[to_commit].kind {
-                let start = tail_start + renderable[to_commit].range.start;
-                let gap_blank = self.buffer.as_bytes()[self.committed_offset..start]
-                    .iter()
-                    .all(|&b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'));
-                if gap_blank {
-                    self.code_cache = build_code_fence_cache(
-                        &self.buffer,
-                        start,
-                        info,
-                        new_active[0].id,
-                        new_active[0].kind.clone(),
-                    );
+            let raw = renderable[to_commit];
+            let start = tail_start + raw.range.start;
+            let gap_blank = self.buffer.as_bytes()[self.committed_offset..start]
+                .iter()
+                .all(|&b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'));
+            if gap_blank {
+                match &raw.kind {
+                    RawBlockKind::CodeFence { terminated: false, info, .. } => {
+                        self.code_cache = build_code_fence_cache(
+                            &self.buffer,
+                            start,
+                            info,
+                            new_active[0].id,
+                            new_active[0].kind.clone(),
+                        );
+                    }
+                    RawBlockKind::Paragraph => {
+                        self.para_cache =
+                            build_paragraph_cache(&self.buffer, start, new_active[0].id, &opts);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -613,6 +666,92 @@ impl StreamParser {
         self.code_cache = Some(cache);
         Some(Patch { newly_committed: Vec::new(), active: vec![block] })
     }
+
+    /// Inline-render options for a streaming tail render. Reference + footnote
+    /// tables come from the committed region (an open block defines none of its
+    /// own); footnote numbers continue from the committed count over
+    /// `footnote_region`, mirroring the full path's pre-pass.
+    fn build_inline_opts(&self, footnote_region: &str) -> RenderOpts {
+        let mut footnotes = self.committed_footnotes.clone();
+        if self.gfm_footnotes {
+            let mut next = self.next_footnote;
+            collect_footnote_refs(footnote_region, &mut footnotes, &mut next);
+        }
+        RenderOpts {
+            unsafe_html: self.unsafe_html,
+            refs: self.committed_refs.clone(),
+            in_link: false,
+            gfm_autolinks: self.gfm_autolinks,
+            gfm_alerts: self.gfm_alerts,
+            gfm_math: self.gfm_math,
+            dir_auto: self.dir_auto,
+            gfm_footnotes: self.gfm_footnotes,
+            footnotes,
+            footnote_occ: std::cell::RefCell::new(self.committed_footnote_occurrences.clone()),
+        }
+    }
+
+    /// O(new bytes) extension of a long open paragraph at the tail. Commits the
+    /// blocker-free plain prefix once and re-renders only the short active tail.
+    /// Returns `None` (dropping the cache) whenever the paragraph has ended or
+    /// is no longer the sole tail block — the full reparse then handles it.
+    fn try_incremental_paragraph(&mut self) -> Option<Patch> {
+        let mut cache = self.para_cache.take()?;
+        let ctx = ScanCtx { math: self.gfm_math };
+        let bytes = self.buffer.as_bytes();
+        let len = bytes.len();
+        // The paragraph must still be the tail (only whitespace before it) and
+        // must still run to EOF (no blank line / interrupting block / setext
+        // underline appeared after the committed cut).
+        if cache.start < self.committed_offset
+            || bytes[self.committed_offset..cache.start]
+                .iter()
+                .any(|&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+            || paragraph_ends_before_eof(bytes, cache.cut, ctx)
+        {
+            return None;
+        }
+        let mut content_end = len;
+        while content_end > cache.start && matches!(bytes[content_end - 1], b'\n' | b'\r') {
+            content_end -= 1;
+        }
+        if content_end < cache.cut {
+            return None;
+        }
+        let opts = self.build_inline_opts(&self.buffer[cache.start..content_end]);
+        // Advance the committed cut over newly-arrived blocker-free plain text.
+        let new_cut = paragraph_cut(bytes, cache.start, cache.cut, content_end, self.gfm_math);
+        if new_cut > cache.cut {
+            render_inline(&self.buffer[cache.cut..new_cut], &opts, &mut cache.committed_inner);
+            cache.cut = new_cut;
+        }
+        // Re-render the (short) active tail and assemble the paragraph, matching
+        // render_paragraph's `<p…>` opener and trailing-whitespace trim.
+        let mut active = String::new();
+        render_inline(&self.buffer[cache.cut..content_end], &opts, &mut active);
+        let mut inner = String::with_capacity(cache.committed_inner.len() + active.len());
+        inner.push_str(&cache.committed_inner);
+        inner.push_str(&active);
+        let final_text = inner.trim_end_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r'));
+        let mut html = String::with_capacity(final_text.len() + 16);
+        html.push_str("<p");
+        html.push_str(opts.dir());
+        html.push('>');
+        html.push_str(final_text);
+        html.push_str("</p>");
+        let block = Block {
+            id: cache.id,
+            kind: BlockKind::Paragraph,
+            start: cache.start,
+            end: len,
+            html,
+            open: true,
+            speculative: true,
+        };
+        self.active_blocks = vec![block.clone()];
+        self.para_cache = Some(cache);
+        Some(Patch { newly_committed: Vec::new(), active: vec![block] })
+    }
 }
 
 /// Build the incremental cache for an open code fence at `start`, walking its
@@ -660,6 +799,94 @@ fn build_code_fence_cache(
     let mut opener_html = String::new();
     push_code_fence_open(info, &mut opener_html);
     Some(CodeFenceCache { start, id, kind, opener_html, escaped_lines, lines_upto })
+}
+
+/// Arm the paragraph cache for the open paragraph at `start`, rendering its
+/// initial committed (plain) prefix once. `None` if there's no committable
+/// prefix yet (a blocker appears too early, or the paragraph is still short).
+fn build_paragraph_cache(buffer: &str, start: usize, id: u64, opts: &RenderOpts) -> Option<ParagraphCache> {
+    let bytes = buffer.as_bytes();
+    let mut content_end = bytes.len();
+    while content_end > start && matches!(bytes[content_end - 1], b'\n' | b'\r') {
+        content_end -= 1;
+    }
+    let cut = paragraph_cut(bytes, start, start, content_end, opts.gfm_math);
+    if cut <= start {
+        return None;
+    }
+    let mut committed_inner = String::new();
+    render_inline(&buffer[start..cut], opts, &mut committed_inner);
+    Some(ParagraphCache { start, id, cut, committed_inner })
+}
+
+/// Largest clean cut boundary in `(from, stable_in]`, where `stable_in` is the
+/// first paragraph-blocker at or after `from` (else `content_end`). Returns
+/// `from` when nothing can be committed. The committed region therefore never
+/// contains a space-spanning construct, and the cut never splits one.
+fn paragraph_cut(bytes: &[u8], start: usize, from: usize, content_end: usize, math: bool) -> usize {
+    let mut stable_in = content_end;
+    let mut i = from;
+    while i < content_end {
+        if is_paragraph_blocker(bytes[i], math) {
+            stable_in = i;
+            break;
+        }
+        i += 1;
+    }
+    // Scan down from stable_in for the largest valid boundary.
+    let mut p = stable_in;
+    while p > from {
+        if is_cut_boundary(bytes, start, p, content_end) {
+            return p;
+        }
+        p -= 1;
+    }
+    from
+}
+
+/// A position is a clean cut iff a word/line begins there with whitespace before
+/// it that can't be part of a multi-space hard break — i.e. right after a single
+/// inter-word space (preceded by a non-space) or right after a newline — and it
+/// is strictly before `content_end` (the trailing token is never committed).
+fn is_cut_boundary(bytes: &[u8], start: usize, p: usize, content_end: usize) -> bool {
+    if p <= start || p >= content_end {
+        return false;
+    }
+    if matches!(bytes[p], b' ' | b'\t' | b'\n' | b'\r') {
+        return false;
+    }
+    match bytes[p - 1] {
+        b'\n' => true,
+        b' ' => p >= start + 2 && !matches!(bytes[p - 2], b' ' | b'\t' | b'\n' | b'\r'),
+        _ => false,
+    }
+}
+
+/// True if the open paragraph beginning before `cut` actually ends somewhere in
+/// `[cut, EOF)` — a blank line, an interrupting block start, or a setext
+/// underline (which would change the block's kind). The line containing `cut`
+/// is a continuation (it began as paragraph text), so it's skipped.
+fn paragraph_ends_before_eof(bytes: &[u8], cut: usize, ctx: ScanCtx) -> bool {
+    let len = bytes.len();
+    let mut pos = cut;
+    if pos < len && (pos == 0 || bytes[pos - 1] != b'\n') {
+        while pos < len && bytes[pos] != b'\n' {
+            pos += 1;
+        }
+        if pos < len {
+            pos += 1;
+        }
+    }
+    while pos < len {
+        if is_blank_line(bytes, pos)
+            || is_setext_underline(bytes, pos).is_some()
+            || would_start_other_block(bytes, pos, ctx)
+        {
+            return true;
+        }
+        pos = line_end(bytes, pos);
+    }
+    false
 }
 
 impl Default for StreamParser {

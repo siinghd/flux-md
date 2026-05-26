@@ -859,7 +859,7 @@ fn scan_paragraph(bytes: &[u8], start: usize, ctx: ScanCtx) -> RawBlock {
     RawBlock { kind: RawBlockKind::Paragraph, range: start..pos }
 }
 
-fn is_setext_underline(bytes: &[u8], start: usize) -> Option<u8> {
+pub(crate) fn is_setext_underline(bytes: &[u8], start: usize) -> Option<u8> {
     let line = line_slice(bytes, start);
     let (indent, body) = strip_indent(line, 3);
     if indent > 3 || body.is_empty() {
@@ -1006,7 +1006,7 @@ fn line_starts_with_marker(bytes: &[u8], start: usize, marker: u8) -> bool {
     !body.is_empty() && body[0] == marker
 }
 
-fn would_start_other_block(bytes: &[u8], start: usize, ctx: ScanCtx) -> bool {
+pub(crate) fn would_start_other_block(bytes: &[u8], start: usize, ctx: ScanCtx) -> bool {
     scan_heading(bytes, start).is_some()
         || scan_fence(bytes, start).is_some()
         || (ctx.math && scan_math_block(bytes, start).is_some())

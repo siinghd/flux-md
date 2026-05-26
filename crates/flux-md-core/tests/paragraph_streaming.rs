@@ -156,6 +156,31 @@ fn mixed_long_with_sparse_constructs() {
 }
 
 #[test]
+fn math_spans_are_blockers() {
+    // With gfmMath on, `$…$` and `\(…\)` span inter-word spaces, so a cut must
+    // never land inside them. Currency stays literal (pandoc rule).
+    let math = || StreamParser::new().with_gfm_math(true);
+    parity(&format!("{}$a + b + c$ {}", plain("", 60, ""), plain("", 60, "")), &math);
+    parity(&format!("{}\\(x + y + z\\) {}", plain("", 60, ""), plain("", 60, "")), &math);
+    parity(&plain("I have $5 and $10 and $20 to spend on ", 200, "things"), &math);
+    parity("the identity $$e^{i\\pi} = -1$$ holds in this long line of explanation here\n", &math);
+}
+
+#[test]
+fn paragraph_termination_bails() {
+    // The cache must bail when the open paragraph actually ends — a blank line,
+    // a block-starting line, or a setext underline (which changes the kind).
+    parity(&format!("{}\n\n{}", plain("", 120, "end"), plain("", 120, "more")), &default);
+    parity(&format!("{}\n\n# A heading\n", plain("", 120, "end")), &default);
+    parity(&format!("{}\n\n- a list item\n- another\n", plain("", 120, "end")), &default);
+    parity(&format!("{}\n\n```\ncode block\n```\n", plain("", 120, "end")), &default);
+    parity(&format!("{}\n> a block quote now\n", plain("", 120, "end")), &default);
+    // Setext underline promotes the whole paragraph to a heading.
+    parity("a long paragraph of text that will become a heading\n=====\n", &default);
+    parity(&format!("{}\n-----\n", plain("", 80, "title")), &default);
+}
+
+#[test]
 fn dir_auto_paragraph_parity() {
     // The cached path must still produce <p dir="auto"> when bidi is on.
     let md = plain("", 300, "");
