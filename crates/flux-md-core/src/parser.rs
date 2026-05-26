@@ -272,7 +272,10 @@ impl StreamParser {
 
         let opts = RenderOpts {
             unsafe_html: self.unsafe_html,
-            refs: refs.clone(),
+            // Move the freshly-built ref table into opts — it isn't used again
+            // in this reparse, so cloning it (a full HashMap copy on every
+            // append) was pure waste, O(refs) per chunk for ref-heavy docs.
+            refs,
             in_link: false,
             gfm_autolinks: self.gfm_autolinks,
             gfm_alerts: self.gfm_alerts,
