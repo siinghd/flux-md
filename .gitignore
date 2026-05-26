@@ -11,6 +11,7 @@ web/dist/
 
 # Generated WASM is built on demand (see packages/flux-md/src/wasm/.gitignore)
 
-# Editor / OS
+# Editor / OS / local tooling state
 .DS_Store
 *.local
+.claude/
