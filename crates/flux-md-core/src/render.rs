@@ -75,7 +75,7 @@ impl RenderOpts {
 
     /// The ` dir="auto"` attribute (with a leading space) when bidi is on, else
     /// empty — appended inside block-level opening tags.
-    fn dir(&self) -> &'static str {
+    pub(crate) fn dir(&self) -> &'static str {
         if self.dir_auto {
             " dir=\"auto\""
         } else {
@@ -536,7 +536,11 @@ fn render_alert(inner: &str, kind: AlertKind, opts: &RenderOpts, out: &mut Strin
     out.push_str(kind.class());
     out.push_str("\" data-alert=\"");
     out.push_str(kind.class());
-    out.push_str("\" role=\"note\">\n<p class=\"markdown-alert-title\">");
+    out.push_str("\" role=\"note\"");
+    out.push_str(opts.dir());
+    out.push_str(">\n<p class=\"markdown-alert-title\"");
+    out.push_str(opts.dir());
+    out.push('>');
     out.push_str(kind.title());
     out.push_str("</p>\n");
     // Body = inner minus its first line (the marker).
@@ -687,18 +691,23 @@ pub(crate) fn render_footnote_section(
     nums: &HashMap<String, usize>,
     defs: &HashMap<String, String>,
     occ: &HashMap<String, usize>,
+    dir: &str,
 ) -> String {
     if nums.is_empty() {
         return String::new();
     }
     let mut ordered: Vec<(&String, &usize)> = nums.iter().collect();
     ordered.sort_by_key(|(_, n)| **n);
-    let mut out = String::from("<section class=\"footnotes\" role=\"doc-endnotes\">\n<ol>\n");
+    let mut out = String::from("<section class=\"footnotes\" role=\"doc-endnotes\">\n<ol");
+    out.push_str(dir);
+    out.push_str(">\n");
     for (label, num) in ordered {
         let n = num.to_string();
         out.push_str("<li id=\"fn-");
         out.push_str(&n);
-        out.push_str("\">");
+        out.push('"');
+        out.push_str(dir);
+        out.push('>');
         if let Some(html) = defs.get(label) {
             out.push_str(html);
         }

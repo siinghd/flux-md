@@ -99,7 +99,38 @@ fn dir_auto_streaming_matches_one_shot() {
         "> a quote\n> continued\n",
         "مرحبا بالعالم\n\nthen english\n",
         "| h | i |\n|---|---|\n| 1 | 2 |\n",
+        "intro\n\n```rust\nfn x() {}\nlet y = 1;\n```\n\noutro\n", // code fence keeps no dir
     ] {
         assert_eq!(render_dir_streamed(md), render_dir(md), "stream≠oneshot: {md:?}");
     }
+}
+
+#[test]
+fn alert_wrapper_and_title_get_dir() {
+    // Alerts default ON in the worker, so the alert × dirAuto intersection is
+    // the likely real case: the wrapper div and title both need dir.
+    let mut p = StreamParser::new().with_gfm_alerts(true).with_dir_auto(true);
+    p.append("> [!NOTE]\n> مرحبا بالعالم\n");
+    p.finalize();
+    let out = collect(&p);
+    assert!(out.contains("role=\"note\" dir=\"auto\">"), "alert wrapper needs dir: {out}");
+    assert!(
+        out.contains("<p class=\"markdown-alert-title\" dir=\"auto\">"),
+        "alert title needs dir: {out}"
+    );
+    // With dir off, the alert markup is unchanged (no dir anywhere).
+    let mut q = StreamParser::new().with_gfm_alerts(true);
+    q.append("> [!NOTE]\n> hi\n");
+    q.finalize();
+    assert!(!collect(&q).contains("dir="), "alert must be unchanged when dir off");
+}
+
+#[test]
+fn footnote_section_gets_dir() {
+    let mut p = StreamParser::new().with_gfm_footnotes(true).with_dir_auto(true);
+    p.append("Text with a note[^1].\n\n[^1]: مرحبا\n");
+    p.finalize();
+    let out = collect(&p);
+    assert!(out.contains("<ol dir=\"auto\">"), "footnote list needs dir: {out}");
+    assert!(out.contains("<li id=\"fn-1\" dir=\"auto\">"), "footnote item needs dir: {out}");
 }

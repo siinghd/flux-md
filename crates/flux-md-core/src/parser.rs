@@ -492,7 +492,7 @@ impl StreamParser {
 
         // At finalize, emit the footnote section as a final block (once).
         if finalizing && gfm_footnotes {
-            let section = render_footnote_section(&fn_nums, &fn_defs, &total_occ);
+            let section = render_footnote_section(&fn_nums, &fn_defs, &total_occ, opts.dir());
             if !section.is_empty() {
                 let id = self.next_id;
                 self.next_id += 1;
