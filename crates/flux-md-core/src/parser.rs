@@ -1125,4 +1125,30 @@ mod tests {
         assert!(html.contains("<blockquote>"));
         assert!(html.contains("<h1>Inside</h1>"));
     }
+
+    // Parity tests pass even if the cache silently never engages (the full
+    // renderer would just run every time). These assert it *does* fire, so a
+    // regression that disables it can't hide.
+    #[test]
+    fn paragraph_cache_engages_for_plain_text() {
+        let md = "the quick brown fox jumps over the lazy dog again and again here ".repeat(4);
+        let mut p = StreamParser::new();
+        let mut buf = [0u8; 4];
+        for ch in md.chars() {
+            p.append(ch.encode_utf8(&mut buf));
+        }
+        let cache = p.para_cache.as_ref().expect("paragraph cache should arm for plain text");
+        assert!(cache.cut > cache.start, "cache should have committed a plain prefix");
+        assert!(!cache.committed_inner.is_empty());
+    }
+
+    #[test]
+    fn code_fence_cache_engages() {
+        let mut p = StreamParser::new();
+        let mut buf = [0u8; 4];
+        for ch in "```rust\nfn a() {}\nfn b() {}\nlet x = 1;\n".chars() {
+            p.append(ch.encode_utf8(&mut buf));
+        }
+        assert!(p.code_cache.is_some(), "code-fence cache should arm for an open fence");
+    }
 }

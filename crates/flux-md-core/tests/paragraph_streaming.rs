@@ -194,6 +194,32 @@ fn dir_auto_paragraph_parity() {
 }
 
 #[test]
+fn intermediate_prefix_matches_full_render() {
+    // Stronger than final equality: at every streamed prefix the rendered HTML
+    // must match a fresh single-append parse of the same prefix (which always
+    // takes the full-render path) — so the cache's *intermediate* output is
+    // byte-identical too, not just the finalized result.
+    for md in [
+        plain("intro ", 120, "tail"),
+        format!("plain start {}*emph words*{}", plain("", 40, ""), plain(" ", 40, "")),
+    ] {
+        let mut streamed = StreamParser::new();
+        let mut buf = [0u8; 4];
+        let mut at = 0usize;
+        for ch in md.chars() {
+            let s = ch.encode_utf8(&mut buf);
+            streamed.append(s);
+            at += s.len();
+            let mut oneshot = StreamParser::new();
+            oneshot.append(&md[..at]);
+            let a: String = streamed.all_blocks().map(|b| b.html.clone()).collect();
+            let b: String = oneshot.all_blocks().map(|b| b.html.clone()).collect();
+            assert_eq!(a, b, "intermediate mismatch at {at} bytes of {:?}", short(&md));
+        }
+    }
+}
+
+#[test]
 fn streaming_has_no_orphan_blocks() {
     // Per-prefix invariants while streaming a long paragraph: ordered,
     // non-overlapping, unique block ids, and a stable id for the open paragraph.
