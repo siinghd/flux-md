@@ -109,6 +109,7 @@ pub struct StreamParser {
     gfm_alerts: bool,
     gfm_footnotes: bool,
     gfm_math: bool,
+    dir_auto: bool,
     /// Fast path for a long open code fence at the tail (see [`CodeFenceCache`]).
     code_cache: Option<CodeFenceCache>,
 }
@@ -161,6 +162,7 @@ impl StreamParser {
             gfm_alerts: false,
             gfm_footnotes: false,
             gfm_math: false,
+            dir_auto: false,
             code_cache: None,
         }
     }
@@ -221,6 +223,21 @@ impl StreamParser {
 
     pub fn set_gfm_math(&mut self, on: bool) {
         self.gfm_math = on;
+    }
+
+    /// Emit `dir="auto"` on block-level text elements (`<p>`, `<h1>`–`<h6>`,
+    /// `<blockquote>`, `<ul>`/`<ol>`/`<li>`, `<table>`) so the browser detects
+    /// each block's text direction independently (LTR/RTL) via the Unicode bidi
+    /// algorithm — correct for documents that mix English with Arabic/Hebrew.
+    /// Off by default (strict-CommonMark output has no `dir`); code blocks never
+    /// get it (code is always LTR).
+    pub fn with_dir_auto(mut self, on: bool) -> Self {
+        self.dir_auto = on;
+        self
+    }
+
+    pub fn set_dir_auto(&mut self, on: bool) {
+        self.dir_auto = on;
     }
 
     pub fn set_unsafe_html(&mut self, on: bool) {
@@ -315,6 +332,7 @@ impl StreamParser {
             gfm_autolinks: self.gfm_autolinks,
             gfm_alerts: self.gfm_alerts,
             gfm_math: self.gfm_math,
+            dir_auto: self.dir_auto,
             gfm_footnotes,
             footnotes: fn_nums.clone(),
             // Seed the per-label occurrence counter from the committed counts so

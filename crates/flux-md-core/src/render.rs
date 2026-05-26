@@ -42,6 +42,9 @@ pub struct RenderOpts {
     /// math. Off by default (so `$` in prose stays literal). The block-level
     /// half is also gated in the scanner via [`ScanCtx::math`].
     pub gfm_math: bool,
+    /// Emit `dir="auto"` on block-level text elements for per-block bidi. Off by
+    /// default (strict-CommonMark output is unchanged).
+    pub dir_auto: bool,
     /// GFM footnotes. Off by default. When on, an inline `[^label]` whose label
     /// appears in `footnotes` renders as a superscript link.
     pub gfm_footnotes: bool,
@@ -68,6 +71,16 @@ impl RenderOpts {
     /// the top level.
     pub(crate) fn scan_ctx(&self) -> ScanCtx {
         ScanCtx { math: self.gfm_math }
+    }
+
+    /// The ` dir="auto"` attribute (with a leading space) when bidi is on, else
+    /// empty — appended inside block-level opening tags.
+    fn dir(&self) -> &'static str {
+        if self.dir_auto {
+            " dir=\"auto\""
+        } else {
+            ""
+        }
     }
 }
 
@@ -231,6 +244,7 @@ fn render_heading(slice: &str, level: u8, opts: &RenderOpts, out: &mut String) {
     out.push('<');
     out.push('h');
     out.push((b'0' + level) as char);
+    out.push_str(opts.dir());
     out.push('>');
     render_heading_inner_trimmed(content, opts, out);
     out.push_str("</h");
@@ -240,7 +254,9 @@ fn render_heading(slice: &str, level: u8, opts: &RenderOpts, out: &mut String) {
 
 fn render_paragraph(slice: &str, opts: &RenderOpts, out: &mut String) {
     let trimmed = trim_trailing_newlines(slice);
-    out.push_str("<p>");
+    out.push_str("<p");
+    out.push_str(opts.dir());
+    out.push('>');
     let mut tmp = String::with_capacity(trimmed.len());
     render_inline(trimmed, opts, &mut tmp);
     // CommonMark: trailing whitespace at end of final line is stripped.
@@ -401,6 +417,7 @@ fn render_setext_heading(slice: &str, level: u8, opts: &RenderOpts, out: &mut St
     out.push('<');
     out.push('h');
     out.push((b'0' + level) as char);
+    out.push_str(opts.dir());
     out.push('>');
     render_heading_inner_trimmed(content, opts, out);
     out.push_str("</h");
@@ -490,7 +507,9 @@ fn render_blockquote(slice: &str, opts: &RenderOpts, out: &mut String) {
             return;
         }
     }
-    out.push_str("<blockquote>");
+    out.push_str("<blockquote");
+    out.push_str(opts.dir());
+    out.push('>');
     // Ref defs render to nothing (their content was hoisted into the table).
     let sub: Vec<_> = scan(&inner, opts.scan_ctx())
         .into_iter()
@@ -847,15 +866,18 @@ fn render_list(slice: &str, ordered: bool, start: u32, opts: &RenderOpts, out: &
     }
 
     if ordered {
-        if start == 1 {
-            out.push_str("<ol>");
-        } else {
-            out.push_str("<ol start=\"");
+        out.push_str("<ol");
+        out.push_str(opts.dir());
+        if start != 1 {
+            out.push_str(" start=\"");
             out.push_str(&start.to_string());
-            out.push_str("\">");
+            out.push('"');
         }
+        out.push('>');
     } else {
-        out.push_str("<ul>");
+        out.push_str("<ul");
+        out.push_str(opts.dir());
+        out.push('>');
     }
     out.push('\n');
     for win in item_starts.windows(2) {
@@ -929,7 +951,9 @@ fn render_list_item(item: &[u8], ordered: bool, loose: bool, opts: &RenderOpts, 
     }
     let body_trimmed = body.trim_end_matches(|c: char| matches!(c, '\n' | '\r' | ' ' | '\t'));
 
-    out.push_str("<li>");
+    out.push_str("<li");
+    out.push_str(opts.dir());
+    out.push('>');
     if let Some(checked) = task_state {
         out.push_str(if checked {
             "<input type=\"checkbox\" checked disabled> "
@@ -979,7 +1003,9 @@ fn render_table(slice: &str, opts: &RenderOpts, out: &mut String) {
     // §GFM: every row is normalized to the header's column count — extra cells
     // are dropped, missing cells are rendered empty.
     let ncol = header.len();
-    out.push_str("<table><thead><tr>");
+    out.push_str("<table");
+    out.push_str(opts.dir());
+    out.push_str("><thead><tr>");
     for i in 0..ncol {
         push_table_cell("th", header.get(i).map(String::as_str).unwrap_or(""), aligns.get(i), opts, out);
     }

@@ -171,6 +171,20 @@ fn issue_522_latex_math_delimiters() {
     assert!(!dollars.contains("<em>"), "math body must not be emphasized: {dollars}");
 }
 
+/// #509: direction must be detected **per block**, not once for the whole
+/// document. With `dir_auto` on, each block-level text element carries its own
+/// `dir="auto"`, so a browser renders an Arabic block RTL and an English block
+/// LTR independently; code blocks stay LTR (no `dir`).
+#[test]
+fn issue_509_per_block_dir_auto() {
+    let mut p = StreamParser::new().with_dir_auto(true);
+    p.append("English here.\n\nمرحبا بالعالم\n\n```js\nconst x = 1;\n```\n");
+    p.finalize();
+    let out = collect(&p);
+    assert_eq!(out.matches("<p dir=\"auto\">").count(), 2, "each paragraph gets its own dir: {out}");
+    assert!(!out.contains("<pre dir") && !out.contains("code dir"), "code stays LTR: {out}");
+}
+
 /// Streaming a `$$…$$` block flips the active block's kind (Paragraph →
 /// MathFence) the moment the second `$` arrives, which changes its stable ID.
 /// As with the Blockquote→Alert flip (#467), verify that at *every* prefix the

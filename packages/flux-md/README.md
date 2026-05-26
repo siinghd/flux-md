@@ -94,6 +94,7 @@ const client = new FluxClient({
     gfmAlerts: true,      // > [!NOTE] → callouts (default true)
     gfmFootnotes: true,   // [^1] + [^1]: → footnote section (default false)
     gfmMath: true,        // $…$ / \(…\) inline + $$…$$ / \[…\] display math (default false)
+    dirAuto: true,        // per-block dir="auto" for RTL/bidi text (default false)
     unsafeHtml: false,    // pass raw HTML through (default false — keep it false for untrusted input)
   },
 });
@@ -129,6 +130,15 @@ math. A `$$`/`\[` block is **blank-line tolerant** (multi-line `\begin{aligned}�
 stays one block) and renders incrementally while streaming, like a code fence.
 Off by default (so `$` in plain prose is untouched) — enable it per stream when
 your model emits LaTeX.
+
+**Bidirectional text** (`dirAuto`) emits `dir="auto"` on each block-level text
+element (`p`, `h1`–`h6`, `blockquote`, `ul`/`ol`/`li`, `table`), so the browser
+runs the Unicode bidi algorithm **per block** — an Arabic/Hebrew paragraph
+renders RTL while the English one beside it stays LTR, with no JS direction
+detection. Code blocks never get it (code is always LTR). This is the per-block
+model GitHub uses; it's the right fix for the common failure mode of detecting
+one direction for a whole mixed-language document. Off by default (strict
+CommonMark output is unchanged); turn it on for RTL or mixed-direction content.
 
 ### `FluxMarkdown` (React)
 

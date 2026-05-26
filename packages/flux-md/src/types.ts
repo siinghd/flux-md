@@ -83,6 +83,14 @@ export interface ParserConfig {
    * carrying the LaTeX — bring your own KaTeX pass (flux-md stays zero-dep).
    */
   gfmMath?: boolean;
+  /**
+   * Emit `dir="auto"` on block-level text elements (`p`, `h1`–`h6`,
+   * `blockquote`, `ul`/`ol`/`li`, `table`) so the browser detects each block's
+   * direction independently — correct for documents mixing English with
+   * Arabic/Hebrew. Default false; code blocks always stay LTR. Recommended for
+   * apps that render RTL or mixed-direction content.
+   */
+  dirAuto?: boolean;
   /** Pass raw HTML through unescaped. Default false. **Never enable for untrusted input.** */
   unsafeHtml?: boolean;
 }

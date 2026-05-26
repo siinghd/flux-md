@@ -109,6 +109,15 @@ impl FluxParser {
     pub fn set_gfm_math(&mut self, on: bool) {
         self.inner.set_gfm_math(on);
     }
+
+    /// Emit `dir="auto"` on block-level text elements so the browser detects
+    /// each block's direction (LTR/RTL) independently — correct rendering for
+    /// documents that mix English with Arabic/Hebrew. Off by default; code
+    /// blocks never get it (code is always LTR).
+    #[wasm_bindgen(js_name = setDirAuto)]
+    pub fn set_dir_auto(&mut self, on: bool) {
+        self.inner.set_dir_auto(on);
+    }
 }
 
 impl Default for FluxParser {
