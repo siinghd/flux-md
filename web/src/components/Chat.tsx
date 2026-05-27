@@ -13,9 +13,11 @@ interface Turn {
 }
 
 const SYSTEM_PROMPT =
-  "You are a helpful assistant. Answer in rich Markdown — use headings, lists, " +
-  "tables, fenced code blocks with language tags, blockquotes, and LaTeX math " +
-  "($…$ inline, $$…$$ display) where it helps. Be substantive but not padded.";
+  "You are a helpful assistant. Reply in clean GitHub-Flavored Markdown. Put a " +
+  "blank line between every block — headings, paragraphs, lists, tables, and code " +
+  "fences. Open a fenced code block on its own line as ```lang followed by a " +
+  "newline, and close it with ``` on its own line. Use $…$ for inline math and " +
+  "$$…$$ on their own lines for display math. Be substantive, not padded.";
 
 const EXAMPLES = [
   "Explain how a streaming markdown parser stays O(n), with a Rust code sketch.",
@@ -48,6 +50,43 @@ export function Chat() {
   }, [busy, scrollToBottom]);
 
   useLayoutEffect(scrollToBottom, [turns.length, scrollToBottom]);
+
+  // flux-md emits KaTeX-ready markup (`<span|div class="math …">LaTeX</span|div>`)
+  // and stays zero-dep; the demo brings KaTeX (loaded from CDN in index.html) and
+  // typesets each math element once its block has closed (open blocks hold partial
+  // LaTeX, so we skip anything still inside a streaming block).
+  useEffect(() => {
+    const root = scrollerRef.current;
+    if (!root) return;
+    let retry = 0;
+    const pass = () => {
+      const katex = (window as unknown as { katex?: any }).katex;
+      if (!katex) {
+        retry = window.setTimeout(pass, 200);
+        return;
+      }
+      root.querySelectorAll<HTMLElement>(".math:not([data-tex])").forEach((el) => {
+        if (el.closest(".flux-streaming, .flux-open")) return; // still streaming
+        el.setAttribute("data-tex", "1");
+        try {
+          katex.render(el.textContent ?? "", el, {
+            displayMode: el.classList.contains("math-display"),
+            throwOnError: false,
+            output: "html",
+          });
+        } catch {
+          /* leave the raw LaTeX in place */
+        }
+      });
+    };
+    const obs = new MutationObserver(() => pass());
+    obs.observe(root, { childList: true, subtree: true });
+    pass();
+    return () => {
+      obs.disconnect();
+      if (retry) clearTimeout(retry);
+    };
+  }, []);
 
   const onScroll = useCallback(() => {
     const el = scrollerRef.current;
