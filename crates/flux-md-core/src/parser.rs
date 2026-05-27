@@ -114,6 +114,14 @@ pub struct StreamParser {
     gfm_footnotes: bool,
     gfm_math: bool,
     dir_auto: bool,
+    /// Opt-in allowlist of custom "component" tag names (e.g. `Thinking`,
+    /// `Callout`). A `<Tag>…</Tag>` whose name is listed is parsed as a container
+    /// whose inner content is markdown, and dispatched to a React component —
+    /// safely, without `unsafe_html`. Empty by default (no component tags).
+    // Read by the scanner once component-tag parsing lands (next increment); the
+    // config + threading decision (parser-field, not ScanCtx) is in place now.
+    #[allow(dead_code)]
+    component_tags: Vec<Box<str>>,
     /// Fast path for a long open code/math fence at the tail (see [`FenceCache`]).
     fence_cache: Option<FenceCache>,
     /// Fast path for a long open paragraph at the tail (see [`ParagraphCache`]).
@@ -216,6 +224,7 @@ impl StreamParser {
             gfm_footnotes: false,
             gfm_math: false,
             dir_auto: false,
+            component_tags: Vec::new(),
             fence_cache: None,
             para_cache: None,
         }
@@ -292,6 +301,18 @@ impl StreamParser {
 
     pub fn set_dir_auto(&mut self, on: bool) {
         self.dir_auto = on;
+    }
+
+    /// Set the opt-in component-tag allowlist (e.g. `["Thinking", "Callout"]`).
+    /// A `<Tag>…</Tag>` whose name is listed renders as a component with markdown
+    /// inner content. Names are matched exactly (case-sensitively). Empty = off.
+    pub fn with_component_tags(mut self, tags: Vec<String>) -> Self {
+        self.component_tags = tags.into_iter().map(String::into_boxed_str).collect();
+        self
+    }
+
+    pub fn set_component_tags(&mut self, tags: Vec<String>) {
+        self.component_tags = tags.into_iter().map(String::into_boxed_str).collect();
     }
 
     pub fn set_unsafe_html(&mut self, on: bool) {
@@ -1268,5 +1289,15 @@ mod tests {
             p.append(ch.encode_utf8(&mut buf));
         }
         assert!(p.fence_cache.is_some(), "math-fence cache should arm for an open $$ block");
+    }
+
+    #[test]
+    fn component_tags_config_is_stored() {
+        let p = StreamParser::new().with_component_tags(vec!["Thinking".into(), "Callout".into()]);
+        assert_eq!(p.component_tags.len(), 2);
+        assert_eq!(&*p.component_tags[0], "Thinking");
+        assert_eq!(&*p.component_tags[1], "Callout");
+        // Default is empty (feature off).
+        assert!(StreamParser::new().component_tags.is_empty());
     }
 }
