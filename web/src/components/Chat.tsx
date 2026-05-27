@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { FluxClient, FluxMarkdown } from "flux-md";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { FluxClient, FluxMarkdown, type Components } from "flux-md";
 import { streamChat, type ChatMessage } from "../streaming/openai";
 
 interface Turn {
@@ -17,7 +17,9 @@ const SYSTEM_PROMPT =
   "blank line between every block — headings, paragraphs, lists, tables, and code " +
   "fences. Open a fenced code block on its own line as ```lang followed by a " +
   "newline, and close it with ``` on its own line. Use $…$ for inline math and " +
-  "$$…$$ on their own lines for display math. Be substantive, not padded.";
+  "$$…$$ on their own lines for display math. If the user explicitly asks for " +
+  "HTML, you may reply with raw HTML markup; otherwise use Markdown. Be " +
+  "substantive, not padded.";
 
 const EXAMPLES = [
   "Explain how a streaming markdown parser stays O(n), with a Rust code sketch.",
@@ -35,6 +37,10 @@ export function Chat() {
   const taRef = useRef<HTMLTextAreaElement>(null);
   // Whether the view is pinned to the bottom (released when the user scrolls up).
   const stickRef = useRef(true);
+  // Supplying a (stable) components map routes closed blocks through the
+  // sanitizing htmlToReact path — needed since unsafeHtml is on, so the model's
+  // raw HTML renders with on* handlers dropped and URL schemes filtered.
+  const components = useMemo<Components>(() => ({}), []);
 
   const scrollToBottom = useCallback(() => {
     const el = scrollerRef.current;
@@ -116,7 +122,10 @@ export function Chat() {
         { role: "user", content: text },
       ];
 
-      const client = new FluxClient({ config: { gfmMath: true } });
+      // unsafeHtml lets the model's HTML render (e.g. "give me the result in
+      // HTML"); closed blocks go through htmlToReact (see `components` below),
+      // which strips on* handlers and neutralizes dangerous URL schemes.
+      const client = new FluxClient({ config: { gfmMath: true, unsafeHtml: true } });
       const userTurn: Turn = { id: nextId.current++, role: "user", text, done: true };
       const aiTurn: Turn = { id: nextId.current++, role: "assistant", text: "", client, done: false };
       setTurns((prev) => [...prev, userTurn, aiTurn]);
@@ -222,7 +231,7 @@ export function Chat() {
                 <div className="msg msg-ai" key={t.id}>
                   <div className="ai-mark">⚡</div>
                   <div className="ai-body">
-                    {t.client && <FluxMarkdown client={t.client} />}
+                    {t.client && <FluxMarkdown client={t.client} components={components} />}
                   </div>
                 </div>
               ),
