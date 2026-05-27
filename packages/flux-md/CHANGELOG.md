@@ -6,6 +6,17 @@ Notable changes to flux-md. Format based on
 
 ## Unreleased
 
+### Fixed
+
+- **Streaming GFM tables now render incrementally.** A table no longer waits for
+  the whole block to arrive: the header renders the moment the delimiter row
+  (`|---|`) streams in, and each body row appends as it arrives. Previously the
+  incremental paragraph fast-path kept extending the header line as a paragraph
+  and only formed the table on a full reparse, so a streaming table appeared all
+  at once. The fast-path now bails (like it does for a setext underline) when a
+  delimiter row forms a table with its preceding header. Output is unchanged for
+  one-shot parsing; streamed output now matches one-shot at every prefix.
+
 ### Added
 
 - **`<FluxMarkdown sanitize={fn} />`** — an optional HTML sanitizer hook. When

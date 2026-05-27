@@ -805,7 +805,7 @@ fn scan_table(bytes: &[u8], start: usize, ctx: ScanCtx<'_>) -> Option<RawBlock> 
 
 /// Count the cells in a table row: unescaped `|` separators (+1), after
 /// dropping one optional leading and trailing pipe.
-fn count_table_columns(line: &[u8]) -> usize {
+pub(crate) fn count_table_columns(line: &[u8]) -> usize {
     // Trim trailing newline and surrounding whitespace.
     let mut end = line.len();
     while end > 0 && matches!(line[end - 1], b'\n' | b'\r' | b' ' | b'\t') {
@@ -839,7 +839,7 @@ fn count_table_columns(line: &[u8]) -> usize {
     cells
 }
 
-fn is_table_delimiter_row(line: &[u8]) -> bool {
+pub(crate) fn is_table_delimiter_row(line: &[u8]) -> bool {
     let mut saw_dash = false;
     let mut saw_pipe = false;
     for &b in line {
