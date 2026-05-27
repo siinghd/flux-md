@@ -1,6 +1,7 @@
 //! Incremental streaming parser.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::blocks::Block;
 use crate::render::{
@@ -99,7 +100,10 @@ pub struct StreamParser {
     /// are permanent (first definition wins, §4.7). Definitions in the still
     /// growing tail are recomputed fresh on every reparse so a partially typed
     /// definition (e.g. a URL mid-stream) never gets locked in.
-    committed_refs: HashMap<String, LinkRef>,
+    // `Rc` so each reparse shares the committed table with `RenderOpts` in O(1)
+    // instead of cloning it per append (mutated in place via `Rc::make_mut` once
+    // the render's `Rc` clone has been dropped — see `reparse_tail`).
+    committed_refs: Rc<HashMap<String, LinkRef>>,
     /// Footnote numbering/defs from the *committed* region (permanent), mirroring
     /// `committed_refs`. `next_footnote` is the next number to assign; the tail
     /// continues from here so committed `<sup>N</sup>` numbers stay stable.
@@ -211,7 +215,7 @@ impl StreamParser {
             active_blocks: Vec::new(),
             next_id: 0,
             finalized: false,
-            committed_refs: HashMap::new(),
+            committed_refs: Rc::new(HashMap::new()),
             committed_footnotes: HashMap::new(),
             committed_footnote_defs: HashMap::new(),
             committed_footnote_occurrences: HashMap::new(),
@@ -370,12 +374,14 @@ impl StreamParser {
         let ctx = ScanCtx { math: self.gfm_math, component_tags: &self.component_tags };
         let raw_blocks = scan(tail, ctx);
 
-        // Pre-pass: build the ref table for this render. Permanent definitions
-        // from the committed region win (first-definition-wins); definitions in
-        // the tail are layered on top, recomputed fresh each reparse so a
-        // half-typed definition in the growing tail can't get stuck.
-        let mut refs = self.committed_refs.clone();
-        collect_refs(tail, &mut refs, ctx);
+        // Pre-pass: build the ref table for this render. The committed table is
+        // shared into opts by an O(1) `Rc` clone (never copied per append);
+        // tail definitions are collected fresh each reparse (so a half-typed
+        // definition in the growing tail can't get stuck). Committed wins at
+        // lookup time (first-definition-wins).
+        let committed_refs = Rc::clone(&self.committed_refs);
+        let mut tail_refs = HashMap::new();
+        collect_refs(tail, &mut tail_refs, ctx);
 
         // Renderable blocks: skip link-ref defs (no output) and, when footnotes
         // are on, footnote definitions (collected into the section instead).
@@ -400,10 +406,8 @@ impl StreamParser {
 
         let opts = RenderOpts {
             unsafe_html: self.unsafe_html,
-            // Move the freshly-built ref table into opts — it isn't used again
-            // in this reparse, so cloning it (a full HashMap copy on every
-            // append) was pure waste, O(refs) per chunk for ref-heavy docs.
-            refs,
+            committed_refs,
+            tail_refs,
             in_link: false,
             gfm_autolinks: self.gfm_autolinks,
             gfm_alerts: self.gfm_alerts,
@@ -565,12 +569,13 @@ impl StreamParser {
             0
         };
         if last_raw_end_to_commit > 0 {
-            // The region [tail_start, new offset) just became permanent — fold
-            // its (now-stable) ref + footnote definitions into the committed
-            // tables, and lock in footnote numbers (so committed <sup>N</sup>
-            // values never shift as the tail grows).
+            // The region [tail_start, new offset) just became permanent — fold its
+            // (now-stable) footnote definitions into the committed tables and lock
+            // in footnote numbers. The *link-ref* fold is deferred to the end of
+            // this method: it mutates `committed_refs` via `Rc::make_mut`, which
+            // must run after `opts` (which holds the shared `Rc` clone) is dropped,
+            // so the table is mutated in place rather than copied.
             let committed_slice = &self.buffer[tail_start..tail_start + last_raw_end_to_commit];
-            collect_refs(committed_slice, &mut self.committed_refs, ctx);
             if gfm_footnotes {
                 collect_footnote_refs(
                     committed_slice,
@@ -644,6 +649,20 @@ impl StreamParser {
                     _ => {}
                 }
             }
+        }
+
+        // Fold the just-committed link-ref definitions into the permanent table.
+        // Deferred to here so `opts`'s shared `Rc` clone is dropped first — then
+        // `Rc::make_mut` mutates the committed table in place (no per-append copy).
+        drop(opts);
+        if last_raw_end_to_commit > 0 {
+            let committed_slice = &self.buffer[tail_start..tail_start + last_raw_end_to_commit];
+            // The fold must mutate in place (no copy) to stay O(n): `opts` (the
+            // only other `Rc` holder) was just dropped, so the count is 1. If a
+            // future change stashes a clone of the committed table, this fires in
+            // tests before the silent O(n²) regression ships.
+            debug_assert_eq!(Rc::strong_count(&self.committed_refs), 1);
+            collect_refs(committed_slice, Rc::make_mut(&mut self.committed_refs), ctx);
         }
 
         Patch { newly_committed, active: new_active }
@@ -757,7 +776,10 @@ impl StreamParser {
         }
         RenderOpts {
             unsafe_html: self.unsafe_html,
-            refs: self.committed_refs.clone(),
+            // O(1) Rc share of the committed table; an open paragraph defines no
+            // refs of its own, so there are no tail refs to layer.
+            committed_refs: Rc::clone(&self.committed_refs),
+            tail_refs: HashMap::new(),
             in_link: false,
             gfm_autolinks: self.gfm_autolinks,
             gfm_alerts: self.gfm_alerts,

@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::blocks::{AlertKind, BlockKind};
 use crate::inline::render_inline;
@@ -25,7 +26,13 @@ pub struct LinkRef {
 #[derive(Clone, Default, Debug)]
 pub struct RenderOpts {
     pub unsafe_html: bool,
-    pub refs: HashMap<String, LinkRef>,
+    /// Link-reference table, split in two so the streaming parser never clones
+    /// the (growing) committed table per append: `committed_refs` is a shared
+    /// snapshot of the permanent definitions (cheap `Rc` clone, O(1)); `tail_refs`
+    /// holds the definitions in the current uncommitted tail. Lookups check
+    /// committed first (first-definition-wins), then the tail.
+    pub committed_refs: Rc<HashMap<String, LinkRef>>,
+    pub tail_refs: HashMap<String, LinkRef>,
     /// Set by the link/image renderer when recursing into link text. While
     /// true, the inline parser will not recognize nested `[...]` links
     /// (CommonMark disallows nested links).
@@ -66,7 +73,9 @@ pub struct RenderOpts {
 
 impl RenderOpts {
     pub fn lookup(&self, label: &str) -> Option<&LinkRef> {
-        self.refs.get(&normalize_label(label))
+        let key = normalize_label(label);
+        // Committed (permanent) definitions win over tail ones — first-wins.
+        self.committed_refs.get(&key).or_else(|| self.tail_refs.get(&key))
     }
 
     /// Scanner feature flags derived from these render options, so sub-blocks

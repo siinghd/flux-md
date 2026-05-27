@@ -4,6 +4,19 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Performance
+
+- A document with a very large number of link-reference definitions is now O(n)
+  instead of O(n²). The committed reference table was cloned on every append
+  (O(refs) per chunk); it's now shared into each render via an `Rc` (O(1)) with a
+  two-level lookup (committed, then the uncommitted tail), and folded in place
+  via `Rc::make_mut` once the render's clone is dropped. A 235 KB
+  reference-definition stream at 16-byte chunks: **~1,395 ms → ~53 ms** (~26×).
+  This was the last remaining O(n²) streaming shape — every realistic shape is
+  now O(n). Output is unchanged.
+
 ## 0.5.0 — 2026-05-27
 
 ### Fixed
