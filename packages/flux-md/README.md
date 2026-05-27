@@ -247,8 +247,12 @@ wrap it in your own element:
 />
 ```
 
-With no override, the component renders as `<thinking …>…</thinking>` HTML.
-Tag names match case-sensitively; the feature is off unless `componentTags` is set.
+With no override, the component renders as `<thinking …>…</thinking>` HTML. The
+override's `html` is the inner content only; `attrs` keys are React-form
+(`class`→`className`, `for`→`htmlFor`) so `{...attrs}` spreads cleanly. While the
+component is still streaming, `html` is the partial inner content and re-renders
+as more arrives. Tag names match case-sensitively; the feature is off unless
+`componentTags` is set.
 
 ### Types
 

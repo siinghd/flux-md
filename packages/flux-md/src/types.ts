@@ -63,7 +63,12 @@ export interface BlockComponentProps {
   language?: string;
   /** Component tag name — present for `Component` blocks (from `kind.data.tag`). */
   tag?: string;
-  /** Sanitized attributes — present for `Component` blocks (from `kind.data.attrs`). */
+  /**
+   * Sanitized attributes — present for `Component` blocks. Names are React-form
+   * (`class`→`className`, `for`→`htmlFor`) so `{...attrs}` spreads cleanly onto
+   * an element. For `Component` blocks, `html` is the **inner** rendered-markdown
+   * HTML (not the `<tag>…</tag>` wrapper), so an override can wrap it itself.
+   */
   attrs?: Record<string, string>;
 }
 

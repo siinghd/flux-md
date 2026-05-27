@@ -121,6 +121,31 @@ fn streaming_converges_to_one_shot() {
 }
 
 #[test]
+fn streaming_open_tag_with_quoted_gt_in_attr() {
+    // The open tag's `>` lives inside a quoted attr value; streaming char-by-char
+    // must not mistake it for the tag end, must converge, and must never orphan.
+    let md = "<Callout title=\"a > b\" type=\"x\">\nbody **md**\n</Callout>\n";
+    assert_eq!(render_streamed(md, &["Callout"]), render(md, &["Callout"]), "must converge");
+    let mut p = StreamParser::new().with_component_tags(vec!["Callout".to_string()]);
+    let mut buf = [0u8; 4];
+    for ch in md.chars() {
+        p.append(ch.encode_utf8(&mut buf));
+        let blocks: Vec<_> = p.all_blocks().collect();
+        let mut last_end = 0usize;
+        let mut ids = std::collections::HashSet::new();
+        for b in &blocks {
+            assert!(b.start >= last_end, "overlap/disorder mid-stream");
+            assert!(ids.insert(b.id), "duplicate id mid-stream");
+            last_end = b.end;
+        }
+    }
+    p.finalize();
+    let out = collect(&p);
+    assert!(out.contains("title=\"a &gt; b\""), "quoted `>` preserved + escaped: {out}");
+    assert!(out.contains("<strong>md</strong>"), "inner markdown renders: {out}");
+}
+
+#[test]
 fn streaming_has_no_orphan_blocks() {
     let md = "intro\n\n<Thinking>\nbody **one**\nbody two\n</Thinking>\nafter\n";
     let mut p = StreamParser::new().with_component_tags(vec!["Thinking".to_string()]);

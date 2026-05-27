@@ -127,12 +127,25 @@ function blockKindProps(block: Block): BlockComponentProps {
     props.text = decodeMathText(block.html);
   } else if (block.kind.type === "Component") {
     props.tag = data?.tag ?? "";
-    props.attrs = Object.fromEntries(data?.attrs ?? []);
+    // React-form attribute names, so `{...attrs}` spreads cleanly onto an element
+    // (HTML `class`/`for` → React `className`/`htmlFor`).
+    props.attrs = reactAttrs(data?.attrs ?? []);
     // An override replaces the `<tag>` wrapper, so it gets the *inner* HTML
     // (markdown already rendered) rather than the full wrapped block.
     props.html = componentInnerHtml(block.html, props.tag);
   }
   return props;
+}
+
+const REACT_ATTR_NAME: Record<string, string> = { class: "className", for: "htmlFor" };
+
+/** Convert sanitized HTML attribute pairs into a React-spreadable object,
+ *  renaming the two names React requires (`class`→`className`, `for`→`htmlFor`).
+ *  Other names (including `data-*` / `aria-*`) pass through unchanged. */
+function reactAttrs(pairs: [string, string][]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of pairs) out[REACT_ATTR_NAME[k] ?? k] = v;
+  return out;
 }
 
 /** Strip the `<tag …>` open and trailing `</tag>` from a component block's HTML,

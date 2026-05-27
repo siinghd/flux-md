@@ -349,6 +349,15 @@ mod attr_tests {
     }
 
     #[test]
+    fn quoted_value_with_special_chars() {
+        // A `>` inside a quoted value must not terminate attribute parsing early,
+        // and entities in the value are decoded.
+        let a = sanitize_attrs("<X title=\"a > b &amp; c\" type=ok>");
+        assert_eq!(get(&a, "title"), Some("a > b & c"));
+        assert_eq!(get(&a, "type"), Some("ok"), "attr after a quoted `>` still parses");
+    }
+
+    #[test]
     fn malformed_input_never_panics() {
         for s in [
             "<X", "<X ", "<X =", "<X = =", "<X a=", "<X a=\"unclosed",
