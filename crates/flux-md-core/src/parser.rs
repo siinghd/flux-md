@@ -1007,21 +1007,28 @@ fn paragraph_ends_before_eof(bytes: &[u8], cut: usize, ctx: ScanCtx) -> bool {
             pos += 1;
         }
     }
-    // Track the previous line's start so we can spot a paragraph turning into a
-    // GFM table — a `|---|` delimiter row under a matching header line. Like a
-    // setext underline, that retroactively changes the block's kind, so the
-    // incremental paragraph fast-path must bail and let the full scan re-form it
-    // as a table (which then streams its rows incrementally).
-    let mut prev = prev_line_start(bytes, pos);
+    // Spot a paragraph turning into a GFM table — a `|---|` delimiter row under a
+    // matching header line. Like a setext underline, that retroactively changes
+    // the block's kind, so the fast-path must bail and let the full scan re-form
+    // it as a table (which then streams its rows incrementally). Track the
+    // previous line forward so the check is O(1) per line; only a delimiter row
+    // ever consults the header (rare), so a plain (single-line) paragraph pays
+    // nothing — no per-append backward scan.
+    let mut prev: Option<usize> = None;
     while pos < len {
         if is_blank_line(bytes, pos)
             || is_setext_underline(bytes, pos).is_some()
             || would_start_other_block(bytes, pos, ctx)
-            || forms_table_header(bytes, prev, pos)
         {
             return true;
         }
-        prev = pos;
+        if is_table_delimiter_row(line_slice(bytes, pos)) {
+            let header = prev.unwrap_or_else(|| prev_line_start(bytes, pos));
+            if header != pos && forms_table_header(bytes, header, pos) {
+                return true;
+            }
+        }
+        prev = Some(pos);
         pos = line_end(bytes, pos);
     }
     false
@@ -1039,16 +1046,12 @@ fn prev_line_start(bytes: &[u8], pos: usize) -> usize {
     s
 }
 
-/// True if the line at `header` followed by the line at `delim` forms a GFM table
-/// (header has a `|`, delim is a delimiter row, and their column counts match) —
-/// mirrors the gate in `scan_table`.
+/// True if the line at `header` followed by the delimiter line at `delim` forms a
+/// GFM table (header has a `|` and their column counts match) — mirrors the gate
+/// in `scan_table`. Caller has already confirmed `delim` is a delimiter row.
 fn forms_table_header(bytes: &[u8], header: usize, delim: usize) -> bool {
-    if header == delim {
-        return false;
-    }
     let h = line_slice(bytes, header);
-    let d = line_slice(bytes, delim);
-    h.contains(&b'|') && is_table_delimiter_row(d) && count_table_columns(h) == count_table_columns(d)
+    h.contains(&b'|') && count_table_columns(h) == count_table_columns(line_slice(bytes, delim))
 }
 
 impl Default for StreamParser {

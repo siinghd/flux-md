@@ -54,6 +54,19 @@ fn big_math(target: usize) -> String {
     s
 }
 
+// One huge GFM table streamed row-by-row — now that tables render incrementally,
+// this is the shape to watch for an O(n²) re-render-all-rows-per-append cost.
+fn big_table(target: usize) -> String {
+    let mut s = String::with_capacity(target + 32);
+    s.push_str("| Name | Age | City | Score |\n| --- | --- | --- | --- |\n");
+    let mut i = 0;
+    while s.len() < target {
+        s.push_str(&format!("| Person {i} | {} | Town {i} | {} |\n", 20 + (i % 60), i * 7 % 1000));
+        i += 1;
+    }
+    s
+}
+
 fn ref_heavy(n: usize) -> String {
     let mut s = String::new();
     for i in 0..n {
@@ -160,6 +173,7 @@ fn main() {
     let mathblk = big_math(200_000);
     let para = long_paragraph(200_000);
     let emph = emphasis_paragraph(200_000);
+    let table = big_table(200_000);
 
     // Small chunks = many appends = many tail re-parses (the demanding case).
     for &chunk in &[16usize, 256] {
@@ -167,6 +181,7 @@ fn main() {
         bench("big_code", &code, chunk, false);
         bench("long_paragraph", &para, chunk, false);
         bench("emphasis_para", &emph, chunk, false);
+        bench("big_table", &table, chunk, false);
         bench("ref_heavy", &refs, chunk, false);
         bench("math", &math, chunk, true);
         bench("big_math", &mathblk, chunk, true);
