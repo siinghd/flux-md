@@ -4,7 +4,7 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.5.0 — 2026-05-27
 
 ### Fixed
 
