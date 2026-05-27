@@ -639,19 +639,23 @@ impl StreamParser {
         if partial.contains(&b'\r') || is_fence_close_line(partial) {
             return None;
         }
-        let mut body = cache.escaped_lines.clone();
-        if !partial.is_empty() {
-            if !body.is_empty() {
-                body.push('\n');
-            }
-            escape_html(std::str::from_utf8(partial).unwrap_or(""), &mut body);
-        }
-        if !body.is_empty() {
-            body.push('\n');
-        }
-        let mut html = String::with_capacity(cache.opener_html.len() + body.len() + 16);
+        // Assemble the block HTML directly from the cached pieces — no clone of
+        // the (growing) escaped body. Output is byte-identical to opening +
+        // body[+ "\n" + escaped(partial)] + "\n" + close.
+        let mut html =
+            String::with_capacity(cache.opener_html.len() + cache.escaped_lines.len() + partial.len() + 32);
         html.push_str(&cache.opener_html);
-        html.push_str(&body);
+        html.push_str(&cache.escaped_lines);
+        let lines_nonempty = !cache.escaped_lines.is_empty();
+        if !partial.is_empty() {
+            if lines_nonempty {
+                html.push('\n');
+            }
+            escape_html(std::str::from_utf8(partial).unwrap_or(""), &mut html);
+        }
+        if lines_nonempty || !partial.is_empty() {
+            html.push('\n');
+        }
         html.push_str("</code></pre>");
         let block = Block {
             id: cache.id,
