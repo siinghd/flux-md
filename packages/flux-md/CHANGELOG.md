@@ -4,6 +4,16 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.3.2 — 2026-05-27
+
+### Documentation
+
+- Rewrote the README to describe flux-md on its own terms and removed all
+  references to and comparisons with other libraries. No code changes — the
+  published API and behavior are identical to 0.3.1.
+- Fixed the React quick-start example: import `useEffect` and guard the async
+  append loop so it can't run after unmount or a stream change.
+
 ## 0.3.1 — 2026-05-27
 
 ### Performance
