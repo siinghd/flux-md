@@ -8,14 +8,21 @@ Notable changes to flux-md. Format based on
 
 ### Performance
 
-- Streaming a long unbroken **plain** paragraph is now O(n) instead of O(n²): the
-  open paragraph caches its committed plain prefix and re-renders only the short
-  active tail. Measured on a 200 KB single paragraph — **34,167 ms → ~130 ms** at
-  16-byte chunks (~260×). Output is byte-identical. A paragraph whose inline
-  constructs (emphasis, code spans, links, inline math) begin *early* can't cache
-  its prefix past the first construct and still degrades to O(n²) — that prefix
-  isn't stable (a late `*` re-emphasizes earlier text); breaking the text into
-  paragraphs avoids it.
+- Streaming a long unbroken paragraph is now O(n) instead of O(n²) — including
+  paragraphs **dense with inline constructs** (emphasis, code spans, links,
+  inline math), not just plain text. The open paragraph commits its settled
+  prefix and re-renders only the short active tail. Because inline output isn't
+  prefix-stable (a late `*` re-emphasizes earlier text, a late backtick opens a
+  code span), the stable boundary is computed inside the inline renderer itself:
+  it tracks unmatched openers, unpaired forward-pairable emphasis, and resolved
+  emphasis spans, and commits only up to the largest provably-final cut. Output
+  is byte-identical. Measured on 200 KB single paragraphs at 16-byte chunks:
+  plain **34,167 ms → ~130 ms** (~260×); emphasis-rich **60,569 ms → ~157 ms**
+  (~386×).
+- The open-code-fence fast path no longer clones the accumulated escaped body on
+  every append; it assembles the block HTML directly from the cached pieces,
+  dropping one full O(body) copy per append. A 200 KB fence streams in **~82 ms**
+  at 16-byte chunks (was ~154 ms, ~1.9×). Output is byte-identical.
 
 ## 0.3.0
 
