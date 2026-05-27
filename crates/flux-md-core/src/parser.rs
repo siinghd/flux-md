@@ -118,9 +118,6 @@ pub struct StreamParser {
     /// `Callout`). A `<Tag>…</Tag>` whose name is listed is parsed as a container
     /// whose inner content is markdown, and dispatched to a React component —
     /// safely, without `unsafe_html`. Empty by default (no component tags).
-    // Read by the scanner once component-tag parsing lands (next increment); the
-    // config + threading decision (parser-field, not ScanCtx) is in place now.
-    #[allow(dead_code)]
     component_tags: Vec<Box<str>>,
     /// Fast path for a long open code/math fence at the tail (see [`FenceCache`]).
     fence_cache: Option<FenceCache>,
@@ -369,7 +366,7 @@ impl StreamParser {
         let tail_start = self.committed_offset;
         let tail = &self.buffer[tail_start..];
 
-        let ctx = ScanCtx { math: self.gfm_math };
+        let ctx = ScanCtx { math: self.gfm_math, component_tags: &self.component_tags };
         let raw_blocks = scan(tail, ctx);
 
         // Pre-pass: build the ref table for this render. Permanent definitions
@@ -416,6 +413,7 @@ impl StreamParser {
             // Seed the per-label occurrence counter from the committed counts so
             // ref ids stay unique across the commit boundary.
             footnote_occ: std::cell::RefCell::new(self.committed_footnote_occurrences.clone()),
+            component_tags: self.component_tags.clone(),
         };
 
         let mut produced: Vec<Block> = Vec::with_capacity(renderable.len());
@@ -450,6 +448,7 @@ impl StreamParser {
                 b.kind,
                 RawBlockKind::CodeFence { terminated: false, .. }
                     | RawBlockKind::MathFence { terminated: false }
+                    | RawBlockKind::ComponentBlock { terminated: false, .. }
             )
         });
         // A trailing list, block quote, indented code, or open HTML block can
@@ -766,6 +765,7 @@ impl StreamParser {
             gfm_footnotes: self.gfm_footnotes,
             footnotes,
             footnote_occ: std::cell::RefCell::new(self.committed_footnote_occurrences.clone()),
+            component_tags: self.component_tags.clone(),
         }
     }
 
@@ -775,7 +775,7 @@ impl StreamParser {
     /// is no longer the sole tail block — the full reparse then handles it.
     fn try_incremental_paragraph(&mut self) -> Option<Patch> {
         let mut cache = self.para_cache.take()?;
-        let ctx = ScanCtx { math: self.gfm_math };
+        let ctx = ScanCtx { math: self.gfm_math, component_tags: &self.component_tags };
         let bytes = self.buffer.as_bytes();
         let len = bytes.len();
         // The paragraph must still be the tail (only whitespace before it) and

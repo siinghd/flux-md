@@ -8,10 +8,10 @@ use std::collections::HashMap;
 use crate::blocks::{AlertKind, BlockKind};
 use crate::inline::render_inline;
 use crate::scanner::{
-    indent_cols, is_blank_line, line_end, line_slice, scan, scan_marker, RawBlock, RawBlockKind,
-    ScanCtx,
+    component_inner_range, indent_cols, is_blank_line, line_end, line_slice, scan, scan_marker,
+    RawBlock, RawBlockKind, ScanCtx,
 };
-use crate::url::{escape_attr, escape_html};
+use crate::url::{escape_attr, escape_html, sanitize_attrs};
 
 #[derive(Clone, Default, Debug)]
 pub struct LinkRef {
@@ -59,6 +59,9 @@ pub struct RenderOpts {
     /// through every render_inline caller) is far more invasive. Seeded from
     /// the committed occurrence counts so ids stay unique across the stream.
     pub footnote_occ: RefCell<HashMap<String, usize>>,
+    /// Opt-in component-tag allowlist, carried so recursive sub-block scans
+    /// (inside lists/quotes/components) recognize nested component tags too.
+    pub component_tags: Vec<Box<str>>,
 }
 
 impl RenderOpts {
@@ -67,10 +70,10 @@ impl RenderOpts {
     }
 
     /// Scanner feature flags derived from these render options, so sub-blocks
-    /// (inside lists, block quotes, alerts) scan with the same feature set as
-    /// the top level.
-    pub(crate) fn scan_ctx(&self) -> ScanCtx {
-        ScanCtx { math: self.gfm_math }
+    /// (inside lists, block quotes, alerts, components) scan with the same
+    /// feature set as the top level.
+    pub(crate) fn scan_ctx(&self) -> ScanCtx<'_> {
+        ScanCtx { math: self.gfm_math, component_tags: &self.component_tags }
     }
 
     /// The ` dir="auto"` attribute (with a leading space) when bidi is on, else
@@ -167,6 +170,13 @@ pub fn classify(raw: &RawBlockKind, slice: &str, gfm_alerts: bool) -> BlockKind 
         RawBlockKind::Table => BlockKind::Table,
         RawBlockKind::HorizontalRule => BlockKind::Rule,
         RawBlockKind::HtmlBlock { .. } => BlockKind::Html,
+        RawBlockKind::ComponentBlock { tag, .. } => {
+            // Attributes are parsed + sanitized from the open tag for the JS layer
+            // (`components[tag]` receives them); the same sanitizer feeds the HTML
+            // wrapper in render_component.
+            let open = slice.trim_start_matches([' ', '\t']);
+            BlockKind::Component { tag: tag.clone(), attrs: sanitize_attrs(open) }
+        }
         RawBlockKind::LinkRefDefinition => BlockKind::Paragraph, // no output anyway
     }
 }
@@ -187,6 +197,9 @@ pub fn render_block(source: &str, raw: &RawBlock, opts: &RenderOpts, out: &mut S
         RawBlockKind::Table => render_table(slice, opts, out),
         RawBlockKind::HorizontalRule => out.push_str("<hr>"),
         RawBlockKind::HtmlBlock { .. } => render_html_block(slice, opts, out),
+        RawBlockKind::ComponentBlock { tag, terminated } => {
+            render_component(slice, tag, *terminated, opts, out)
+        }
         RawBlockKind::LinkRefDefinition => { /* no output */ }
     }
 }
@@ -1068,6 +1081,45 @@ fn render_html_block(slice: &str, opts: &RenderOpts, out: &mut String) {
         escape_html(slice, out);
         out.push_str("</code></pre>");
     }
+}
+
+/// Render an opt-in component tag (`<Tag …>…</Tag>`) as `<tag …>inner</tag>`,
+/// with the inner content parsed as markdown. The tag is allowlisted and its
+/// attributes are sanitized (event handlers dropped, dangerous URL schemes
+/// neutralized), so this is safe to emit even with `unsafe_html` off. The body
+/// is scanned + rendered like a blockquote/alert; nested allowlisted tags are
+/// recognized via `opts.scan_ctx()`.
+fn render_component(slice: &str, tag: &str, terminated: bool, opts: &RenderOpts, out: &mut String) {
+    let open = slice.trim_start_matches([' ', '\t']);
+    let attrs = sanitize_attrs(open);
+    let (open_end, inner_end) = component_inner_range(slice, tag, terminated);
+    let inner = slice.get(open_end..inner_end).unwrap_or("");
+
+    out.push('<');
+    out.push_str(tag);
+    for (k, v) in &attrs {
+        out.push(' ');
+        out.push_str(k);
+        out.push_str("=\"");
+        escape_attr(v, out);
+        out.push('"');
+    }
+    out.push('>');
+
+    let sub: Vec<_> = scan(inner, opts.scan_ctx())
+        .into_iter()
+        .filter(|b| !matches!(b.kind, RawBlockKind::LinkRefDefinition))
+        .collect();
+    if !sub.is_empty() {
+        out.push('\n');
+    }
+    for b in &sub {
+        render_block(inner, b, opts, out);
+        out.push('\n');
+    }
+    out.push_str("</");
+    out.push_str(tag);
+    out.push('>');
 }
 
 fn split_table_cells(line: &str) -> Vec<String> {

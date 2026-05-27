@@ -227,9 +227,6 @@ const URL_ATTRS: &[&str] = &[
 ///     dangerous scheme (`javascript:`, `data:text/html`, entity/backslash
 ///     obfuscations, …) becomes `#`;
 ///   - every other value is entity/backslash-decoded and kept verbatim.
-// Wired into component-tag rendering in a following increment; the security
-// logic + its adversarial tests are complete and stable now.
-#[allow(dead_code)]
 pub fn sanitize_attrs(open_tag: &str) -> Vec<(String, String)> {
     let bytes = open_tag.as_bytes();
     let mut i = 0;

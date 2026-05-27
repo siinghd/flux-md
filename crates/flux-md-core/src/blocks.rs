@@ -40,6 +40,11 @@ pub enum BlockKind {
     Table,
     Rule,
     Html,
+    /// An opt-in custom component tag (e.g. `<Thinking>…</Thinking>`) whose name
+    /// is in the configured allowlist. Its inner content is rendered as markdown.
+    /// `tag` is the element name; `attrs` are the sanitized (name, value) pairs.
+    /// Dispatched on the JS side via `components[tag]` (or `components.Component`).
+    Component { tag: String, attrs: Vec<(String, String)> },
 }
 
 /// The five GitHub alert keywords. Serializes to lowercase ("note", …).
@@ -105,6 +110,7 @@ impl BlockKind {
             BlockKind::Table => "Table",
             BlockKind::Rule => "Rule",
             BlockKind::Html => "Html",
+            BlockKind::Component { .. } => "Component",
         }
     }
 }

@@ -18,9 +18,13 @@ use core::ops::Range;
 /// `scan` and the paragraph-interruption checks. All-false by default, so the
 /// scanner's behavior is byte-for-byte unchanged unless a flag is enabled.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct ScanCtx {
+pub struct ScanCtx<'a> {
     /// Recognize `$$…$$` / `\[…\]` display-math fences as standalone blocks.
     pub math: bool,
+    /// Opt-in allowlist of custom component tag names (e.g. `Thinking`). A
+    /// `<Tag>…</Tag>` whose name is listed scans as a `ComponentBlock` whose body
+    /// is markdown. Empty (the default) means the feature is off.
+    pub component_tags: &'a [Box<str>],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +45,12 @@ pub enum RawBlockKind {
     /// open one is kept speculative by the streaming parser. Only produced when
     /// `ScanCtx::math` is set.
     MathFence { terminated: bool },
+    /// An opt-in custom component container (`<Tag …>…</Tag>`) whose name is in
+    /// `ScanCtx::component_tags`. The slice spans the open tag through the
+    /// matching close tag; the body is rendered as markdown. `terminated` is true
+    /// once the matching `</Tag>` line is seen (an open one stays speculative
+    /// while streaming, like a code fence). Self-closing `<Tag/>` is terminated.
+    ComponentBlock { tag: String, terminated: bool },
     /// Code block formed by 4+ space indentation, no fence markers.
     IndentedCode,
     /// List as a whole. Items have their own ranges.
@@ -67,7 +77,7 @@ pub struct RawBlock {
     pub range: Range<usize>,
 }
 
-pub fn scan(input: &str, ctx: ScanCtx) -> Vec<RawBlock> {
+pub fn scan(input: &str, ctx: ScanCtx<'_>) -> Vec<RawBlock> {
     let bytes = input.as_bytes();
     let mut pos = 0;
     let mut blocks = Vec::new();
@@ -94,6 +104,16 @@ pub fn scan(input: &str, ctx: ScanCtx) -> Vec<RawBlock> {
             pos = b.range.end;
             blocks.push(b);
             continue;
+        }
+        // Opt-in component tags take priority over generic HTML-block handling,
+        // so a `<Thinking>` in the allowlist becomes a markdown container rather
+        // than a raw type-7 HTML block.
+        if !ctx.component_tags.is_empty() {
+            if let Some(b) = scan_component_block(bytes, pos, ctx.component_tags) {
+                pos = b.range.end;
+                blocks.push(b);
+                continue;
+            }
         }
         if let Some(b) = scan_html_block(bytes, pos) {
             pos = b.range.end;
@@ -392,7 +412,7 @@ fn strip_container_markers(mut c: &[u8]) -> &[u8] {
     }
 }
 
-fn scan_blockquote(bytes: &[u8], start: usize, ctx: ScanCtx) -> Option<RawBlock> {
+fn scan_blockquote(bytes: &[u8], start: usize, ctx: ScanCtx<'_>) -> Option<RawBlock> {
     if !line_starts_with_marker(bytes, start, b'>') {
         return None;
     }
@@ -449,7 +469,7 @@ fn scan_blockquote(bytes: &[u8], start: usize, ctx: ScanCtx) -> Option<RawBlock>
     Some(RawBlock { kind: RawBlockKind::Blockquote, range: start..pos })
 }
 
-fn scan_list(bytes: &[u8], start: usize, ctx: ScanCtx) -> Option<RawBlock> {
+fn scan_list(bytes: &[u8], start: usize, ctx: ScanCtx<'_>) -> Option<RawBlock> {
     let first_line = line_slice(bytes, start);
     let first = scan_marker(first_line)?;
     let ordered = first.ordered;
@@ -751,7 +771,7 @@ pub(crate) fn indent_cols(line: &[u8]) -> usize {
     col
 }
 
-fn scan_table(bytes: &[u8], start: usize, ctx: ScanCtx) -> Option<RawBlock> {
+fn scan_table(bytes: &[u8], start: usize, ctx: ScanCtx<'_>) -> Option<RawBlock> {
     // Quick gate: needs `|` in the first line, AND second line must be a
     // delimiter row (`|---|---|` with optional alignment colons).
     let line = line_slice(bytes, start);
@@ -836,7 +856,7 @@ fn is_table_delimiter_row(line: &[u8]) -> bool {
     saw_dash && saw_pipe
 }
 
-fn scan_paragraph(bytes: &[u8], start: usize, ctx: ScanCtx) -> RawBlock {
+fn scan_paragraph(bytes: &[u8], start: usize, ctx: ScanCtx<'_>) -> RawBlock {
     let mut pos = line_end(bytes, start);
     while pos < bytes.len() {
         if is_blank_line(bytes, pos) {
@@ -1006,14 +1026,27 @@ fn line_starts_with_marker(bytes: &[u8], start: usize, marker: u8) -> bool {
     !body.is_empty() && body[0] == marker
 }
 
-pub(crate) fn would_start_other_block(bytes: &[u8], start: usize, ctx: ScanCtx) -> bool {
+pub(crate) fn would_start_other_block(bytes: &[u8], start: usize, ctx: ScanCtx<'_>) -> bool {
     scan_heading(bytes, start).is_some()
         || scan_fence(bytes, start).is_some()
         || (ctx.math && scan_math_block(bytes, start).is_some())
         || scan_hr(bytes, start).is_some()
         || scan_html_block_interrupting(bytes, start)
+        || line_starts_component(bytes, start, ctx.component_tags)
         || line_starts_with_marker(bytes, start, b'>')
         || marker_can_interrupt_paragraph(bytes, start)
+}
+
+/// An allowlisted component open tag at the line start interrupts a paragraph,
+/// so `text` followed by `<Thinking>` splits cleanly into a paragraph and a
+/// component (rather than the tag being absorbed as paragraph text).
+fn line_starts_component(bytes: &[u8], start: usize, tags: &[Box<str>]) -> bool {
+    if tags.is_empty() {
+        return false;
+    }
+    let line = line_slice(bytes, start);
+    let (indent, body) = strip_indent(line, 3);
+    indent <= 3 && component_open_tag(body, tags).is_some()
 }
 
 /// HTML blocks of types 1-6 can interrupt a paragraph; type 7 cannot.
@@ -1258,6 +1291,162 @@ fn scan_html_block(bytes: &[u8], start: usize) -> Option<RawBlock> {
         }
     }
     Some(RawBlock { kind: RawBlockKind::HtmlBlock { closed }, range: start..pos })
+}
+
+/// If `body` (a line with leading indent already stripped) begins with an
+/// allowlisted component open tag, return `(name, self_closing, end_in_body)`
+/// where `end_in_body` is just past the tag's `>`. `None` if it isn't an
+/// allowlisted open tag whose `>` is on this line (v1: single-line open tags).
+fn component_open_tag<'a>(body: &'a [u8], tags: &[Box<str>]) -> Option<(&'a [u8], bool, usize)> {
+    if body.first() != Some(&b'<') {
+        return None;
+    }
+    let name_start = 1;
+    let mut i = name_start;
+    while i < body.len() && (body[i].is_ascii_alphanumeric() || body[i] == b'-') {
+        i += 1;
+    }
+    if i == name_start {
+        return None;
+    }
+    let name = &body[name_start..i];
+    if !tags.iter().any(|t| t.as_bytes() == name) {
+        return None;
+    }
+    // Find the `>` that closes the open tag, tolerating quoted attribute values.
+    let mut in_quote = 0u8;
+    while i < body.len() {
+        let c = body[i];
+        if in_quote != 0 {
+            if c == in_quote {
+                in_quote = 0;
+            }
+        } else if c == b'"' || c == b'\'' {
+            in_quote = c;
+        } else if c == b'>' {
+            // Self-closing iff the last non-space byte before `>` is `/`.
+            let mut k = i;
+            while k > name_start && matches!(body[k - 1], b' ' | b'\t') {
+                k -= 1;
+            }
+            let self_closing = body[k - 1] == b'/';
+            return Some((name, self_closing, i + 1));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// True iff `body` (indent stripped) is exactly a `</name>` close tag followed by
+/// only whitespace — the content-aware "close line" (a `</name>` embedded in
+/// other text or a code span is not a clean close line, so it stays content).
+fn is_clean_close_tag(body: &[u8], name: &[u8]) -> bool {
+    let mut i = 0;
+    if !body.starts_with(b"</") {
+        return false;
+    }
+    i += 2;
+    if body.len() < i + name.len() || &body[i..i + name.len()] != name {
+        return false;
+    }
+    i += name.len();
+    if body.get(i) != Some(&b'>') {
+        return false;
+    }
+    i += 1;
+    body[i..].iter().all(|&b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+}
+
+/// Component container (`<Tag …>…</Tag>`) for an allowlisted `Tag`. The body is
+/// markdown (rendered recursively). Scans line-by-line for the matching close,
+/// tracking same-tag nesting depth and skipping code fences (so a `</Tag>` line
+/// inside a ``` block does not close). Blank-line tolerant. Self-closing
+/// `<Tag/>` is a terminated empty container.
+fn scan_component_block(bytes: &[u8], start: usize, tags: &[Box<str>]) -> Option<RawBlock> {
+    let line = line_slice(bytes, start);
+    let (indent, body) = strip_indent(line, 3);
+    if indent > 3 {
+        return None;
+    }
+    let (name, self_closing, _end) = component_open_tag(body, tags)?;
+    let tag = String::from_utf8_lossy(name).into_owned();
+    if self_closing {
+        return Some(RawBlock {
+            kind: RawBlockKind::ComponentBlock { tag, terminated: true },
+            range: start..line_end(bytes, start),
+        });
+    }
+    let mut depth = 1usize;
+    let mut pos = line_end(bytes, start);
+    let mut terminated = false;
+    let mut in_fence = false;
+    while pos < bytes.len() {
+        let l = line_slice(bytes, pos);
+        let (_ind, lb) = strip_indent(l, 3);
+        // A code fence delimiter line toggles fence state; inside a fence, tag
+        // lines are content (a `</Tag>` in a code block must not close).
+        if lb.starts_with(b"```") || lb.starts_with(b"~~~") {
+            in_fence = !in_fence;
+        } else if !in_fence {
+            if is_clean_close_tag(lb, name) {
+                depth -= 1;
+                if depth == 0 {
+                    pos = line_end(bytes, pos);
+                    terminated = true;
+                    break;
+                }
+            } else if let Some((n2, sc2, _)) = component_open_tag(lb, tags) {
+                if n2 == name && !sc2 {
+                    depth += 1; // same-tag nesting
+                }
+            }
+        }
+        pos = line_end(bytes, pos);
+    }
+    Some(RawBlock { kind: RawBlockKind::ComponentBlock { tag, terminated }, range: start..pos })
+}
+
+/// Byte range of a component block's inner (markdown) content within its own
+/// slice: from just past the open tag's `>` to the start of the matching close
+/// line (or the slice end if not terminated). Shares the scanner's line/indent
+/// and clean-close helpers so render and scan agree on the boundary. Returns
+/// `(open_end, inner_end)`.
+pub(crate) fn component_inner_range(slice: &str, tag: &str, terminated: bool) -> (usize, usize) {
+    let bytes = slice.as_bytes();
+    let line = line_slice(bytes, 0);
+    let (_indent, body) = strip_indent(line, 3);
+    let indent_len = line.len() - body.len();
+    // First unquoted `>` ends the open tag.
+    let mut open_end = slice.len();
+    let mut in_quote = 0u8;
+    for (i, &c) in body.iter().enumerate() {
+        if in_quote != 0 {
+            if c == in_quote {
+                in_quote = 0;
+            }
+        } else if c == b'"' || c == b'\'' {
+            in_quote = c;
+        } else if c == b'>' {
+            open_end = indent_len + i + 1;
+            break;
+        }
+    }
+    if !terminated {
+        return (open_end, slice.len().max(open_end));
+    }
+    // The matching close is the last clean `</tag>` line in the slice (any
+    // earlier close-looking line is nested or inside a fence and precedes it).
+    let mut inner_end = slice.len();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let l = line_slice(bytes, pos);
+        let (_i, lb) = strip_indent(l, 3);
+        if is_clean_close_tag(lb, tag.as_bytes()) {
+            inner_end = pos;
+        }
+        pos = line_end(bytes, pos);
+    }
+    (open_end.min(inner_end), inner_end)
 }
 
 fn line_contains_type1_close(line: &[u8]) -> bool {
