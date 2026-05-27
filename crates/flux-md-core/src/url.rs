@@ -203,3 +203,162 @@ pub fn sanitize_image_url(url: &str, out: &mut String) {
         out.push('#');
     }
 }
+
+/// Attribute names whose value is a URL and must pass the dangerous-scheme
+/// filter before it reaches the DOM.
+const URL_ATTRS: &[&str] = &[
+    "href", "src", "xlink:href", "action", "formaction", "poster", "data", "cite",
+    "background", "longdesc", "ping", "srcset",
+];
+
+/// Parse and sanitize the attributes of a component's opening tag, returning
+/// safe `(name, value)` pairs with **decoded** values — the HTML renderer escapes
+/// them once and a React layer can use them as-is (so this is the canonical,
+/// escape-free storage form). `open_tag` is the whole opening tag, e.g.
+/// `<Thinking type="info" onerror="x()">` (a trailing `/>` is fine).
+///
+/// Security policy (attributes are the real boundary for component tags, since
+/// the tag itself is allowlisted and the body is markdown):
+///   - the tag name is skipped; only attributes are returned;
+///   - an attribute name must be an ASCII letter then `[A-Za-z0-9_:.-]`, else it
+///     is dropped;
+///   - `on*` event-handler attributes are dropped (case-insensitive);
+///   - a URL-bearing attribute (`href`, `src`, …) whose **decoded** value has a
+///     dangerous scheme (`javascript:`, `data:text/html`, entity/backslash
+///     obfuscations, …) becomes `#`;
+///   - every other value is entity/backslash-decoded and kept verbatim.
+// Wired into component-tag rendering in a following increment; the security
+// logic + its adversarial tests are complete and stable now.
+#[allow(dead_code)]
+pub fn sanitize_attrs(open_tag: &str) -> Vec<(String, String)> {
+    let bytes = open_tag.as_bytes();
+    let mut i = 0;
+    if bytes.first() == Some(&b'<') {
+        i += 1;
+    }
+    // Skip the tag name (letters/digits/-/:).
+    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'-' | b':')) {
+        i += 1;
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    loop {
+        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b'>' {
+            break;
+        }
+        if bytes[i] == b'/' {
+            i += 1; // self-closing slash
+            continue;
+        }
+        // Attribute name.
+        if !bytes[i].is_ascii_alphabetic() {
+            i += 1; // malformed: make progress, never loop forever
+            continue;
+        }
+        let name_start = i;
+        while i < bytes.len()
+            && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'_' | b':' | b'.' | b'-'))
+        {
+            i += 1;
+        }
+        let name = &open_tag[name_start..i];
+        // Optional ` = value`.
+        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+            i += 1;
+        }
+        let mut raw_value = "";
+        if bytes.get(i) == Some(&b'=') {
+            i += 1;
+            while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+                i += 1;
+            }
+            if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+                let quote = bytes[i];
+                i += 1;
+                let vstart = i;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                raw_value = &open_tag[vstart..i];
+                if i < bytes.len() {
+                    i += 1; // closing quote
+                }
+            } else {
+                let vstart = i;
+                while i < bytes.len() && !matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'/') {
+                    i += 1;
+                }
+                raw_value = &open_tag[vstart..i];
+            }
+        }
+        let lname = name.to_ascii_lowercase();
+        if lname.starts_with("on") {
+            continue; // event handler — drop
+        }
+        let decoded = decode_text(raw_value);
+        let value = if URL_ATTRS.contains(&lname.as_str()) && is_dangerous_scheme(&decoded) {
+            "#".to_string()
+        } else {
+            decoded
+        };
+        out.push((name.to_string(), value));
+    }
+    out
+}
+
+#[cfg(test)]
+mod attr_tests {
+    use super::sanitize_attrs;
+
+    fn names(attrs: &[(String, String)]) -> Vec<&str> {
+        attrs.iter().map(|(n, _)| n.as_str()).collect()
+    }
+    fn get<'a>(attrs: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        attrs.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn keeps_plain_attrs_decoded() {
+        let a = sanitize_attrs("<Thinking type=\"info\" data-id='42' open>");
+        assert_eq!(get(&a, "type"), Some("info"));
+        assert_eq!(get(&a, "data-id"), Some("42"));
+        assert_eq!(get(&a, "open"), Some("")); // boolean attr
+        let a = sanitize_attrs("<Callout title=\"A &amp; B &lt;x&gt;\">");
+        assert_eq!(get(&a, "title"), Some("A & B <x>")); // entities decoded
+    }
+
+    #[test]
+    fn drops_event_handlers() {
+        let a = sanitize_attrs("<Thinking onclick=\"steal()\" ONerror='x' onmouseover=y type=ok>");
+        assert!(!names(&a).iter().any(|n| n.to_ascii_lowercase().starts_with("on")), "got {:?}", names(&a));
+        assert_eq!(get(&a, "type"), Some("ok"));
+    }
+
+    #[test]
+    fn neutralizes_dangerous_url_attrs() {
+        assert_eq!(get(&sanitize_attrs("<X href=\"javascript:alert(1)\">"), "href"), Some("#"));
+        assert_eq!(get(&sanitize_attrs("<X src='data:text/html,<script>'>"), "src"), Some("#"));
+        // Entity (`&#58;` = `:`), backslash-before-colon, and control-char
+        // (browser-ignored tab) obfuscations are all caught — decoded / stripped
+        // before the scheme check, matching how a browser would read the URL.
+        assert_eq!(get(&sanitize_attrs("<X href=\"javascript&#58;alert(1)\">"), "href"), Some("#"));
+        assert_eq!(get(&sanitize_attrs("<X href=\"javascript\\:alert(1)\">"), "href"), Some("#"));
+        assert_eq!(get(&sanitize_attrs("<X href=\"java\tscript:alert(1)\">"), "href"), Some("#"));
+        // Safe URLs pass through (decoded).
+        assert_eq!(get(&sanitize_attrs("<X href=\"https://e.com/p?a=1&amp;b=2\">"), "href"), Some("https://e.com/p?a=1&b=2"));
+        assert_eq!(get(&sanitize_attrs("<X href=\"/local/path\">"), "href"), Some("/local/path"));
+    }
+
+    #[test]
+    fn malformed_input_never_panics() {
+        for s in [
+            "<X", "<X ", "<X =", "<X = =", "<X a=", "<X a=\"unclosed",
+            "<X 123=bad . : =>", "<X/>", "<X a=b/>", "<>", "<X\u{0}=\u{0}>", "",
+            "<X href=javascript:alert(1)>", "<X a='it''s'>",
+        ] {
+            let _ = sanitize_attrs(s); // must not panic
+        }
+    }
+}
