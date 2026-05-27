@@ -41,6 +41,19 @@ fn big_code(target: usize) -> String {
     s
 }
 
+// One huge open `$$…$$` display-math block — the math analogue of `big_code`.
+// A multi-line aligned environment is exactly the long-block shape LLMs emit.
+fn big_math(target: usize) -> String {
+    let mut s = String::with_capacity(target + 16);
+    s.push_str("$$\n\\begin{aligned}\n");
+    let line = "x_{n+1} &= \\frac{1}{2}\\left(x_n + \\frac{a}{x_n}\\right) \\\\\n";
+    while s.len() < target {
+        s.push_str(line);
+    }
+    s.push_str("\\end{aligned}\n$$\n");
+    s
+}
+
 fn ref_heavy(n: usize) -> String {
     let mut s = String::new();
     for i in 0..n {
@@ -144,6 +157,7 @@ fn main() {
     let code = big_code(200_000);
     let refs = ref_heavy(2_000);
     let math = math_doc(200_000);
+    let mathblk = big_math(200_000);
     let para = long_paragraph(200_000);
     let emph = emphasis_paragraph(200_000);
 
@@ -155,6 +169,7 @@ fn main() {
         bench("emphasis_para", &emph, chunk, false);
         bench("ref_heavy", &refs, chunk, false);
         bench("math", &math, chunk, true);
+        bench("big_math", &mathblk, chunk, true);
         println!();
     }
 }

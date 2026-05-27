@@ -4,6 +4,17 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Performance
+
+- Streaming a long open display-math block (`$$…$$` / `\[…\]`) is now O(n)
+  instead of O(n²). The incremental fence cache that already covered code fences
+  was generalized to math fences: an append only escapes the newly arrived lines
+  instead of re-scanning and re-escaping the whole growing body. Measured on a
+  200 KB `$$…$$` block at 16-byte chunks: **16,271 ms → ~93 ms** (~174×). Output
+  is byte-identical (gated by `tests/math_fence_cache.rs`).
+
 ## 0.3.2 — 2026-05-27
 
 ### Documentation

@@ -114,8 +114,8 @@ pub struct StreamParser {
     gfm_footnotes: bool,
     gfm_math: bool,
     dir_auto: bool,
-    /// Fast path for a long open code fence at the tail (see [`CodeFenceCache`]).
-    code_cache: Option<CodeFenceCache>,
+    /// Fast path for a long open code/math fence at the tail (see [`FenceCache`]).
+    fence_cache: Option<FenceCache>,
     /// Fast path for a long open paragraph at the tail (see [`ParagraphCache`]).
     para_cache: Option<ParagraphCache>,
 }
@@ -126,27 +126,51 @@ pub struct Patch {
     pub active: Vec<Block>,
 }
 
-/// Incremental render state for a single open code fence at the tail. Streaming
-/// a long fenced block is otherwise O(n²) — every append re-scans and re-escapes
-/// the whole growing body. With this cache, an append only escapes the newly
-/// arrived complete lines and re-escapes the (short) trailing partial line, so
-/// the block stays O(total bytes). It applies only to the plain case: the cache
-/// bails to the full renderer the moment any new line looks like a fence closer
-/// or contains a `\r` (so CRLF and fence-close trimming keep their exact
-/// behavior). Cleared whenever the tail is no longer this open fence.
-struct CodeFenceCache {
+/// How an open fence's closing line is recognized. The cache MUST match the
+/// scanner's predicate exactly, or streamed and one-shot output diverge.
+#[derive(Clone, Copy)]
+enum FenceClose {
+    /// Code fence: a line that is *only* a closing fence (``` / ~~~), per
+    /// `is_fence_close_line`.
+    CodeFence,
+    /// Display-math fence: a line *containing* this closer substring (`$$` or
+    /// `\]`), mirroring the scanner's `scan_math_block`.
+    MathCloser(&'static [u8]),
+}
+
+/// Incremental render state for a single open fence — a code fence or a
+/// display-math fence — at the tail. Streaming a long fenced block is otherwise
+/// O(n²): every append re-scans and re-escapes the whole growing body. With this
+/// cache, an append only escapes the newly arrived complete lines and re-escapes
+/// the (short) trailing partial line, so the block stays O(total bytes). It
+/// applies only to the plain case: the cache bails to the full renderer the
+/// moment a new line looks like the closer or contains a `\r` (so CRLF and
+/// close/whitespace trimming keep their exact behavior). Cleared whenever the
+/// tail is no longer this open fence.
+struct FenceCache {
     /// Absolute byte offset of the fence opener line in `buffer`.
     start: usize,
     /// Stable id of the fence block (preserved across appends and the eventual close).
     id: u64,
     /// Classified kind (CodeBlock / MathBlock / Mermaid — all render identically).
     kind: BlockKind,
-    /// Opening tag (`<pre><code…>`), computed once.
+    /// Opening tag — `<pre><code…>` or `<div class="math math-display">`.
     opener_html: String,
+    /// Closing tag — `</code></pre>` or `</div>`.
+    closer_html: &'static str,
+    /// How the closing line is detected (code-fence rule vs math closer substring).
+    close: FenceClose,
+    /// Math fences trim surrounding whitespace of the body; code fences don't.
+    trim_body: bool,
     /// Escaped HTML of the complete body lines, joined by `\n`, no trailing `\n`.
     escaped_lines: String,
     /// Absolute offset just past the last complete body line's `\n`.
     lines_upto: usize,
+}
+
+/// True if `needle` occurs anywhere in `haystack` (used for the math closer).
+fn line_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.len() <= haystack.len() && haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Incremental render state for a single open paragraph at the tail. Streaming
@@ -192,7 +216,7 @@ impl StreamParser {
             gfm_footnotes: false,
             gfm_math: false,
             dir_auto: false,
-            code_cache: None,
+            fence_cache: None,
             para_cache: None,
         }
     }
@@ -310,10 +334,10 @@ impl StreamParser {
     }
 
     fn reparse_tail(&mut self, finalizing: bool) -> Patch {
-        // Fast paths: extend a long open code fence / paragraph at the tail in
-        // O(new bytes) instead of re-scanning + re-rendering the whole tail.
+        // Fast paths: extend a long open code/math fence / paragraph at the tail
+        // in O(new bytes) instead of re-scanning + re-rendering the whole tail.
         if !finalizing {
-            if let Some(patch) = self.try_incremental_code_fence() {
+            if let Some(patch) = self.try_incremental_fence() {
                 return patch;
             }
             if let Some(patch) = self.try_incremental_paragraph() {
@@ -548,9 +572,9 @@ impl StreamParser {
 
         // Arm (or disarm) the tail fast-path caches. They apply only when the
         // entire tail is now a single open block whose kind streams cheaply —
-        // an open code fence or an open paragraph — so subsequent appends take
-        // the O(new bytes) path instead of re-rendering the whole tail.
-        self.code_cache = None;
+        // an open code/math fence or an open paragraph — so subsequent appends
+        // take the O(new bytes) path instead of re-rendering the whole tail.
+        self.fence_cache = None;
         self.para_cache = None;
         if !finalizing && new_active.len() == 1 {
             let raw = renderable[to_commit];
@@ -561,10 +585,18 @@ impl StreamParser {
             if gap_blank {
                 match &raw.kind {
                     RawBlockKind::CodeFence { terminated: false, info, .. } => {
-                        self.code_cache = build_code_fence_cache(
+                        self.fence_cache = build_code_fence_cache(
                             &self.buffer,
                             start,
                             info,
+                            new_active[0].id,
+                            new_active[0].kind.clone(),
+                        );
+                    }
+                    RawBlockKind::MathFence { terminated: false } => {
+                        self.fence_cache = build_math_fence_cache(
+                            &self.buffer,
+                            start,
                             new_active[0].id,
                             new_active[0].kind.clone(),
                         );
@@ -581,11 +613,11 @@ impl StreamParser {
         Patch { newly_committed, active: new_active }
     }
 
-    /// O(new bytes) extension of a long open code fence at the tail. Returns the
-    /// patch directly on a cache hit; `None` falls through to the full reparse
+    /// O(new bytes) extension of a long open code/math fence at the tail. Returns
+    /// the patch directly on a cache hit; `None` falls through to the full reparse
     /// (and drops the cache) when the tail is no longer this plain open fence.
-    fn try_incremental_code_fence(&mut self) -> Option<Patch> {
-        let mut cache = self.code_cache.take()?;
+    fn try_incremental_fence(&mut self) -> Option<Patch> {
+        let mut cache = self.fence_cache.take()?;
         // The fence must still be the tail: only whitespace may sit between the
         // committed boundary and the opener (normally they're equal).
         if cache.start < self.committed_offset
@@ -595,6 +627,7 @@ impl StreamParser {
         {
             return None;
         }
+        let close = cache.close; // Copy, so the body push below can borrow cache.
         let bytes = self.buffer.as_bytes();
         let end = bytes.len();
         // Append newly-arrived complete lines to the cached body.
@@ -605,11 +638,13 @@ impl StreamParser {
                 Some(r) => {
                     let content_end = pos + r;
                     let next = pos + r + 1;
-                    // A closing fence or CRLF: defer to the full renderer, which
-                    // gets the close-trim / `\r` handling exactly right.
-                    if bytes[pos..content_end].contains(&b'\r')
-                        || is_fence_close_line(&bytes[pos..next])
-                    {
+                    // A closing line or CRLF: defer to the full renderer, which
+                    // gets the close / whitespace-trim / `\r` handling exactly right.
+                    let is_close = match close {
+                        FenceClose::CodeFence => is_fence_close_line(&bytes[pos..next]),
+                        FenceClose::MathCloser(c) => line_contains(&bytes[pos..content_end], c),
+                    };
+                    if bytes[pos..content_end].contains(&b'\r') || is_close {
                         return None;
                     }
                     if !cache.escaped_lines.is_empty() {
@@ -626,15 +661,23 @@ impl StreamParser {
         }
         // The trailing partial line is re-escaped each append (it is short).
         let partial = &bytes[cache.lines_upto..end];
-        if partial.contains(&b'\r') || is_fence_close_line(partial) {
+        let partial_is_close = match close {
+            FenceClose::CodeFence => is_fence_close_line(partial),
+            FenceClose::MathCloser(c) => line_contains(partial, c),
+        };
+        if partial.contains(&b'\r') || partial_is_close {
             return None;
         }
         // Assemble the block HTML directly from the cached pieces — no clone of
-        // the (growing) escaped body. Output is byte-identical to opening +
-        // body[+ "\n" + escaped(partial)] + "\n" + close.
-        let mut html =
-            String::with_capacity(cache.opener_html.len() + cache.escaped_lines.len() + partial.len() + 32);
+        // the (growing) escaped body. For code: opener + body[+ "\n" + partial]
+        // + "\n" + close. For math: opener + trim_end(body[+ partial]) + close
+        // (math trims the body's surrounding whitespace; leading whitespace is
+        // already dropped at arm time via the body-start skip).
+        let mut html = String::with_capacity(
+            cache.opener_html.len() + cache.escaped_lines.len() + partial.len() + 32,
+        );
         html.push_str(&cache.opener_html);
+        let body_start = html.len();
         html.push_str(&cache.escaped_lines);
         let lines_nonempty = !cache.escaped_lines.is_empty();
         if !partial.is_empty() {
@@ -643,10 +686,15 @@ impl StreamParser {
             }
             escape_html(std::str::from_utf8(partial).unwrap_or(""), &mut html);
         }
-        if lines_nonempty || !partial.is_empty() {
+        if cache.trim_body {
+            // Whitespace bytes survive escape_html unchanged, so trimming the
+            // escaped output equals trimming the source body.
+            let trimmed = html.trim_end_matches([' ', '\t', '\n', '\r']).len();
+            html.truncate(trimmed.max(body_start));
+        } else if lines_nonempty || !partial.is_empty() {
             html.push('\n');
         }
-        html.push_str("</code></pre>");
+        html.push_str(cache.closer_html);
         let block = Block {
             id: cache.id,
             kind: cache.kind.clone(),
@@ -657,7 +705,7 @@ impl StreamParser {
             speculative: true,
         };
         self.active_blocks = vec![block.clone()];
-        self.code_cache = Some(cache);
+        self.fence_cache = Some(cache);
         Some(Patch { newly_committed: Vec::new(), active: vec![block] })
     }
 
@@ -766,7 +814,7 @@ fn build_code_fence_cache(
     info: &str,
     id: u64,
     kind: BlockKind,
-) -> Option<CodeFenceCache> {
+) -> Option<FenceCache> {
     let bytes = buffer.as_bytes();
     let end = bytes.len();
     // Body begins after the opener line's newline; bail if it hasn't arrived.
@@ -801,7 +849,91 @@ fn build_code_fence_cache(
     }
     let mut opener_html = String::new();
     push_code_fence_open(info, &mut opener_html);
-    Some(CodeFenceCache { start, id, kind, opener_html, escaped_lines, lines_upto })
+    Some(FenceCache {
+        start,
+        id,
+        kind,
+        opener_html,
+        closer_html: "</code></pre>",
+        close: FenceClose::CodeFence,
+        trim_body: false,
+        escaped_lines,
+        lines_upto,
+    })
+}
+
+/// Build the incremental cache for an open display-math fence (`$$…$$` / `\[…\]`)
+/// at `start`, walking its body once. Returns `None` (no caching) when the body
+/// is still all-whitespace, contains a `\r`, or already shows the matching
+/// closer — those keep going through the full renderer, which gets the
+/// whitespace-trim and single-line cases exactly right. Mirrors the scanner's
+/// `scan_math_block`: the body begins right after the `$$`/`\[` delimiter (math
+/// content may follow it on the opener line) and a line *containing* the closer
+/// substring ends the block.
+fn build_math_fence_cache(buffer: &str, start: usize, id: u64, kind: BlockKind) -> Option<FenceCache> {
+    let bytes = buffer.as_bytes();
+    let end = bytes.len();
+    // Opener after ≤3 spaces of indent (the scanner guarantees ≤3).
+    let mut p = start;
+    let mut indent = 0;
+    while p < end && bytes[p] == b' ' && indent < 3 {
+        p += 1;
+        indent += 1;
+    }
+    let closer: &'static [u8] = if bytes[p..end].starts_with(b"$$") {
+        b"$$"
+    } else if bytes[p..end].starts_with(b"\\[") {
+        b"\\]"
+    } else {
+        return None;
+    };
+    // Body starts right after the delimiter; skip leading whitespace (math trims
+    // the body's leading whitespace). If it's all-whitespace so far, arm later.
+    let mut body_start = p + 2;
+    while body_start < end && matches!(bytes[body_start], b' ' | b'\t' | b'\n' | b'\r') {
+        body_start += 1;
+    }
+    if body_start >= end {
+        return None;
+    }
+    let mut escaped_lines = String::new();
+    let mut lines_upto = body_start;
+    let mut pos = body_start;
+    while pos < end {
+        match bytes[pos..end].iter().position(|&b| b == b'\n') {
+            None => break,
+            Some(r) => {
+                let content_end = pos + r;
+                let next = pos + r + 1;
+                if bytes[pos..content_end].contains(&b'\r') || line_contains(&bytes[pos..content_end], closer) {
+                    return None;
+                }
+                if !escaped_lines.is_empty() {
+                    escaped_lines.push('\n');
+                }
+                escape_html(
+                    std::str::from_utf8(&bytes[pos..content_end]).unwrap_or(""),
+                    &mut escaped_lines,
+                );
+                lines_upto = next;
+                pos = next;
+            }
+        }
+    }
+    if bytes[lines_upto..end].contains(&b'\r') || line_contains(&bytes[lines_upto..end], closer) {
+        return None;
+    }
+    Some(FenceCache {
+        start,
+        id,
+        kind,
+        opener_html: "<div class=\"math math-display\">".to_string(),
+        closer_html: "</div>",
+        close: FenceClose::MathCloser(closer),
+        trim_body: true,
+        escaped_lines,
+        lines_upto,
+    })
 }
 
 /// Arm the paragraph cache for the open paragraph at `start`, rendering its
@@ -1110,6 +1242,16 @@ mod tests {
         for ch in "```rust\nfn a() {}\nfn b() {}\nlet x = 1;\n".chars() {
             p.append(ch.encode_utf8(&mut buf));
         }
-        assert!(p.code_cache.is_some(), "code-fence cache should arm for an open fence");
+        assert!(p.fence_cache.is_some(), "code-fence cache should arm for an open fence");
+    }
+
+    #[test]
+    fn math_fence_cache_engages() {
+        let mut p = StreamParser::new().with_gfm_math(true);
+        let mut buf = [0u8; 4];
+        for ch in "$$\n\\begin{aligned}\na &= b \\\\\nc &= d\n".chars() {
+            p.append(ch.encode_utf8(&mut buf));
+        }
+        assert!(p.fence_cache.is_some(), "math-fence cache should arm for an open $$ block");
     }
 }
