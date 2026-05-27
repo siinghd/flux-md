@@ -2,7 +2,7 @@
 
 Zero-dep streaming markdown for the browser. Rust→WASM core, one Web Worker per stream, incremental parse with speculative closure for mid-stream constructs.
 
-Built because [Streamdown](https://streamdown.ai) crashes the main thread when you run 5 concurrent LLM calls. Same input, this library uses **~8× less peak heap, ~6× less retained memory, and ~2× less main-thread blocking** — measured in-browser with `performance.memory`. See [the live demo](https://md.hsingh.app/) for an A/B comparison.
+Parsing runs entirely **off the main thread** — each stream gets its own pooled Web Worker, so many concurrent LLM responses render without contending for the UI thread. On each token the parser re-parses only the **active tail**, not the whole document, and heavy renderers (syntax highlighting, math, mermaid) are **deferred until a block closes**. The result is low retained memory and a main thread that stays responsive while streaming. See [the live demo](https://md.hsingh.app/).
 
 ## Install
 
@@ -37,18 +37,27 @@ client.finalize();
 In React:
 
 ```tsx
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { FluxClient, FluxMarkdown } from "flux-md";
 
 export function ChatMessage({ stream }: { stream: AsyncIterable<string> }) {
   const client = useMemo(() => new FluxClient(), []);
+
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      for await (const chunk of stream) client.append(chunk);
-      client.finalize();
+      for await (const chunk of stream) {
+        if (cancelled) return; // stream changed / unmounted mid-flight
+        client.append(chunk);
+      }
+      if (!cancelled) client.finalize();
     })();
-    return () => client.destroy();
+    return () => {
+      cancelled = true;
+      client.destroy();
+    };
   }, [stream]);
+
   return <FluxMarkdown client={client} />;
 }
 ```
@@ -57,7 +66,7 @@ Multiple concurrent streams just need multiple clients — each runs in its own 
 
 ## What it does
 
-| Concern | flux-md | typical react-markdown / Streamdown |
+| Concern | flux-md | conventional main-thread renderer |
 |---|---|---|
 | Re-parse on each token | No — only the active tail | Yes, full string |
 | Where parse runs | Web Worker (off main thread) | Main thread |

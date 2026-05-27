@@ -34,12 +34,11 @@ Notable changes to flux-md. Format based on
   `<div class="math math-display">`) carrying the LaTeX as text content — bring
   your own KaTeX (flux-md stays zero-dep) or override `components.MathBlock`
   (which receives the LaTeX as `text`). Display fences are blank-line tolerant
-  and stream incrementally. Addresses [Streamdown #522]. Off by default.
+  and stream incrementally. Off by default.
 - **`dirAuto`** — opt-in per-block `dir="auto"` on block-level text elements
   (`p`, `h1`–`h6`, `blockquote`, `ul`/`ol`/`li`, `table`, alerts, footnotes), so
   the browser detects each block's direction (RTL/LTR) independently in
-  mixed-language documents. Code blocks stay LTR. Addresses [Streamdown #509].
-  Off by default.
+  mixed-language documents. Code blocks stay LTR. Off by default.
 
 ### Performance
 
@@ -67,6 +66,3 @@ Notable changes to flux-md. Format based on
 - Initial public release: zero-dep streaming markdown, Rust→WASM core, one Web
   Worker per stream, CommonMark 0.31 (652/652) + GFM (tables, strikethrough,
   task lists, extended autolinks, GitHub alerts, footnotes).
-
-[Streamdown #522]: https://github.com/vercel/streamdown/issues/522
-[Streamdown #509]: https://github.com/vercel/streamdown/issues/509

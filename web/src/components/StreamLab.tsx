@@ -1,16 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { FluxClient, FluxMarkdown, getDefaultPool } from "flux-md";
-import { StreamdownPanel } from "./StreamdownPanel";
 import { ComponentsDemo } from "./ComponentsDemo";
 import { MetricsHud } from "./MetricsHud";
 import { HealthMonitor } from "./MainThreadHealth";
-import { MemoryPanel } from "./MemoryPanel";
 import { streamChat, type ChatMessage } from "../streaming/openai";
 
 const NUM_STREAMS = 5;
 
-// Opt into content-visibility block virtualization via ?virtualize=1 (for the
-// long-document perf comparison; off by default, matching the library default).
+// Opt into content-visibility block virtualization via ?virtualize=1 (off by
+// default, matching the library default).
 const VIRTUALIZE =
   typeof window !== "undefined" && new URLSearchParams(window.location.search).has("virtualize");
 
@@ -34,8 +32,6 @@ const DEFAULT_PROMPT = `Write a 1500-word technical deep-dive on building a high
 
 Make it dense, technically substantive, and well-organized. Aim for at least 1500 words.`;
 
-type Mode = "flux" | "streamdown" | "both";
-
 interface StreamState {
   text: string;
   client: FluxClient;
@@ -57,29 +53,13 @@ function newStreamState(): StreamState {
 }
 
 export function StreamLab() {
-  const [mode, setMode] = useState<Mode>("both");
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [running, setRunning] = useState(false);
-  const [showMemPanel, setShowMemPanel] = useState(false);
   const [, force] = useState(0);
   const streamsRef = useRef<StreamState[]>([]);
   if (streamsRef.current.length === 0) {
     streamsRef.current = Array.from({ length: NUM_STREAMS }, newStreamState);
   }
-
-  // Force re-render when streamdown text accumulates (we keep raw text in
-  // refs so we can decide ourselves when to re-render the Streamdown panel).
-  const streamdownTextRef = useRef<string[]>(Array.from({ length: NUM_STREAMS }, () => ""));
-  const [streamdownTick, setStreamdownTick] = useState(0);
-  const streamdownPending = useRef<number | null>(null);
-
-  const scheduleStreamdownRender = useCallback(() => {
-    if (streamdownPending.current != null) return;
-    streamdownPending.current = window.setTimeout(() => {
-      streamdownPending.current = null;
-      setStreamdownTick((t) => t + 1);
-    }, 32);
-  }, []);
 
   const start = useCallback(async () => {
     if (running) return;
@@ -95,7 +75,6 @@ export function StreamLab() {
       s.startMs = performance.now();
       s.endMs = 0;
       s.abort = new AbortController();
-      streamdownTextRef.current[i] = "";
     }
     force((x) => x + 1);
 
@@ -112,8 +91,6 @@ export function StreamLab() {
           onChunk: (delta) => {
             s.text += delta;
             s.client.append(delta);
-            streamdownTextRef.current[i] = s.text;
-            scheduleStreamdownRender();
           },
           onDone: () => {
             s.done = true;
@@ -134,7 +111,7 @@ export function StreamLab() {
     );
 
     setRunning(false);
-  }, [running, prompt, scheduleStreamdownRender]);
+  }, [running, prompt]);
 
   const stop = useCallback(() => {
     for (const s of streamsRef.current) s.abort?.abort();
@@ -150,16 +127,13 @@ export function StreamLab() {
       s.done = true;
       s.startMs = 0;
       s.endMs = 0;
-      streamdownTextRef.current[i] = "";
     }
     HealthMonitor.reset();
     force((x) => x + 1);
-    setStreamdownTick((t) => t + 1);
   }, [stop]);
 
-  // Deterministic replay hook for the headless memory test. Plays a fixed
-  // markdown corpus into all 5 streams at a fixed rate, no network — same
-  // bytes go through flux and Streamdown so the comparison is honest.
+  // Deterministic replay hook for headless tests. Plays a fixed markdown corpus
+  // into all 5 streams at a fixed rate, no network.
   // Call from devtools: window.__fluxReplay("# Hello\n\nsome markdown...", 16)
   useEffect(() => {
     (window as any).__fluxReplay = async (corpus: string, chunkSize = 16, intervalMs = 1) => {
@@ -171,7 +145,6 @@ export function StreamLab() {
         s.done = false;
         s.startMs = performance.now();
         s.endMs = 0;
-        streamdownTextRef.current[i] = "";
       }
       HealthMonitor.reset();
       force((x) => x + 1);
@@ -186,9 +159,7 @@ export function StreamLab() {
           const s = streamsRef.current[i];
           s.text += chunk;
           s.client.append(chunk);
-          streamdownTextRef.current[i] = s.text;
         }
-        scheduleStreamdownRender();
         pos = next;
         if (intervalMs > 0) {
           await new Promise((r) => setTimeout(r, intervalMs));
@@ -229,20 +200,9 @@ export function StreamLab() {
       delete (window as any).__fluxReplay;
       delete (window as any).__fluxMultiplexCheck;
     };
-  }, [scheduleStreamdownRender]);
+  }, []);
 
   useEffect(() => () => stop(), [stop]);
-
-  // Find earliest streamdown start time for throughput calc.
-  const earliestStart = useMemo(() => {
-    let earliest = 0;
-    for (const s of streamsRef.current) {
-      if (s.startMs > 0 && (earliest === 0 || s.startMs < earliest)) earliest = s.startMs;
-    }
-    return earliest;
-  }, [streamdownTick, running]);
-
-  const totalStreamdownChars = streamdownTextRef.current.reduce((a, b) => a + b.length, 0);
 
   return (
     <div className={"lab" + (STICK ? " lab-stick" : "")}>
@@ -253,16 +213,6 @@ export function StreamLab() {
           <span className="lab-sub">streaming markdown that doesn't melt your tab</span>
         </div>
         <div className="lab-controls">
-          <select
-            value={mode}
-            onChange={(e) => setMode(e.target.value as Mode)}
-            disabled={running}
-            className="lab-select"
-          >
-            <option value="both">Side-by-side: flux vs Streamdown</option>
-            <option value="flux">flux-md only</option>
-            <option value="streamdown">Streamdown only</option>
-          </select>
           {!running ? (
             <button className="lab-btn lab-btn-primary" onClick={start}>
               ▶ Run {NUM_STREAMS} concurrent streams
@@ -275,23 +225,8 @@ export function StreamLab() {
           <button className="lab-btn" onClick={reset} disabled={running}>
             Reset
           </button>
-          <button
-            className={"lab-btn " + (showMemPanel ? "lab-btn-active" : "")}
-            onClick={() => setShowMemPanel((s) => !s)}
-            disabled={running}
-            title="Run a deterministic A/B replay measuring heap deltas"
-          >
-            🧠 Memory A/B
-          </button>
         </div>
       </header>
-      {showMemPanel && (
-        <MemoryPanel
-          setMode={(m) => setMode(m as Mode)}
-          resetAll={reset}
-          onClose={() => setShowMemPanel(false)}
-        />
-      )}
 
       <details className="lab-prompt-edit">
         <summary>Prompt (sent to <code>ai.hsingh.app/v1/chat/completions</code>)</summary>
@@ -306,51 +241,22 @@ export function StreamLab() {
 
       <ComponentsDemo />
 
-      <div className={"lab-board lab-board-" + mode}>
-        {(mode === "flux" || mode === "both") && (
-          <section className="lab-pane lab-pane-flux">
-            <PaneHeader title="flux-md" subtitle={`${getDefaultPool().workerCount} pooled workers, incremental parse`}>
-              <MetricsHud
-                fluxClients={streamsRef.current.map((s) => s.client)}
-                streamdownChars={totalStreamdownChars}
-                streamdownStart={earliestStart}
-                label="flux"
-              />
-            </PaneHeader>
-            <div className="lab-grid">
-              {streamsRef.current.map((s, i) => (
-                <div className="lab-cell" key={i}>
-                  <FluxCellHeader index={i} state={s} />
-                  <div className="lab-cell-body">
-                    <FluxMarkdown client={s.client} virtualize={VIRTUALIZE} stickToBottom={STICK} />
-                  </div>
+      <div className="lab-board lab-board-flux">
+        <section className="lab-pane lab-pane-flux">
+          <PaneHeader title="flux-md" subtitle={`${getDefaultPool().workerCount} pooled workers, incremental parse`}>
+            <MetricsHud fluxClients={streamsRef.current.map((s) => s.client)} />
+          </PaneHeader>
+          <div className="lab-grid">
+            {streamsRef.current.map((s, i) => (
+              <div className="lab-cell" key={i}>
+                <FluxCellHeader index={i} state={s} />
+                <div className="lab-cell-body">
+                  <FluxMarkdown client={s.client} virtualize={VIRTUALIZE} stickToBottom={STICK} />
                 </div>
-              ))}
-            </div>
-          </section>
-        )}
-        {(mode === "streamdown" || mode === "both") && (
-          <section className="lab-pane lab-pane-sd">
-            <PaneHeader title="Streamdown 2.5" subtitle="main-thread parse, no worker">
-              <MetricsHud
-                fluxClients={streamsRef.current.map((s) => s.client)}
-                streamdownChars={totalStreamdownChars}
-                streamdownStart={earliestStart}
-                label="streamdown"
-              />
-            </PaneHeader>
-            <div className="lab-grid">
-              {streamsRef.current.map((s, i) => (
-                <div className="lab-cell" key={i}>
-                  <StreamCellHeader index={i} state={s} />
-                  <div className="lab-cell-body">
-                    <StreamdownPanel source={streamdownTextRef.current[i]} />
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
+              </div>
+            ))}
+          </div>
+        </section>
       </div>
 
       <footer className="lab-foot">
@@ -386,18 +292,6 @@ function PaneHeader({
         <span className="lab-pane-sub">{subtitle}</span>
       </div>
       <div className="lab-pane-hud">{children}</div>
-    </div>
-  );
-}
-
-function StreamCellHeader({ index, state }: { index: number; state: StreamState }) {
-  const dur = state.endMs > 0 ? state.endMs - state.startMs : state.startMs > 0 ? performance.now() - state.startMs : 0;
-  return (
-    <div className="lab-cell-head">
-      <span className="lab-cell-num">#{index + 1}</span>
-      <span className={"lab-cell-status " + (state.done ? "done" : "live")}>{state.done ? "done" : "streaming"}</span>
-      <span className="lab-cell-dur">{(dur / 1000).toFixed(1)}s</span>
-      <span className="lab-cell-bytes">{(state.text.length / 1024).toFixed(1)} KB</span>
     </div>
   );
 }

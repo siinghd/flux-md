@@ -1,4 +1,4 @@
-//! Per-block `dir="auto"` for bidirectional text (Streamdown #509). Each block
+//! Per-block `dir="auto"` for bidirectional text. Each block
 //! carries its own `dir="auto"` so the browser detects direction independently
 //! (Arabic/Hebrew → RTL, English → LTR) — instead of one direction applied to
 //! the whole document. Opt-in; code blocks always stay LTR (no `dir`).

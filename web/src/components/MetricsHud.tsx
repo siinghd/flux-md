@@ -4,12 +4,9 @@ import type { FluxClient } from "flux-md";
 
 interface Props {
   fluxClients: FluxClient[];
-  streamdownChars: number;
-  streamdownStart: number;
-  label: "flux" | "streamdown";
 }
 
-export function MetricsHud({ fluxClients, streamdownChars, streamdownStart, label }: Props) {
+export function MetricsHud({ fluxClients }: Props) {
   const health = useSyncExternalStore(HealthMonitor.subscribe, HealthMonitor.getSnapshot, HealthMonitor.getSnapshot);
 
   let totalBytes = 0;
@@ -26,11 +23,11 @@ export function MetricsHud({ fluxClients, streamdownChars, streamdownStart, labe
     totalWasmMem = Math.max(totalWasmMem, m.wasmMemoryBytes);
   }
 
-  const isFlux = label === "flux";
-  const bytes = isFlux ? totalBytes : streamdownChars;
-  const elapsedMs = isFlux
-    ? (fluxClients.reduce((acc, c) => Math.max(acc, c.getMetrics().bytes > 0 ? performance.now() - (c as any).firstAppendMs : 0), 1))
-    : (streamdownStart ? performance.now() - streamdownStart : 1);
+  const bytes = totalBytes;
+  const elapsedMs = fluxClients.reduce(
+    (acc, c) => Math.max(acc, c.getMetrics().bytes > 0 ? performance.now() - (c as any).firstAppendMs : 0),
+    1,
+  );
 
   const kbps = (bytes / 1024) / Math.max(0.001, elapsedMs / 1000);
 
@@ -55,32 +52,22 @@ export function MetricsHud({ fluxClients, streamdownChars, streamdownStart, labe
         <span className="flux-hud-label">received</span>
         <span className="flux-hud-value">{(bytes / 1024).toFixed(1)} KB</span>
       </div>
-      {isFlux && (
-        <>
-          <div className="flux-hud-row">
-            <span className="flux-hud-label">parse patches</span>
-            <span className="flux-hud-value">{totalPatches}</span>
-          </div>
-          <div className="flux-hud-row">
-            <span className="flux-hud-label">parse total</span>
-            <span className="flux-hud-value">{totalParseMs.toFixed(1)}ms</span>
-          </div>
-          <div className="flux-hud-row">
-            <span className="flux-hud-label">retained (src+html)</span>
-            <span className="flux-hud-value">{(totalRetained / 1024).toFixed(1)} KB</span>
-          </div>
-          <div className="flux-hud-row">
-            <span className="flux-hud-label">wasm heap (max)</span>
-            <span className="flux-hud-value">{(totalWasmMem / 1024).toFixed(0)} KB</span>
-          </div>
-        </>
-      )}
-      {!isFlux && (
-        <div className="flux-hud-row">
-          <span className="flux-hud-label">retained (mem)</span>
-          <span className="flux-hud-value">— see A/B</span>
-        </div>
-      )}
+      <div className="flux-hud-row">
+        <span className="flux-hud-label">parse patches</span>
+        <span className="flux-hud-value">{totalPatches}</span>
+      </div>
+      <div className="flux-hud-row">
+        <span className="flux-hud-label">parse total</span>
+        <span className="flux-hud-value">{totalParseMs.toFixed(1)}ms</span>
+      </div>
+      <div className="flux-hud-row">
+        <span className="flux-hud-label">retained (src+html)</span>
+        <span className="flux-hud-value">{(totalRetained / 1024).toFixed(1)} KB</span>
+      </div>
+      <div className="flux-hud-row">
+        <span className="flux-hud-label">wasm heap (max)</span>
+        <span className="flux-hud-value">{(totalWasmMem / 1024).toFixed(0)} KB</span>
+      </div>
       <Sparkline values={health.blockedHistory} colorClass="bar-blocked" />
     </div>
   );

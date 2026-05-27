@@ -1,7 +1,7 @@
 //! Math support: inline `$…$` / `\(…\)` and display `$$…$$` / `\[…\]`.
-//! Covers the Streamdown #522 territory (LaTeX `\(…\)` / `\[…\]` delimiters),
-//! the pandoc currency-safety rule, HTML-escaping of the LaTeX body, streaming
-//! convergence, and composition with lists / quotes / links / code spans.
+//! Covers the LaTeX `\(…\)` / `\[…\]` delimiters, the pandoc currency-safety
+//! rule, HTML-escaping of the LaTeX body, streaming convergence, and
+//! composition with lists / quotes / links / code spans.
 
 use flux_md_core::StreamParser;
 

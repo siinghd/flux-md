@@ -5,8 +5,8 @@
  * languages fall through to plain escaped text. ~6KB minified.
  *
  * Highlighting is per-block, runs once when the block closes. We never
- * highlight an open (streaming) block — that's what gives us the big perf
- * win vs Streamdown's per-chunk Shiki invocation.
+ * highlight an open (streaming) block, which avoids re-highlighting the same
+ * code on every chunk — the main perf win for streaming code.
  */
 
 const KEYWORDS_JS = new Set(

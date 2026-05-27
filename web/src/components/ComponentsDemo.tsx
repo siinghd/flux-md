@@ -5,11 +5,11 @@ import { FluxClient, FluxMarkdown, type BlockComponentProps, type Components } f
  * Self-contained showcase of `<FluxMarkdown components={...} />`. It streams a
  * fixed markdown sample through a real worker-backed FluxClient and renders it
  * with both override namespaces:
- *   - tag-level  `a` / `table`  (react-markdown style)
- *   - block-kind `CodeBlock`     (a copy-button code block — Streamdown #468)
+ *   - tag-level  `a` / `table`  (replace an HTML element wherever it appears)
+ *   - block-kind `CodeBlock`     (a copy-button code block)
  *
  * Kept out of the 5-stream perf board on purpose: the override path adds a
- * little main-thread work, and the comparison there must stay apples-to-apples.
+ * little main-thread work that would skew the throughput numbers.
  */
 
 const SAMPLE = `## Custom components, live
@@ -18,7 +18,7 @@ Links get an override that opens in a new tab and adds a glyph:
 see the [flux-md repo](https://md.hsingh.app) and the [CommonMark spec](https://spec.commonmark.org/0.31/).
 
 > [!TIP]
-> GitHub alerts (\`> [!NOTE]\`, \`[!WARNING]\`, …) render as styled callouts — issue #467.
+> GitHub alerts (\`> [!NOTE]\`, \`[!WARNING]\`, …) render as styled callouts.
 
 > [!WARNING]
 > They stay overridable: pass \`components.Alert\` to render your own.
@@ -31,11 +31,10 @@ Streaming markdown is hard to get right[^why], and footnotes[^fn] are the latest
 | Approach | Re-parse | Thread |
 | --- | :---: | ---: |
 | flux-md | tail only | worker |
-| react-markdown | full | main |
-| Streamdown | full | main |
+| conventional | full | main |
 
 \`\`\`ts
-// The CodeBlock override adds a copy button (GitHub issue #468).
+// The CodeBlock override adds a copy button.
 export async function* stream(res: Response) {
   const reader = res.body!.getReader();
   for (;;) {

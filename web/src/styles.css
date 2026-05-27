@@ -13,7 +13,6 @@
   --acc: #00d4ff;
   --acc-2: #7c3aed;
   --acc-flux: #00d4ff;
-  --acc-sd: #f97316;
   --good: #3fb950;
   --warn: #d29922;
   --bad: #f85149;
@@ -181,8 +180,7 @@ button, select, textarea, input {
   min-height: 0;
   overflow: hidden;
 }
-.lab-board-both { grid-template-columns: 1fr 1fr; }
-.lab-board-flux, .lab-board-streamdown { grid-template-columns: 1fr; }
+.lab-board-flux { grid-template-columns: 1fr; }
 
 .lab-pane {
   display: flex;
@@ -194,7 +192,6 @@ button, select, textarea, input {
 .lab-pane:last-child { border-right: none; }
 
 .lab-pane-flux { background: linear-gradient(180deg, rgba(0, 212, 255, 0.04), transparent 200px); }
-.lab-pane-sd { background: linear-gradient(180deg, rgba(249, 115, 22, 0.04), transparent 200px); }
 
 .lab-pane-head {
   display: flex;
@@ -214,7 +211,6 @@ button, select, textarea, input {
 }
 .lab-pane-title strong { font-size: 14px; color: var(--fg-0); }
 .lab-pane-flux .lab-pane-title strong { color: var(--acc-flux); }
-.lab-pane-sd .lab-pane-title strong { color: var(--acc-sd); }
 .lab-pane-sub { font-size: 11px; color: var(--fg-3); }
 
 /* HUD */
@@ -287,7 +283,6 @@ button, select, textarea, input {
   height: 380px;
 }
 .lab-pane-flux .lab-cell { border-color: rgba(0, 212, 255, 0.2); }
-.lab-pane-sd .lab-cell { border-color: rgba(249, 115, 22, 0.2); }
 
 .lab-cell-head {
   display: flex;
@@ -348,79 +343,6 @@ button, select, textarea, input {
   font-size: 16px;
   line-height: 1;
 }
-.mem-panel {
-  background: var(--bg-1);
-  border-bottom: 1px solid var(--bd);
-  padding: 14px 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  flex-shrink: 0;
-}
-.mem-panel-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.mem-panel-head strong {
-  color: var(--fg-0);
-  font-size: 14px;
-  letter-spacing: 0.01em;
-}
-.mem-panel-desc {
-  margin: 0;
-  font-size: 11px;
-  color: var(--fg-3);
-  line-height: 1.5;
-}
-.mem-panel-desc code {
-  background: var(--bg-2);
-  padding: 1px 5px;
-  border-radius: 3px;
-  font-family: var(--font-mono);
-}
-.mem-panel-controls {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-.mem-progress {
-  font-size: 12px;
-  color: var(--acc);
-  font-family: var(--font-mono);
-  animation: pulse 1.4s infinite;
-}
-.mem-err {
-  font-size: 12px;
-  color: var(--bad);
-}
-.mem-result {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.mem-result table {
-  border-collapse: collapse;
-  font-size: 13px;
-  font-family: var(--font-mono);
-}
-.mem-result th, .mem-result td {
-  padding: 6px 14px;
-  border: 1px solid var(--bd);
-  text-align: right;
-}
-.mem-result th:first-child, .mem-result td:first-child {
-  text-align: left;
-  color: var(--fg-3);
-}
-.mem-result th { background: var(--bg-2); color: var(--fg-0); font-weight: 600; }
-.mem-result th.hcol-flux { color: var(--acc-flux); }
-.mem-result th.hcol-sd { color: var(--acc-sd); }
-.mem-result .win { color: var(--good); font-weight: 700; }
-.mem-result .loss { color: var(--bad); }
-.mem-result .mem-center { text-align: center; color: var(--fg-3); }
-.mem-summary { font-size: 13px; }
-.mem-good { color: var(--good); font-weight: 600; }
 
 .lab-cell-body {
   flex: 1;
@@ -432,36 +354,35 @@ button, select, textarea, input {
 }
 
 /* ?stick=1 — the one CSS line a consumer adds for flux-md's stickToBottom:
-   put scroll-snap-type on the scroll container; flux-md supplies the target.
-   Flux pane only, so the Streamdown comparison stays honest. */
+   put scroll-snap-type on the scroll container; flux-md supplies the target. */
 .lab-stick .lab-pane-flux .lab-cell-body {
   scroll-snap-type: y proximity;
 }
 
-/* Generic markdown styling — applies to flux blocks AND streamdown */
-.flux-md, .streamdown-host {
+/* Generic markdown styling for flux blocks */
+.flux-md{
   word-wrap: break-word;
   overflow-wrap: anywhere;
 }
 
-.flux-md > *, .streamdown-host > * { margin: 0 0 12px 0; }
-.flux-md > *:last-child, .streamdown-host > *:last-child { margin-bottom: 0; }
+.flux-md > *{ margin: 0 0 12px 0; }
+.flux-md > *:last-child{ margin-bottom: 0; }
 
-.flux-md h1, .streamdown-host h1 { font-size: 20px; font-weight: 700; color: var(--fg-0); margin-top: 4px; }
-.flux-md h2, .streamdown-host h2 { font-size: 17px; font-weight: 700; color: var(--fg-0); margin-top: 16px; padding-bottom: 4px; border-bottom: 1px solid var(--bd); }
-.flux-md h3, .streamdown-host h3 { font-size: 15px; font-weight: 700; color: var(--fg-0); margin-top: 14px; }
-.flux-md h4, .streamdown-host h4 { font-size: 14px; font-weight: 700; color: var(--fg-0); }
-.flux-md h5, .flux-md h6, .streamdown-host h5, .streamdown-host h6 { font-size: 13px; font-weight: 700; color: var(--fg-0); }
+.flux-md h1{ font-size: 20px; font-weight: 700; color: var(--fg-0); margin-top: 4px; }
+.flux-md h2{ font-size: 17px; font-weight: 700; color: var(--fg-0); margin-top: 16px; padding-bottom: 4px; border-bottom: 1px solid var(--bd); }
+.flux-md h3{ font-size: 15px; font-weight: 700; color: var(--fg-0); margin-top: 14px; }
+.flux-md h4{ font-size: 14px; font-weight: 700; color: var(--fg-0); }
+.flux-md h5, .flux-md h6{ font-size: 13px; font-weight: 700; color: var(--fg-0); }
 
-.flux-md p, .streamdown-host p { color: var(--fg-1); }
-.flux-md a, .streamdown-host a { color: var(--acc); text-decoration: none; }
-.flux-md a:hover, .streamdown-host a:hover { text-decoration: underline; }
+.flux-md p{ color: var(--fg-1); }
+.flux-md a{ color: var(--acc); text-decoration: none; }
+.flux-md a:hover{ text-decoration: underline; }
 
-.flux-md ul, .streamdown-host ul,
-.flux-md ol, .streamdown-host ol { padding-left: 22px; color: var(--fg-1); }
-.flux-md li, .streamdown-host li { margin: 3px 0; }
+.flux-md ul,
+.flux-md ol{ padding-left: 22px; color: var(--fg-1); }
+.flux-md li{ margin: 3px 0; }
 
-.flux-md blockquote, .streamdown-host blockquote {
+.flux-md blockquote{
   border-left: 3px solid var(--acc);
   padding: 4px 14px;
   margin-left: 0;
@@ -470,24 +391,24 @@ button, select, textarea, input {
   border-radius: 0 4px 4px 0;
 }
 
-.flux-md table, .streamdown-host table {
+.flux-md table{
   width: 100%;
   border-collapse: collapse;
   font-size: 12px;
 }
-.flux-md th, .streamdown-host th,
-.flux-md td, .streamdown-host td {
+.flux-md th,
+.flux-md td{
   padding: 6px 10px;
   border: 1px solid var(--bd);
   text-align: left;
 }
-.flux-md th, .streamdown-host th {
+.flux-md th{
   background: var(--bg-2);
   color: var(--fg-0);
   font-weight: 700;
 }
 
-.flux-md code, .streamdown-host code {
+.flux-md code{
   background: var(--bg-3);
   padding: 1px 5px;
   border-radius: 3px;
@@ -496,17 +417,17 @@ button, select, textarea, input {
   color: #f0c674;
 }
 
-.flux-md hr, .streamdown-host hr {
+.flux-md hr{
   border: none;
   border-top: 1px solid var(--bd);
   margin: 16px 0;
 }
 
-.flux-md strong, .streamdown-host strong { color: var(--fg-0); font-weight: 700; }
-.flux-md em, .streamdown-host em { color: var(--fg-0); font-style: italic; }
-.flux-md del, .streamdown-host del { color: var(--fg-3); }
+.flux-md strong{ color: var(--fg-0); font-weight: 700; }
+.flux-md em{ color: var(--fg-0); font-style: italic; }
+.flux-md del{ color: var(--fg-3); }
 
-/* Code blocks (flux + streamdown share pre) */
+/* Code blocks */
 .flux-code-block {
   margin: 0 0 12px 0;
   background: var(--bg-3);
@@ -534,7 +455,7 @@ button, select, textarea, input {
   border-radius: 3px;
   font-weight: 600;
 }
-.flux-code-body, .streamdown-host pre {
+.flux-code-body{
   margin: 0;
   padding: 10px 12px;
   font-family: var(--font-mono);
@@ -542,12 +463,12 @@ button, select, textarea, input {
   line-height: 1.5;
   overflow-x: auto;
 }
-.flux-code-body pre, .streamdown-host pre {
+.flux-code-body pre{
   margin: 0;
   padding: 0;
   background: transparent;
 }
-.flux-code-body code, .streamdown-host pre code {
+.flux-code-body code{
   background: transparent;
   padding: 0;
   color: var(--fg-1);
@@ -593,11 +514,6 @@ button, select, textarea, input {
   overflow-x: auto;
 }
 
-.streamdown-host pre {
-  background: var(--bg-3);
-  border: 1px solid var(--bd);
-  border-radius: 6px;
-}
 
 /* Math */
 .flux-math-block {
