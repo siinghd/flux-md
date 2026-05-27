@@ -345,6 +345,28 @@ flux-md is XSS-safe by default — its HTML output is meant to be injected via
   third-party HTML, these guards are your only line of defense — prefer a
   dedicated HTML sanitizer for genuinely hostile input.
 
+### Rendering untrusted / LLM HTML safely
+
+If you enable `unsafeHtml` to render HTML from an untrusted source (e.g. an LLM
+that returns raw HTML), **bring a real sanitizer** and pass it via
+`<FluxMarkdown sanitize={…} />`. flux-md applies it to every block's HTML before
+injection — **including the streaming (open) tail**, which the raw-`innerHTML`
+fast path would otherwise expose. flux-md stays zero-dep; you choose the
+sanitizer:
+
+```tsx
+import DOMPurify from "dompurify";
+
+<FluxMarkdown client={client} sanitize={(html) => DOMPurify.sanitize(html)} />
+```
+
+The built-in code/math renderers operate on already-escaped content and are not
+run through `sanitize`, so syntax highlighting and math markup are preserved.
+With no `sanitize` prop, rendering is byte-identical and zero-cost. For
+genuinely hostile content where CSS-overlay/clickjacking matters, render inside
+a sandboxed `<iframe>` instead — sanitization stops injection, not every
+visual-overlay trick.
+
 ## Scaling
 
 `FluxClient`s share a **worker pool** (`getDefaultPool()`), so concurrency

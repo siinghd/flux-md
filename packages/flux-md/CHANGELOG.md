@@ -4,6 +4,19 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **`<FluxMarkdown sanitize={fn} />`** — an optional HTML sanitizer hook. When
+  provided, flux-md runs every block's HTML through it before injecting via
+  `innerHTML`, **including the streaming (open/speculative) tail** that the raw
+  fast path would otherwise expose. Bring your own sanitizer (e.g.
+  `DOMPurify.sanitize`) to render untrusted / LLM HTML with `unsafeHtml` on;
+  flux-md stays zero-dep. Built-in code/math renderers (already-escaped content)
+  are not run through it, so highlighting and math markup are preserved. Omitting
+  the prop is byte-identical and zero-cost.
+
 ## 0.4.0 — 2026-05-27
 
 ### Added

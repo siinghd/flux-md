@@ -1,6 +1,13 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { FluxClient, FluxMarkdown, type Components } from "flux-md";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { FluxClient, FluxMarkdown } from "flux-md";
+import DOMPurify from "dompurify";
 import { streamChat, type ChatMessage } from "../streaming/openai";
+
+// Sanitize every block's HTML before it hits the DOM — covers the streaming
+// (open) tail too, via flux-md's `sanitize` hook. DOMPurify is comprehensive
+// (drops scripts, on* handlers, javascript:/dangerous schemes, and unsafe tags);
+// stable identity so flux-md's per-block memo doesn't churn.
+const sanitizeHtml = (html: string) => DOMPurify.sanitize(html);
 
 interface Turn {
   id: number;
@@ -37,10 +44,6 @@ export function Chat() {
   const taRef = useRef<HTMLTextAreaElement>(null);
   // Whether the view is pinned to the bottom (released when the user scrolls up).
   const stickRef = useRef(true);
-  // Supplying a (stable) components map routes closed blocks through the
-  // sanitizing htmlToReact path — needed since unsafeHtml is on, so the model's
-  // raw HTML renders with on* handlers dropped and URL schemes filtered.
-  const components = useMemo<Components>(() => ({}), []);
 
   const scrollToBottom = useCallback(() => {
     const el = scrollerRef.current;
@@ -123,8 +126,8 @@ export function Chat() {
       ];
 
       // unsafeHtml lets the model's HTML render (e.g. "give me the result in
-      // HTML"); closed blocks go through htmlToReact (see `components` below),
-      // which strips on* handlers and neutralizes dangerous URL schemes.
+      // HTML"); every block's HTML — including the streaming tail — is run
+      // through DOMPurify via FluxMarkdown's `sanitize` prop (see `sanitizeHtml`).
       const client = new FluxClient({ config: { gfmMath: true, unsafeHtml: true } });
       const userTurn: Turn = { id: nextId.current++, role: "user", text, done: true };
       const aiTurn: Turn = { id: nextId.current++, role: "assistant", text: "", client, done: false };
@@ -231,7 +234,7 @@ export function Chat() {
                 <div className="msg msg-ai" key={t.id}>
                   <div className="ai-mark">⚡</div>
                   <div className="ai-body">
-                    {t.client && <FluxMarkdown client={t.client} components={components} />}
+                    {t.client && <FluxMarkdown client={t.client} sanitize={sanitizeHtml} />}
                   </div>
                 </div>
               ),

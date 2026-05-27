@@ -65,9 +65,19 @@ interface FluxMarkdownProps {
    * up (and re-locks when they scroll back near the bottom). Off by default.
    */
   stickToBottom?: boolean;
+  /**
+   * Optional HTML sanitizer applied to every block's HTML before it is injected
+   * via `innerHTML` — **including the streaming (open/speculative) tail**, the
+   * path that raw `innerHTML` would otherwise expose. Pass a real sanitizer
+   * (e.g. DOMPurify's `sanitize`) when rendering untrusted / LLM HTML with
+   * `unsafeHtml` on. flux-md stays zero-dep — you bring the sanitizer. The
+   * built-in code/math renderers operate on already-escaped content and are not
+   * run through it. When omitted, rendering is byte-identical and zero-cost.
+   */
+  sanitize?: (html: string) => string;
 }
 
-function FluxMarkdownImpl({ client, components, virtualize, stickToBottom }: FluxMarkdownProps) {
+function FluxMarkdownImpl({ client, components, virtualize, stickToBottom, sanitize }: FluxMarkdownProps) {
   const blocks = useSyncExternalStore(client.subscribe, client.getSnapshot, client.getSnapshot);
   // Normalize "no overrides" to a stable `undefined` so memo comparisons and
   // the fast path don't churn on an empty object identity.
@@ -75,7 +85,7 @@ function FluxMarkdownImpl({ client, components, virtualize, stickToBottom }: Flu
   return (
     <div className="flux-md">
       {blocks.map((b) => (
-        <BlockView key={b.id} block={b} components={comps} virtualize={virtualize} />
+        <BlockView key={b.id} block={b} components={comps} virtualize={virtualize} sanitize={sanitize} />
       ))}
       {stickToBottom && <div aria-hidden="true" style={{ scrollSnapAlign: "end" }} className="flux-bottom-anchor" />}
     </div>
@@ -174,7 +184,12 @@ const INTRINSIC_PX: Record<string, number> = {
   Component: 120,
 };
 
-function BlockViewImpl(props: { block: Block; components?: Components; virtualize?: boolean }) {
+function BlockViewImpl(props: {
+  block: Block;
+  components?: Components;
+  virtualize?: boolean;
+  sanitize?: (html: string) => string;
+}) {
   const { block, virtualize } = props;
   const content = renderBlockContent(props);
   // Virtualize only *closed* blocks: the streaming tail (open/speculative) is
@@ -192,7 +207,15 @@ function BlockViewImpl(props: { block: Block; components?: Components; virtualiz
   return content;
 }
 
-function renderBlockContent({ block, components }: { block: Block; components?: Components }) {
+function renderBlockContent({
+  block,
+  components,
+  sanitize,
+}: {
+  block: Block;
+  components?: Components;
+  sanitize?: (html: string) => string;
+}) {
   const kind = block.kind.type;
 
   // Block-kind override replaces the entire renderer for this block. A
@@ -242,7 +265,12 @@ function renderBlockContent({ block, components }: { block: Block; components?: 
     );
   }
 
-  return <div className={className} dangerouslySetInnerHTML={{ __html: block.html }} />;
+  return (
+    <div
+      className={className}
+      dangerouslySetInnerHTML={{ __html: sanitize ? sanitize(block.html) : block.html }}
+    />
+  );
 }
 
 // A block is the same render when its identity, HTML, open-state, and the
@@ -250,8 +278,8 @@ function renderBlockContent({ block, components }: { block: Block; components?: 
 // is what stops a committed block from re-rendering (and thus re-parsing) on
 // every streaming patch.
 export function blocksEqual(
-  prev: { block: Block; components?: Components; virtualize?: boolean },
-  next: { block: Block; components?: Components; virtualize?: boolean },
+  prev: { block: Block; components?: Components; virtualize?: boolean; sanitize?: (html: string) => string },
+  next: { block: Block; components?: Components; virtualize?: boolean; sanitize?: (html: string) => string },
 ): boolean {
   return (
     prev.block.id === next.block.id &&
@@ -259,7 +287,8 @@ export function blocksEqual(
     prev.block.open === next.block.open &&
     prev.block.speculative === next.block.speculative &&
     prev.components === next.components &&
-    prev.virtualize === next.virtualize
+    prev.virtualize === next.virtualize &&
+    prev.sanitize === next.sanitize
   );
 }
 
