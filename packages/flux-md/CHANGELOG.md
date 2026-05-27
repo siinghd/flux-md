@@ -14,6 +14,12 @@ Notable changes to flux-md. Format based on
   instead of re-scanning and re-escaping the whole growing body. Measured on a
   200 KB `$$…$$` block at 16-byte chunks: **16,271 ms → ~93 ms** (~174×). Output
   is byte-identical (gated by `tests/math_fence_cache.rs`).
+- A long trailing run of link-reference / footnote definitions now commits
+  incrementally instead of being re-scanned on every append. Previously such a
+  run produced no renderable blocks, so the committed offset never advanced. A
+  document ending in a large reference section streams ~10× faster (235 KB at
+  16-byte chunks: **13,799 ms → ~1,380 ms**). Output is byte-identical (gated by
+  `tests/ref_defs_streaming.rs`).
 
 ## 0.3.2 — 2026-05-27
 

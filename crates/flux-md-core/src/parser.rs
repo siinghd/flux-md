@@ -495,7 +495,22 @@ impl StreamParser {
         // Advance committed_offset to the end of the last RAW block (which
         // may be a LinkRefDefinition we filtered out). This way ref defs
         // don't get re-scanned on the next append.
-        let last_raw_end_to_commit = if commit_all || raw_blocks.len() > to_commit.saturating_add(0) {
+        let last_raw_end_to_commit = if renderable.is_empty() && !finalizing {
+            // The tail is a pure run of non-renderable definition blocks (link-ref
+            // and/or footnote defs) — it produces nothing renderable, so `to_commit`
+            // is 0 and committed_offset would never advance, leaving the whole run
+            // re-scanned and re-collected every append (O(n²) for a long reference
+            // section). Commit every completed def but the last: a def's title can
+            // arrive on the following line, so the trailing def stays speculative
+            // until a later block proves it complete. (At finalize, the `commit_all`
+            // walk below commits the whole run.) Routes through the
+            // `last_raw_end_to_commit > 0` block so ref/footnote tables stay correct.
+            if raw_blocks.len() >= 2 {
+                raw_blocks[raw_blocks.len() - 2].range.end
+            } else {
+                0
+            }
+        } else if commit_all || raw_blocks.len() > to_commit.saturating_add(0) {
             // Walk the raw_blocks and find the boundary corresponding to our
             // commit decision. Concretely: after committing `to_commit`
             // renderable blocks, also include any trailing ref defs.
