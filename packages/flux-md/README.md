@@ -2,6 +2,8 @@
 
 Zero-dep streaming markdown for the browser. Rust→WASM core, one Web Worker per stream, incremental parse with speculative closure for mid-stream constructs.
 
+Drop in a streaming-aware React component (`<FluxMarkdown>`), wire each LLM stream to a `FluxClient`, and the markdown renders incrementally off the main thread — block by block, with stable identities so unchanged blocks never re-reconcile.
+
 Parsing runs entirely **off the main thread** — each stream gets its own pooled Web Worker, so many concurrent LLM responses render without contending for the UI thread. On each token the parser re-parses only the **active tail**, not the whole document, and heavy renderers (syntax highlighting, math, mermaid) are **deferred until a block closes**. The result is low retained memory and a main thread that stays responsive while streaming. See [the live demo](https://md.hsingh.app/).
 
 ## Install
@@ -37,11 +39,13 @@ client.finalize();
 In React:
 
 ```tsx
-import { useEffect, useMemo } from "react";
+import { useEffect, useState } from "react";
 import { FluxClient, FluxMarkdown } from "flux-md";
 
 export function ChatMessage({ stream }: { stream: AsyncIterable<string> }) {
-  const client = useMemo(() => new FluxClient(), []);
+  // One client per component instance. Destroy on unmount, not on stream change.
+  const [client] = useState(() => new FluxClient());
+  useEffect(() => () => client.destroy(), [client]);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,11 +56,8 @@ export function ChatMessage({ stream }: { stream: AsyncIterable<string> }) {
       }
       if (!cancelled) client.finalize();
     })();
-    return () => {
-      cancelled = true;
-      client.destroy();
-    };
-  }, [stream]);
+    return () => { cancelled = true; };
+  }, [client, stream]);
 
   return <FluxMarkdown client={client} />;
 }
@@ -73,7 +74,7 @@ Multiple concurrent streams just need multiple clients — each runs in its own 
 | Block identity across chunks | Stable monotonic IDs | New keys on every render |
 | Mid-stream unclosed `` ``` `` / `*` / `**` | Speculatively closed in render, replaced cleanly | Often renders raw or breaks |
 | Heavy renderers (syntax, math, mermaid) | Deferred until block close | Re-run per chunk |
-| XSS sanitization | Allowlist in Rust + URL scheme check | rehype-sanitize on JS thread |
+| XSS sanitization | Allowlist in Rust + URL scheme check | Downstream sanitizer pass on the JS thread |
 
 ## Public API
 
@@ -113,6 +114,25 @@ const client = new FluxClient({
 Omitted fields use the defaults above, so `new FluxClient()` is unchanged.
 Config is applied when the stream's parser is created and is **immutable** for
 that stream (`reset()` keeps it; use a new client for different flags).
+
+When to enable each flag:
+
+- `gfmAutolinks` — on by default. Leave it on unless you want strict CommonMark.
+- `gfmAlerts` — on by default. Leave it on unless you want strict CommonMark.
+- `gfmMath: true` — when your LLM emits `$…$` or `$$…$$` (or LaTeX `\(…\)` /
+  `\[…\]`). flux-md emits KaTeX-ready markup; you bring the KaTeX pass (or
+  `components.MathBlock`).
+- `gfmFootnotes: true` — when your input uses `[^1]` references and `[^1]:`
+  definitions. Off by default; see the footnote streaming caveat above.
+- `dirAuto: true` — when content can be RTL / mixed-direction. Emits per-block
+  `dir="auto"` so the browser detects direction independently per block.
+- `unsafeHtml: true` — only when rendering trusted HTML. For untrusted /
+  LLM-produced HTML, pair this with `<FluxMarkdown sanitize={…} />` (DOMPurify or
+  similar — see [Security](#security)).
+- `componentTags: ["Thinking", …]` — when your LLM emits custom tags like
+  `<Thinking>…</Thinking>` and you want their inner content parsed as markdown
+  and dispatched to a React component. Safe without `unsafeHtml` (attributes are
+  sanitized; allowlisted tags only).
 
 **Footnotes** (`gfmFootnotes`) work in streaming with one honest caveat: a
 `[^1]` reference renders speculatively the moment it's seen (committed blocks
@@ -160,15 +180,15 @@ Subscribes to a `FluxClient`, renders each block keyed by its stable parser-assi
 
 #### Custom components / overrides
 
-Pass a `components` map to replace how elements render — the same idea as
-react-markdown's `components` prop, but the keys come in **two namespaces**:
+Pass a `components` map to replace how elements render. Keys come in **two
+namespaces**:
 
 ```tsx
 import { useMemo } from "react";
 import { FluxClient, FluxMarkdown, type Components } from "flux-md";
 
 function Message({ client }: { client: FluxClient }) {
-  // ⚠️ Memoize (or hoist to module scope). A fresh object every render busts
+  // Memoize (or hoist to module scope). A fresh object every render busts
   // FluxMarkdown's block memo, so every block re-parses on every patch.
   const components: Components = useMemo(
     () => ({
@@ -180,6 +200,15 @@ function Message({ client }: { client: FluxClient }) {
       // block-kind (capitalized BlockKindTag) — replaces the whole block
       CodeBlock: ({ text, language, open }) => (
         <MyCodeBlockWithCopyButton code={text} lang={language} streaming={open} />
+      ),
+
+      // GitHub alerts (`> [!NOTE]` / `[!TIP]` / `[!WARNING]` / `[!CAUTION]` /
+      // `[!IMPORTANT]`) — swap in your own callout component. The alert kind
+      // is on `block.kind.data.kind`; `html` is the rendered inner body.
+      Alert: ({ block, html }) => (
+        <MyCallout kind={(block.kind.data as { kind: string }).kind}>
+          <div dangerouslySetInnerHTML={{ __html: html }} />
+        </MyCallout>
       ),
     }),
     [],
@@ -313,8 +342,8 @@ styles them, and they're overridable as a block kind via `components.Alert`.
 By design, not yet, or only partially:
 
 - **Raw HTML in markdown** — escaped by default, not passed through. (Security
-  default. A `setUnsafeHtml(true)` opt-in exists but must never be enabled for
-  untrusted input.)
+  default. The `unsafeHtml: true` config flag disables the escape but must never
+  be enabled for untrusted input without a `sanitize` hook.)
 - **Forward link references when streaming** — a `[ref]` used *before* its later
   `[ref]: url` definition can't resolve until the definition arrives; one-shot
   parsing handles it fully, streaming converges once the definition streams in.
@@ -326,13 +355,28 @@ By design, not yet, or only partially:
 - **Syntax highlighting on open code blocks** — deferred until close. This is a
   deliberate perf choice.
 
+## Performance
+
+Every realistic streaming shape (long paragraph, fenced code block, GFM table,
+blockquote/alert, flat list, math fence, reference-heavy document) parses in
+**O(n) total work**, not O(n²) — at every chunk size from 16 bytes (char-by-char)
+up. Each shape has an incremental cache that mirrors the structure of the block
+so that an append only does work proportional to the *newly arrived* bytes, not
+the growing tail. See [CHANGELOG.md](./CHANGELOG.md) for per-shape numbers and
+the regression that prompted each cache; the canonical bench is
+`crates/flux-md-core/examples/bench.rs` (`cargo run --release --example bench`).
+
+Headline numbers are not durable across machines, but the curve is: chunk size
+shouldn't change the order of magnitude for any shape. If you hit one that does,
+file an issue with the input and chunking — that's the next bench scenario.
+
 ## Security
 
 flux-md is XSS-safe by default — its HTML output is meant to be injected via
 `innerHTML` without a downstream sanitizer:
 
-- **Raw HTML is escaped** (the `unsafe_html` / `setUnsafeHtml(true)` opt-in
-  disables this; **never enable it for untrusted input**).
+- **Raw HTML is escaped** (the `unsafeHtml: true` config flag disables this;
+  **never enable it for untrusted input without a `sanitize` hook**).
 - **Dangerous URL schemes are neutralized** in `<a href>` and `<img src>` —
   `javascript:`, `vbscript:`, `data:text/html`, `data:text/javascript` become
   `#`. The check runs on the *decoded* URL and strips characters browsers
@@ -352,12 +396,17 @@ that returns raw HTML), **bring a real sanitizer** and pass it via
 `<FluxMarkdown sanitize={…} />`. flux-md applies it to every block's HTML before
 injection — **including the streaming (open) tail**, which the raw-`innerHTML`
 fast path would otherwise expose. flux-md stays zero-dep; you choose the
-sanitizer:
+sanitizer. The realistic pattern (matches the live demo):
 
 ```tsx
 import DOMPurify from "dompurify";
 
-<FluxMarkdown client={client} sanitize={(html) => DOMPurify.sanitize(html)} />
+// Hoist to module scope (or wrap in useCallback). A fresh arrow each render
+// busts FluxMarkdown's per-block memo and re-runs every block through sanitize.
+const sanitize = (html: string) => DOMPurify.sanitize(html);
+
+// …then in your component:
+<FluxMarkdown client={client} sanitize={sanitize} />
 ```
 
 The built-in code/math renderers operate on already-escaped content and are not
