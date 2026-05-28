@@ -4,6 +4,41 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.5.4 — 2026-05-28
+
+### Fixed (mid-stream rendering)
+
+- **GFM tables now form during streaming, not just at finalize.** Streaming a
+  table char-by-char (or in any chunking where the delimiter row's `\n` lands
+  in a different chunk than the row's content) used to leave the block as a
+  `<p>` spanning both lines until `.finalize()` ran. The paragraph cache's
+  delimiter-detection walked from the line AFTER the cut and so missed a
+  delimiter row that completed inside the line the cut had advanced into. The
+  fix re-checks the line containing the cut whenever it has just completed,
+  guarded by a cheap `bytes[cut..].contains('\n')` so long open paragraphs
+  without interior `\n` still take the O(new bytes) per-call path.
+- **Open alerts/blockquotes with an empty body no longer render an empty
+  `<p></p>`.** A `> [!NOTE]\n` shown mid-stream now matches the full renderer:
+  `<div class="markdown-alert ...">…<p class="...title">Note</p></div>` with
+  no empty body paragraph. The container cache was wrapping the body in
+  `<p>…</p>` unconditionally, even when the body was empty.
+
+Both bugs only manifested *before* `finalize()`. The post-finalize output —
+what every existing parity test checks — was already correct, which is why
+neither was caught earlier. A new `tests/midstream_parity.rs` asserts that the
+streamed view of an open block matches what one-shot parsing produces for the
+same prefix (tables, alerts, blockquotes, lists, code fences, math fences).
+
+### Performance
+
+- `big_table` at the artificial `chunk=16` stress case is ~280 ms (was ~145 ms
+  in 0.5.3). The 145 ms was the *incorrect* path: the paragraph cache treated
+  the whole 200 KB table as a single growing paragraph until finalize, never
+  engaging the table cache. The 280 ms is the cost of correctly emitting the
+  table mid-stream at the smallest chunk size. Every realistic LLM streaming
+  chunk size (≥64 bytes) is unchanged — `big_table` at chunk=64 is 73 ms,
+  chunk=256 is 38 ms, etc.
+
 ## 0.5.3 — 2026-05-28
 
 ### Performance
