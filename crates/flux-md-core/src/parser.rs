@@ -131,6 +131,8 @@ pub struct StreamParser {
     para_cache: Option<ParagraphCache>,
     /// Fast path for a long open GFM table at the tail (see [`TableCache`]).
     table_cache: Option<TableCache>,
+    /// Fast path for a long open blockquote / alert at the tail (see [`ContainerCache`]).
+    container_cache: Option<ContainerCache>,
 }
 
 #[derive(Default)]
@@ -246,6 +248,59 @@ struct TableCache {
     tbody_opened: bool,
 }
 
+/// Incremental render state for a single open GFM blockquote / alert at the
+/// tail whose inner is one growing paragraph. Long resumable containers are
+/// otherwise O(n²) — every append re-runs `blockquote_inner` + `scan` + the
+/// full inline render over the whole growing inner. This cache wraps the
+/// paragraph-cache pattern with a `>`-stripped inner buffer: each new
+/// `> ` line is stripped once into `inner_buffer`, and only the unsettled
+/// inline tail is re-rendered per append.
+///
+/// Limited to the single-paragraph-inner shape — by far the realistic LLM
+/// output (a long `> [!NOTE]` note, a `>`-quoted explanation). The cache
+/// bails (full path takes over) on any of:
+///   - a line without a `>` marker (lazy continuation or end-of-container),
+///   - a `>`-marker line whose stripped content is blank (paragraph break
+///     inside the container — multi-block inner),
+///   - a `\r` byte in any processed line (CRLF input — full path handles it).
+///
+/// Disarmed when footnotes are on, mirroring `TableCache`: cell-level
+/// `[^x]` occurrence ids would diverge across the cache vs. full-reparse
+/// boundary (the cache renders each inner-prefix once; the full path
+/// re-renders the whole inner each append).
+struct ContainerCache {
+    /// Absolute byte offset of the container's first line in `buffer`.
+    start: usize,
+    /// Stable id of the container block (preserved across appends and the close).
+    id: u64,
+    /// Container variant — drives wrapper HTML + line accounting (Alert skips
+    /// the `[!KIND]` marker line; Blockquote starts from the first line).
+    kind: ContainerCacheKind,
+    /// Pre-built wrapper HTML emitted before the inner inline content.
+    html_prefix: String,
+    /// Pre-built wrapper HTML emitted after the inner inline content.
+    html_suffix: String,
+    /// Stripped inner content built up so far, one `\n`-terminated line per
+    /// processed source line. Grows by O(new line length) per append.
+    inner_buffer: String,
+    /// Absolute buffer offset just past the last `\n` we've stripped into
+    /// `inner_buffer`. The next complete line at this offset is the next
+    /// candidate to fold.
+    lines_upto: usize,
+    /// Position in `inner_buffer`; bytes in `[0..inner_cut]` are the settled
+    /// prefix whose rendered HTML lives in `committed_inner_html` and is
+    /// never re-rendered again.
+    inner_cut: usize,
+    /// Rendered inline HTML of `inner_buffer[0..inner_cut]`.
+    committed_inner_html: String,
+}
+
+#[derive(Clone, Copy)]
+enum ContainerCacheKind {
+    Blockquote,
+    Alert(crate::blocks::AlertKind),
+}
+
 impl StreamParser {
     pub fn new() -> Self {
         Self {
@@ -270,6 +325,7 @@ impl StreamParser {
             fence_cache: None,
             para_cache: None,
             table_cache: None,
+            container_cache: None,
         }
     }
 
@@ -408,6 +464,9 @@ impl StreamParser {
                 return patch;
             }
             if let Some(patch) = self.try_incremental_table() {
+                return patch;
+            }
+            if let Some(patch) = self.try_incremental_container() {
                 return patch;
             }
         }
@@ -662,6 +721,7 @@ impl StreamParser {
         self.fence_cache = None;
         self.para_cache = None;
         self.table_cache = None;
+        self.container_cache = None;
         if !finalizing && new_active.len() == 1 {
             let raw = renderable[to_commit];
             let start = tail_start + raw.range.start;
@@ -691,12 +751,21 @@ impl StreamParser {
                         self.para_cache =
                             build_paragraph_cache(&self.buffer, start, new_active[0].id, &opts);
                     }
-                    // Footnotes are disabled for the table cache (see `TableCache`
-                    // docs): the per-`[^x]` occurrence counter would diverge across
-                    // the cache vs. full-reparse boundary.
+                    // Footnotes are disabled for the table / container caches
+                    // (see their doc comments): the per-`[^x]` occurrence counter
+                    // would diverge across the cache vs. full-reparse boundary.
                     RawBlockKind::Table if !self.gfm_footnotes => {
                         self.table_cache =
                             build_table_cache(&self.buffer, start, new_active[0].id, &opts);
+                    }
+                    RawBlockKind::Blockquote if !self.gfm_footnotes => {
+                        self.container_cache = build_container_cache(
+                            &self.buffer,
+                            start,
+                            new_active[0].id,
+                            &new_active[0].kind,
+                            &opts,
+                        );
                     }
                     _ => {}
                 }
@@ -1034,6 +1103,170 @@ impl StreamParser {
         self.table_cache = Some(cache);
         Some(Patch { newly_committed: Vec::new(), active: vec![block] })
     }
+
+    /// O(new bytes) extension of a long open blockquote / alert at the tail.
+    /// Strips the `>` marker from new lines into `inner_buffer`, runs the
+    /// paragraph-cache-style inline-boundary commit on the inner, and
+    /// re-renders only the unsettled tail. Returns `None` (dropping the
+    /// cache) the moment the inner stops being a single growing paragraph
+    /// (blank-after-marker line, a non-`>` line, or `\r`) — the full
+    /// reparse then handles the multi-block / lazy-continuation case.
+    fn try_incremental_container(&mut self) -> Option<Patch> {
+        let mut cache = self.container_cache.take()?;
+        let bytes = self.buffer.as_bytes();
+        let end = bytes.len();
+        // Tail-only check (same as the other caches).
+        if cache.start < self.committed_offset
+            || bytes[self.committed_offset..cache.start]
+                .iter()
+                .any(|&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        {
+            return None;
+        }
+
+        // Fold every newly-complete `> ` line into `inner_buffer`. Any bail
+        // condition (\r, missing marker, blank inner line) drops the cache
+        // so the full reparse can produce the correct multi-block / lazy-
+        // continuation output.
+        let mut pos = cache.lines_upto;
+        while pos < end {
+            let r = match bytes[pos..end].iter().position(|&b| b == b'\n') {
+                None => break, // trailing partial — handled below
+                Some(r) => r,
+            };
+            let content_end = pos + r;
+            let next = pos + r + 1;
+            if bytes[pos..content_end].contains(&b'\r') {
+                return None;
+            }
+            let stripped = strip_blockquote_marker(&bytes[pos..content_end])?;
+            if stripped.iter().all(|&b| matches!(b, b' ' | b'\t')) {
+                // `> ` (with no content) → blank inner line → paragraph break.
+                return None;
+            }
+            let stripped_str = std::str::from_utf8(stripped).ok()?;
+            cache.inner_buffer.push_str(stripped_str);
+            cache.inner_buffer.push('\n');
+            cache.lines_upto = next;
+            pos = next;
+        }
+
+        // Speculatively extract the trailing partial line's stripped content,
+        // if it already has a `>` marker. The partial extends the open inner
+        // paragraph by ≤ one line — we push it onto `inner_buffer` for the
+        // boundary + render passes, then truncate it back so future appends
+        // see the same committed state.
+        let partial = &bytes[cache.lines_upto..end];
+        let mut partial_pushed = 0usize;
+        if !partial.is_empty() {
+            if partial.contains(&b'\r') {
+                return None;
+            }
+            if let Some(stripped) = strip_blockquote_marker(partial) {
+                // A leading `>` with only whitespace after it is the prefix of
+                // a maybe-blank inner line — stay safe and bail.
+                if !stripped.is_empty()
+                    && !stripped.iter().all(|&b| matches!(b, b' ' | b'\t'))
+                {
+                    let stripped_str = std::str::from_utf8(stripped).ok()?;
+                    cache.inner_buffer.push_str(stripped_str);
+                    partial_pushed = stripped_str.len();
+                }
+            } else {
+                // No `>` marker yet on the partial — could still become one as
+                // more bytes arrive (e.g. just `>` or leading spaces). Render
+                // with what we have committed so far.
+            }
+        }
+        let post_partial_len = cache.inner_buffer.len();
+        let committed_inner_end = post_partial_len - partial_pushed;
+
+        // Build inline opts once for the whole append. Inner refs / footnote
+        // defs aren't part of this open container, so `&""` is fine for the
+        // footnote-region pre-pass (matches the paragraph-cache convention).
+        let opts = self.build_inline_opts("");
+
+        // Render boundary on the full active region (committed-tail + partial).
+        // The boundary tells us how far is now settled across resolved
+        // emphasis pairs, closed code spans, etc. Anything past
+        // `committed_inner_end` is partial and must stay uncommitted.
+        let mut active_html = String::new();
+        let boundary_rel = render_inline_boundary(
+            &cache.inner_buffer[cache.inner_cut..],
+            &opts,
+            &mut active_html,
+        );
+        let new_cut = (cache.inner_cut + boundary_rel).min(committed_inner_end);
+        if new_cut > cache.inner_cut {
+            let mut seg = String::new();
+            render_inline(&cache.inner_buffer[cache.inner_cut..new_cut], &opts, &mut seg);
+            cache.committed_inner_html.push_str(&seg);
+            cache.inner_cut = new_cut;
+            active_html.clear();
+            render_inline(&cache.inner_buffer[cache.inner_cut..], &opts, &mut active_html);
+        }
+
+        // Assemble: prefix + committed + active (trimmed end) + suffix. Mirror
+        // `render_paragraph`'s trailing-whitespace trim so the cache and full
+        // path produce byte-identical bytes around `</p>`.
+        let mut inner_total = String::with_capacity(
+            cache.committed_inner_html.len() + active_html.len(),
+        );
+        inner_total.push_str(&cache.committed_inner_html);
+        inner_total.push_str(&active_html);
+        let final_inner = inner_total
+            .trim_end_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r'));
+
+        let mut html = String::with_capacity(
+            cache.html_prefix.len() + final_inner.len() + cache.html_suffix.len(),
+        );
+        html.push_str(&cache.html_prefix);
+        html.push_str(final_inner);
+        html.push_str(&cache.html_suffix);
+
+        // Drop the speculative partial bytes so the cache's committed state is
+        // unchanged for the next append.
+        cache.inner_buffer.truncate(committed_inner_end);
+
+        let kind = match cache.kind {
+            ContainerCacheKind::Blockquote => BlockKind::Blockquote,
+            ContainerCacheKind::Alert(ak) => BlockKind::Alert { kind: ak },
+        };
+        let block = Block {
+            id: cache.id,
+            kind,
+            start: cache.start,
+            end,
+            html,
+            open: true,
+            speculative: true,
+        };
+        self.active_blocks = vec![block.clone()];
+        self.container_cache = Some(cache);
+        Some(Patch { newly_committed: Vec::new(), active: vec![block] })
+    }
+}
+
+/// Strip the CommonMark blockquote marker (`>` with optional one space, after
+/// up to 3 leading spaces) from a line's bytes. Returns the content portion,
+/// or `None` if the line doesn't carry a `>` marker (lazy continuation or
+/// end-of-blockquote — the full path handles those).
+fn strip_blockquote_marker(line: &[u8]) -> Option<&[u8]> {
+    let mut i = 0;
+    let mut indent = 0;
+    while i < line.len() && line[i] == b' ' && indent < 3 {
+        i += 1;
+        indent += 1;
+    }
+    if i >= line.len() || line[i] != b'>' {
+        return None;
+    }
+    i += 1;
+    // CommonMark: a single optional space after `>` (not a tab, not multiple).
+    if i < line.len() && line[i] == b' ' {
+        i += 1;
+    }
+    Some(&line[i..])
 }
 
 /// Build the incremental cache for an open code fence at `start`, walking its
@@ -1230,6 +1463,72 @@ fn build_table_cache(buffer: &str, start: usize, id: u64, opts: &RenderOpts) -> 
         ncol,
         aligns,
         tbody_opened: false,
+    })
+}
+
+/// Arm the container cache for an open blockquote / alert at `start`. Returns
+/// `None` if the first inner line isn't fully present yet (so we can't safely
+/// commit to a kind — Blockquote vs. Alert is a first-line decision) or if
+/// the block kind isn't a Blockquote / Alert. The first cache call processes
+/// the existing lines; subsequent appends only fold new bytes.
+fn build_container_cache(
+    buffer: &str,
+    start: usize,
+    id: u64,
+    block_kind: &BlockKind,
+    opts: &RenderOpts,
+) -> Option<ContainerCache> {
+    let bytes = buffer.as_bytes();
+    let end = bytes.len();
+    // Require at least one complete line so the Blockquote / Alert distinction
+    // is settled (a partial first line could later become `[!NOTE]`).
+    let first_nl = bytes[start..end].iter().position(|&b| b == b'\n')?;
+    let first_line_end = start + first_nl;
+    if bytes[start..first_line_end].contains(&b'\r') {
+        return None;
+    }
+    let (kind, html_prefix, html_suffix, lines_upto) = match block_kind {
+        BlockKind::Blockquote => {
+            let mut p = String::with_capacity(48);
+            p.push_str("<blockquote");
+            p.push_str(opts.dir());
+            p.push_str(">\n<p");
+            p.push_str(opts.dir());
+            p.push('>');
+            let s = String::from("</p>\n</blockquote>");
+            (ContainerCacheKind::Blockquote, p, s, start)
+        }
+        BlockKind::Alert { kind: ak } => {
+            let mut p = String::with_capacity(96);
+            p.push_str("<div class=\"markdown-alert markdown-alert-");
+            p.push_str(ak.class());
+            p.push_str("\" data-alert=\"");
+            p.push_str(ak.class());
+            p.push_str("\" role=\"note\"");
+            p.push_str(opts.dir());
+            p.push_str(">\n<p class=\"markdown-alert-title\"");
+            p.push_str(opts.dir());
+            p.push('>');
+            p.push_str(ak.title());
+            p.push_str("</p>\n<p");
+            p.push_str(opts.dir());
+            p.push('>');
+            let s = String::from("</p>\n</div>");
+            // Alert: skip past the `[!KIND]` marker line — the body starts on line 2.
+            (ContainerCacheKind::Alert(*ak), p, s, first_line_end + 1)
+        }
+        _ => return None,
+    };
+    Some(ContainerCache {
+        start,
+        id,
+        kind,
+        html_prefix,
+        html_suffix,
+        inner_buffer: String::new(),
+        lines_upto,
+        inner_cut: 0,
+        committed_inner_html: String::new(),
     })
 }
 
