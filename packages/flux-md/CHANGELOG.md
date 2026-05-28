@@ -4,6 +4,41 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.5.2 — 2026-05-28
+
+### Performance
+
+- **Streaming a long GFM table is now O(n) at every chunk size.** Tables already
+  rendered visually incrementally (header at the delimiter row, rows append as
+  they arrive) — but `render_table` re-walked every row on every append, so the
+  total work was O(n²) once chunks exceeded ~30 bytes (a row). The fix is an
+  incremental `TableCache` that mirrors the existing code/math `FenceCache`:
+  `<thead>` is pre-rendered once, each newly-complete `<tr>` is folded into the
+  cached prefix, and only the trailing partial row is re-rendered each append.
+  Output is byte-identical; parity gated by `tests/table_cache.rs` (every chunk
+  size 1..=9 × char-by-char against one-shot, with alignments, inline markdown,
+  link refs, CRLF fallback, and a 400-row stress case).
+
+  Measured on a 200 KB table (best of 7 — chunk varies on each row):
+
+  | chunk |  before  | after | speedup |
+  |------:|---------:|------:|--------:|
+  |    16 |   143 ms | 145 ms | ~1× (was already fast) |
+  |    64 | 20807 ms |  78 ms | **267×** |
+  |   128 | 10414 ms |  54 ms | **193×** |
+  |   256 |  5373 ms |  40 ms | **134×** |
+  |   512 |  2608 ms |  34 ms |  **77×** |
+  |  1024 |  1322 ms |  31 ms |  **43×** |
+
+  The pre-fix bench printed only chunks 16 and 256, which hid the regression
+  (16 was fine, 256 was the cliff floor). The bench now sweeps 16/64/128/256/
+  512/1024 so the next regression in this shape can't slip in unnoticed.
+
+  Footnotes are the one combination still on the full O(n²) path: the
+  cell-level `[^x]` occurrence counter would diverge across the
+  cache/full-reparse boundary, so the cache disarms when `gfmFootnotes` is on
+  (rare enough to defer to a later release).
+
 ## 0.5.1 — 2026-05-27
 
 ### Performance
@@ -14,8 +49,9 @@ Notable changes to flux-md. Format based on
   two-level lookup (committed, then the uncommitted tail), and folded in place
   via `Rc::make_mut` once the render's clone is dropped. A 235 KB
   reference-definition stream at 16-byte chunks: **~1,395 ms → ~53 ms** (~26×).
-  This was the last remaining O(n²) streaming shape — every realistic shape is
-  now O(n). Output is unchanged.
+  This was believed to be the last remaining O(n²) streaming shape; in fact a
+  long open GFM table was still O(n²) (fixed in 0.5.2 — `big_table` at
+  chunk=256 went from ~5,400 ms to ~40 ms). Output is unchanged.
 
 ## 0.5.0 — 2026-05-27
 
