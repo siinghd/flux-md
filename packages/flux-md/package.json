@@ -10,6 +10,10 @@
     "./client": "./src/client.ts",
     "./react": "./src/react.tsx",
     "./dom": "./src/dom.ts",
+    "./element": "./src/element.ts",
+    "./vue": "./src/vue.ts",
+    "./svelte": "./src/svelte.ts",
+    "./solid": "./src/solid.tsx",
     "./highlight": "./src/hi.ts",
     "./types": "./src/types.ts"
   },
