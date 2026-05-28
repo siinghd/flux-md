@@ -4,6 +4,31 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.5.5 — 2026-05-28
+
+### Performance
+
+- 1× memcpy in the paragraph / container cache assembly (was 2×). Both caches
+  were building the block HTML in two stages — concatenate
+  `committed + active` into an intermediate `String`, then concatenate
+  `<p>` + that into the output — so a long open paragraph or container did two
+  memcpys of the committed inner per append. The fix builds directly into the
+  output buffer and trims trailing whitespace in-place; the container case
+  backs out a provisional `<p>` opener if the body content turns out to be
+  empty (preserving the empty-body fix from 0.5.4). Output is byte-identical.
+
+  200 KB bench (best of 7), chunk=16:
+
+  | shape           | 0.5.4    | 0.5.5    | speedup |
+  |-----------------|---------:|---------:|--------:|
+  | `long_paragraph`| 142 ms   | **96 ms**| 1.48× |
+  | `emphasis_para` | 170 ms   | **116 ms**| 1.47× |
+  | `big_blockquote`| 213 ms   | **157 ms**| 1.36× |
+  | `big_alert`     | 343 ms   | **237 ms**| 1.45× |
+
+  Modest wins at every chunk size for the affected caches; the
+  table / list / fence caches are unchanged (they were already 1× memcpy).
+
 ## 0.5.4 — 2026-05-28
 
 ### Fixed (mid-stream rendering)
