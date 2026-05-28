@@ -1,4 +1,4 @@
-import type { Block, FromWorker, ParserConfig, Patch, ToWorker, WorkerLike } from "./types";
+import type { Block, FromWorker, ParserConfig, Patch, ToWorker, WorkerLike } from "./types-core";
 
 /**
  * The ordered-block store backing a stream, extracted as a pure function so
