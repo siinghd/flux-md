@@ -4,6 +4,70 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.5.3 — 2026-05-28
+
+### Performance
+
+- **Streaming long open resumable containers is now O(n).** A long
+  `> [!NOTE]` alert, a `>`-quoted explanation, or a flat bullet/ordered list
+  used to re-run scan + inline render over the whole growing inner on every
+  append (O(n²)). Three new tail caches mirror the existing fence/table
+  pattern:
+
+  - `ContainerCache` — single-paragraph blockquote / GitHub alert. Wraps
+    the existing paragraph-cache (inline-boundary commit) with a
+    `>`-stripped inner buffer; the wrapper HTML (`<blockquote>` /
+    alert `<div>`) is built once at arm time, each new `> ` line is
+    stripped once into the inner buffer, only the unsettled inline tail is
+    re-rendered. Bails on a blank `>`-line (paragraph break inside the
+    container), lazy continuation, or `\r`.
+
+  - `ListCache` — tight, flat list (the LLM-emit shape: one sibling marker
+    per line, no blanks, no continuation, no nesting). Opener
+    (`<ul>` / `<ol start=N>`) pre-rendered at arm time; each new sibling
+    line renders directly into the cache as a tight `<li>…</li>` (GFM
+    task-list `[ ] `/`[x] ` supported). Bails on the first blank line
+    (loose-list signal), non-marker line, over-edge marker (nested), or
+    foreign-family marker — the full path handles those.
+
+  Measured at 50 KB (best of 7), before → after:
+
+  | shape           | chunk=16          | chunk=256       |
+  |-----------------|-------------------|-----------------|
+  | `big_blockquote`| 5164 → **22 ms**  | 332 → **8.5 ms**|
+  | `big_list`      | 6141 → **18 ms**  | 391 → **7.4 ms**|
+  | `big_alert`     | 6298 → **28 ms**  | 404 → **11 ms** |
+
+  At 200 KB, `big_list` chunk=256 was extrapolating to ~6.2 s before the
+  cache; now **36 ms** (~170×). Every realistic streaming shape now has a
+  flat chunk-size curve.
+
+  Output is byte-identical. Parity gated by `tests/container_cache.rs`
+  (blockquote + all five alert kinds, dir_auto, CRLF, lazy continuation,
+  multi-paragraph fallback, 400-line stress) and `tests/list_cache.rs` (5
+  marker families, ordered with non-default start, dir_auto, CRLF, loose /
+  nested / multi-line fallback, 400-item stress).
+
+### Documentation
+
+- Reworded the "future plugin slot" comments in `renderers/Math.tsx` and
+  `renderers/Mermaid.tsx`. The actual extension path is the
+  `components.MathBlock` / `components.Mermaid` overrides, which already
+  works end-to-end.
+
+### Known limitations
+
+- The three new caches disarm when `gfmFootnotes` is on, mirroring
+  `TableCache` from 0.5.2: cell-level `[^x]` occurrence ids would diverge
+  across the cache vs. full-reparse boundary. Footnotes + a long container
+  / table stays on the full O(n²) path — rare combination, may be lifted
+  in a later release by tracking per-cache footnote-occ deltas.
+- The blockquote/alert cache covers the *single-paragraph* inner case (the
+  realistic LLM shape). A long open container with a multi-block inner
+  (lists inside, fenced code inside, etc.) still routes through the full
+  path. The bench's `big_blockquote` / `big_alert` are single-paragraph
+  shapes — what these caches were built for.
+
 ## 0.5.2 — 2026-05-28
 
 ### Performance
