@@ -96,6 +96,16 @@ fn open_list_matches() {
     assert_parity("- one\n- two\n");
     assert_parity("1. one\n2. two\n");
     assert_parity("- with **bold** and `code`\n");
+    // Loose: blank line between siblings must produce `<p>`-wrapped items
+    // both in the streamed view and one-shot.
+    assert_parity("- one\n\n- two\n");
+    assert_parity("- one\n\n- two\n\n- three\n");
+    // Trailing blank with no second marker yet — cache must stay tight (no
+    // `<p>` wrap) since a single-item list is never loose.
+    assert_parity("- one\n\n");
+    // Blank then partial marker — the list is settled loose by the blank.
+    assert_parity("- one\n\n- ");
+    assert_parity("- one\n\n- partial");
 }
 
 #[test]
