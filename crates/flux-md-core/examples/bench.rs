@@ -164,6 +164,54 @@ fn bench(name: &str, input: &str, chunk: usize, math: bool) {
     );
 }
 
+// One huge open blockquote — a model "explaining its reasoning" in a `>` quote
+// or a `> [!NOTE]` alert with many lines. Blockquote re-parses its inner each
+// append, so this catches the analogue of the long-paragraph shape inside a
+// resumable container.
+fn big_blockquote(target: usize) -> String {
+    let mut s = String::with_capacity(target + 32);
+    let unit = "> a continuation line with some **emphasis** and `code` here, plus more prose to bulk it up.\n";
+    while s.len() < target {
+        s.push_str(unit);
+    }
+    s
+}
+
+// A long flat unordered list — the shape an LLM emits when producing a 100+
+// item bulleted breakdown. List items are a resumable container, so each
+// append re-parses the whole growing tail.
+fn big_list(target: usize) -> String {
+    let mut s = String::with_capacity(target + 32);
+    let mut i = 0usize;
+    while s.len() < target {
+        s.push_str(&format!("- item {i} with some **bold** and a `bit of code` for flavor\n"));
+        i += 1;
+    }
+    s
+}
+
+// A `> [!NOTE]` alert with many lines of content — exercises the GFM alert
+// render path (a Blockquote variant with inner markdown).
+fn big_alert(target: usize) -> String {
+    let mut s = String::from("> [!NOTE]\n");
+    while s.len() < target {
+        s.push_str("> a continuation line of the note body with **bold** and a [link](https://example.com) thrown in.\n");
+    }
+    s
+}
+
+// Many small paragraphs separated by blank lines — the shape of a long prose
+// reply with frequent paragraph breaks. Each paragraph commits quickly; this
+// stresses the commit + active-vec churn path, not any single-block cache.
+fn many_paragraphs(target: usize) -> String {
+    let mut s = String::with_capacity(target + 64);
+    let unit = "A short paragraph of explanation with one **bold** word and an `inline` snippet.\n\nAnd a second paragraph here for variety, ending with a [link](https://example.com).\n\n";
+    while s.len() < target {
+        s.push_str(unit);
+    }
+    s
+}
+
 fn main() {
     println!("flux-md-core streaming bench (best of 7, release)\n");
     let mixed = mixed_doc(200_000);
@@ -174,6 +222,15 @@ fn main() {
     let para = long_paragraph(200_000);
     let emph = emphasis_paragraph(200_000);
     let table = big_table(200_000);
+    // Resumable containers (blockquote / list / alert) are still O(n²) when their
+    // inner grows as a single open block: every append re-scans + re-renders the
+    // whole growing inner. Sized down to 50 KB so the bench completes in seconds
+    // and the quadratic curve is still visible — at 200 KB these would dominate
+    // the runtime. See CHANGELOG / known-limitations for the planned fix.
+    let quote = big_blockquote(50_000);
+    let list = big_list(50_000);
+    let alert = big_alert(50_000);
+    let manyp = many_paragraphs(200_000);
 
     // Small chunks = many appends = many tail re-parses (the demanding case).
     // The intermediate sizes (64/128/512) matter: a scenario that's fast at 16
@@ -186,6 +243,10 @@ fn main() {
         bench("long_paragraph", &para, chunk, false);
         bench("emphasis_para", &emph, chunk, false);
         bench("big_table", &table, chunk, false);
+        bench("big_blockquote", &quote, chunk, false);
+        bench("big_list", &list, chunk, false);
+        bench("big_alert", &alert, chunk, false);
+        bench("many_paragraphs", &manyp, chunk, false);
         bench("ref_heavy", &refs, chunk, false);
         bench("math", &math, chunk, true);
         bench("big_math", &mathblk, chunk, true);

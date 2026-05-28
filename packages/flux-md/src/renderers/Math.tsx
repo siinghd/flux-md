@@ -1,9 +1,11 @@
 import { memo } from "react";
 
 /**
- * Math block — preformatted-text only. flux-md is zero-dep, so we don't
- * ship KaTeX/MathJax. If you want rendered math, drop in a renderer via
- * the (future) plugin slot and override this component.
+ * Default math block — emits the LaTeX inside a `<div class="math
+ * math-display">` (or `<span class="math math-inline">` for inline). flux-md
+ * stays zero-dep, so it does not ship KaTeX/MathJax: bring your own typesetter
+ * (run it over the rendered `.math` nodes once a block closes), or override
+ * this slot via `components.MathBlock` to render the LaTeX yourself.
  */
 
 interface Props {

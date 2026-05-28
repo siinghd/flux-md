@@ -1,9 +1,10 @@
 import { memo } from "react";
 
 /**
- * Mermaid block — preformatted-text only. flux-md is zero-dep, so we don't
- * ship the Mermaid runtime. The diagram source is shown in a code block;
- * plug in your own renderer at this slot if you want SVG output.
+ * Default mermaid block — renders the diagram source verbatim in a code-like
+ * container. flux-md stays zero-dep and does not ship the Mermaid runtime:
+ * override this slot via `components.Mermaid` to render to SVG with your own
+ * Mermaid build (typically `mermaid.run` over the closed-block source text).
  */
 
 interface Props {
