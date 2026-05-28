@@ -4,6 +4,66 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.5.6 — 2026-05-28
+
+### Performance
+
+- **`ContainerCache` now handles multi-paragraph inner content.** A blockquote
+  or GitHub alert with blank `>` lines inside (`> [!NOTE]\n> Para one.\n>\n>
+  Para two.\n`) used to drop the cache and fall back to the O(n²) full path
+  the moment the first blank arrived. The cache now closes the current
+  paragraph on a blank `>` and starts a new one, preserving the
+  streaming-O(new bytes) shape across multi-paragraph inner content. Each
+  completed inner paragraph is pre-rendered into a growing
+  `committed_paras_html` string; the single-paragraph fast path (the bench's
+  `big_blockquote` / `big_alert`) is unchanged within noise.
+
+- **`ListCache` now handles loose lists.** A flat list with blank lines
+  between siblings (`- one\n\n- two\n\n- three\n`) is a CommonMark "loose"
+  list — every item body gets wrapped in `<p>…</p>` — and the cache used to
+  bail on the first blank. The cache now flips to loose on the first
+  blank-then-marker sequence, re-renders prior cached items with `<p>`
+  wrappers from stored source spans (one-time O(items)), and continues the
+  streaming-O(new bytes) shape from there. Tight→loose is sticky.
+
+  50 KB loose-list bench, before-fix → after-fix:
+
+  | chunk |  before  |  after  | speedup |
+  |------:|---------:|--------:|--------:|
+  |  16   | 5593 ms  | 21 ms   | ~272×   |
+  | 256   |  355 ms  |  7 ms   | ~49×    |
+
+  Tight `big_list` perf is unchanged within bench noise.
+
+### Added
+
+- **React `CodeBlock` default renderer ships a copy-to-clipboard button.**
+  Closed code blocks now show an icon + "Copy" in their header (the existing
+  "streaming" pill takes that slot until close, so streaming code is never
+  copy-clickable mid-arrival). Click → copies the decoded source via
+  `navigator.clipboard.writeText` → swaps to a checkmark + "Copied" for
+  1.5 s → reverts. Native `<button>` (keyboard-reachable), `aria-label`
+  toggles between "Copy code" and "Copied" with `aria-live="polite"`,
+  guards against `navigator.clipboard` being absent (SSR / insecure context)
+  and rejected `writeText` promises (permission denied) — both leave the
+  button silently usable. No new dependency.
+
+### Documentation
+
+- README quickstart now uses `useState(() => new FluxClient())` + an
+  unmount-only destroy effect instead of `useMemo(() => new FluxClient(),
+  [])` + cleanup-on-stream-change (which destroyed the client when the
+  `stream` prop changed, leaking a freed parser on the next append).
+- New "when to enable each flag" guide for `ParserConfig` with concrete
+  LLM-output triggers (`gfmMath` when `$…$` arrives, `componentTags` for
+  `<Thinking>` blocks, etc.) — so a reader picks flags without reading the
+  full reference further down.
+- `Alert` block-kind override example added to the `components` docs.
+- `sanitize` example mirrors the realistic memoize-at-module-scope pattern
+  from the live demo (a fresh arrow each render busts the per-block memo).
+- New "Performance" section pointing to CHANGELOG / `examples/bench.rs` for
+  numbers (no numbers baked into the README — those rot).
+
 ## 0.5.5 — 2026-05-28
 
 ### Performance
