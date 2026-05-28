@@ -1023,16 +1023,26 @@ impl StreamParser {
             active.clear();
             render_inline(&self.buffer[cache.cut..content_end], &opts, &mut active);
         }
-        // Assemble, matching render_paragraph's `<p…>` opener and trailing trim.
-        let mut inner = String::with_capacity(cache.committed_inner.len() + active.len());
-        inner.push_str(&cache.committed_inner);
-        inner.push_str(&active);
-        let final_text = inner.trim_end_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r'));
-        let mut html = String::with_capacity(final_text.len() + 16);
+        // Assemble in a single buffer with 1× memcpy of `committed_inner` (was
+        // 2× via an intermediate `inner` String). Matches `render_paragraph`'s
+        // `<p…>` opener and trailing trim.
+        let mut html = String::with_capacity(
+            cache.committed_inner.len() + active.len() + opts.dir().len() + 8,
+        );
         html.push_str("<p");
         html.push_str(opts.dir());
         html.push('>');
-        html.push_str(final_text);
+        let body_start = html.len();
+        html.push_str(&cache.committed_inner);
+        html.push_str(&active);
+        while html.len() > body_start
+            && matches!(
+                html.as_bytes()[html.len() - 1],
+                b' ' | b'\t' | b'\n' | b'\r'
+            )
+        {
+            html.pop();
+        }
         html.push_str("</p>");
         let block = Block {
             id: cache.id,
@@ -1270,32 +1280,38 @@ impl StreamParser {
             render_inline(&cache.inner_buffer[cache.inner_cut..], &opts, &mut active_html);
         }
 
-        // Assemble: wrapper_open + (body_p_open + inner + body_p_close if any)
-        // + wrapper_close. Trailing whitespace in the inner is trimmed so the
-        // cache matches `render_paragraph`'s behavior around `</p>`. An empty
-        // body produces no `<p></p>` — matches the full renderer (no body
-        // sub-block).
-        let mut inner_total = String::with_capacity(
-            cache.committed_inner_html.len() + active_html.len(),
-        );
-        inner_total.push_str(&cache.committed_inner_html);
-        inner_total.push_str(&active_html);
-        let final_inner = inner_total
-            .trim_end_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r'));
-
+        // Assemble in a single buffer with 1× memcpy of `committed_inner_html`
+        // (was 2× via an intermediate `inner_total` String). Trailing
+        // whitespace is trimmed in-place; an empty body has its `<p>` opener
+        // backed out so the output matches the full renderer (no `<p></p>`).
         let mut html = String::with_capacity(
             cache.wrapper_open.len()
-                + (if final_inner.is_empty() {
-                    0
-                } else {
-                    cache.body_p_open.len() + final_inner.len() + cache.body_p_close.len()
-                })
+                + cache.body_p_open.len()
+                + cache.committed_inner_html.len()
+                + active_html.len()
+                + cache.body_p_close.len()
                 + cache.wrapper_close.len(),
         );
         html.push_str(&cache.wrapper_open);
-        if !final_inner.is_empty() {
-            html.push_str(&cache.body_p_open);
-            html.push_str(final_inner);
+        let body_p_start = html.len();
+        html.push_str(&cache.body_p_open);
+        let body_content_start = html.len();
+        html.push_str(&cache.committed_inner_html);
+        html.push_str(&active_html);
+        // Trim trailing whitespace from the body content (not from body_p_open).
+        while html.len() > body_content_start
+            && matches!(
+                html.as_bytes()[html.len() - 1],
+                b' ' | b'\t' | b'\n' | b'\r'
+            )
+        {
+            html.pop();
+        }
+        if html.len() == body_content_start {
+            // Empty body → back out the `<p>` opener (matches the full
+            // renderer, which emits no body sub-block for an empty inner).
+            html.truncate(body_p_start);
+        } else {
             html.push_str(&cache.body_p_close);
         }
         html.push_str(&cache.wrapper_close);
