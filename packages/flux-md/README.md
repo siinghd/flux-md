@@ -2,7 +2,7 @@
 
 Zero-dep streaming markdown for the browser. Rust→WASM core, one Web Worker per stream, incremental parse with speculative closure for mid-stream constructs.
 
-Drop in a streaming-aware React component (`<FluxMarkdown>`), wire each LLM stream to a `FluxClient`, and the markdown renders incrementally off the main thread — block by block, with stable identities so unchanged blocks never re-reconcile.
+Drop in a streaming-aware renderer — **React, Vue, Svelte, Solid, a framework-agnostic `<flux-markdown>` Web Component, or the vanilla DOM mount** — wire each LLM stream to a `FluxClient`, and the markdown renders incrementally off the main thread, block by block, with stable identities so unchanged blocks never re-reconcile.
 
 Parsing runs entirely **off the main thread** — each stream gets its own pooled Web Worker, so many concurrent LLM responses render without contending for the UI thread. On each token the parser re-parses only the **active tail**, not the whole document, and heavy renderers (syntax highlighting, math, mermaid) are **deferred until a block closes**. The result is low retained memory and a main thread that stays responsive while streaming. See [the live demo](https://md.hsingh.app/).
 
@@ -18,8 +18,10 @@ import.meta.url)`** pattern, so any bundler with asset-module support resolves
 them: **Vite** (the reference setup), **webpack 5**, **Rollup** (with asset
 modules), and **Parcel**. Next.js (webpack/turbopack) should work but is
 untested — file an issue if it doesn't. It is **browser-only** (it constructs
-Web Workers); it does not run under SSR/RSC. `react` is an optional peer
-dependency — only needed if you import `flux-md/react`.
+Web Workers); it does not run under SSR/RSC. The framework packages — `react`,
+`vue`, `svelte`, `solid-js` — are all **optional** peer dependencies; you only
+need the one whose binding you import. The core (`flux-md`, `flux-md/client`,
+`flux-md/dom`, `flux-md/element`) needs none.
 
 ## Quick start
 
@@ -64,6 +66,166 @@ export function ChatMessage({ stream }: { stream: AsyncIterable<string> }) {
 ```
 
 Multiple concurrent streams just need multiple clients — each runs in its own worker, so they don't share main-thread budget.
+
+## Framework bindings
+
+`FluxClient` is framework-neutral — it owns the worker and exposes
+`subscribe`/`getSnapshot`. Pick a renderer to put its blocks on screen. Every
+binding below is thin glue over the same incremental DOM renderer, so they
+share one identity contract: a committed block's node is never recreated, only
+the streaming tail re-renders.
+
+**One ownership rule across all bindings:** the renderer's teardown (React
+unmount, `handle.destroy()`, element disconnect, etc.) frees only the rendered
+DOM and the subscription — it **never** destroys the client. You call
+`client.destroy()` when you're done with the stream. (React's `<FluxMarkdown>`,
+documented [below](#fluxmarkdown-react), is the same.)
+
+### Vanilla / any framework — `flux-md/dom`
+
+```ts
+import { FluxClient } from "flux-md/client";
+import { mountFluxMarkdown } from "flux-md/dom";
+
+const client = new FluxClient();
+const handle = mountFluxMarkdown(client, document.getElementById("out")!, {
+  stickToBottom: true,
+});
+
+// Feed it from a fetch/SSE reader:
+const reader = (await fetch("/api/chat")).body!.getReader();
+const dec = new TextDecoder();
+for (;;) {
+  const { value, done } = await reader.read();
+  if (done) break;
+  client.append(dec.decode(value, { stream: true })); // stream:true carries multibyte across chunks
+}
+client.append(dec.decode());
+client.finalize();
+
+// Teardown: destroy BOTH — the renderer and the client you created.
+handle.destroy();
+client.destroy();
+```
+
+`mountFluxMarkdown(client, container, options?)` returns `{ destroy(), refresh() }`.
+Options: `components`, `sanitize`, `virtualize`, `stickToBottom`, `highlightCode`
+(default true), `batch` (default true — one DOM write per `requestAnimationFrame`).
+Block-kind overrides use `components` keyed by block-kind (`CodeBlock`, `Table`,
+`Alert`, `Component`, …) with values `(props) => HTMLElement | string`. Tag-level
+(lowercase `a`/`table`/`code`) overrides are **React-only** — there's no virtual
+tree on the fast `innerHTML` path; a block-kind override can rewrite the `html`
+it's handed instead.
+
+### Web Component `<flux-markdown>` — `flux-md/element`
+
+The universal binding — plain HTML, Angular, or any framework that renders DOM.
+Register once, then use the element:
+
+```ts
+import { defineFluxMarkdown } from "flux-md/element";
+defineFluxMarkdown(); // defines <flux-markdown>; pass a custom tag name if you like
+```
+
+```html
+<!-- zero-JS streaming straight from a URL -->
+<flux-markdown src="/api/post.md" gfm-math stick-to-bottom></flux-markdown>
+
+<!-- one-shot from inline text -->
+<flux-markdown># Hello **world**</flux-markdown>
+```
+
+```js
+// or caller-owned streaming — drive your own client:
+const el = document.querySelector("flux-markdown");
+el.client = myFluxClient;             // element subscribes; never destroys it
+el.components = { Thinking: (p) => myNode(p) };
+myFluxClient.append(delta);
+```
+
+Config flags are **tri-state attributes**: absent = library default;
+`gfm-math` / `gfm-math="true"` / `="1"` = on; `gfm-math="false"` / `="0"` = off
+(the only way to turn off a default-on flag such as `gfm-alerts`). It renders in
+light DOM so your markdown CSS applies, and `defineFluxMarkdown` is a no-op under
+SSR (no `customElements`). A self-owned element (`src` / `markdown` / inline
+text / `append()`) is torn down on disconnect; a caller-supplied `client` is left
+alone.
+
+**Angular** consumes the same element — no separate package:
+
+```ts
+import { Component, CUSTOM_ELEMENTS_SCHEMA } from "@angular/core";
+import { defineFluxMarkdown } from "flux-md/element";
+defineFluxMarkdown(); // once at bootstrap
+
+@Component({
+  standalone: true,
+  schemas: [CUSTOM_ELEMENTS_SCHEMA],
+  template: `<flux-markdown [attr.src]="url" stick-to-bottom></flux-markdown>`,
+})
+export class Answer { url = "/api/post.md"; }
+```
+
+### Vue 3 — `flux-md/vue`
+
+```vue
+<script setup lang="ts">
+import { onBeforeUnmount } from "vue";
+import { FluxClient } from "flux-md/client";
+import { FluxMarkdown } from "flux-md/vue";
+
+const client = new FluxClient();
+// feed client.append(delta) from your stream, then client.finalize()
+onBeforeUnmount(() => client.destroy());
+</script>
+
+<template>
+  <FluxMarkdown :client="client" stick-to-bottom />
+</template>
+```
+
+Props: `client` (required), `components`, `sanitize`, `virtualize`,
+`stickToBottom`. There's also a `useFluxMarkdown` composable returning a
+`container` ref if you'd rather mount into your own element.
+
+### Svelte (4 & 5) — `flux-md/svelte`
+
+A Svelte action — works in both v4 and v5, no `.svelte` build step:
+
+```svelte
+<script lang="ts">
+  import { onDestroy } from "svelte";
+  import { FluxClient } from "flux-md/client";
+  import { fluxMarkdown } from "flux-md/svelte";
+
+  const client = new FluxClient();
+  // feed client.append(delta) then client.finalize()
+  onDestroy(() => client.destroy());
+</script>
+
+<div use:fluxMarkdown={{ client, stickToBottom: true }} />
+```
+
+### Solid — `flux-md/solid`
+
+```tsx
+import { onCleanup } from "solid-js";
+import { FluxClient } from "flux-md/client";
+import { FluxMarkdown } from "flux-md/solid";
+
+const client = new FluxClient();
+// feed client.append(delta) then client.finalize()
+onCleanup(() => client.destroy());
+
+<FluxMarkdown client={client} stickToBottom />;
+```
+
+The Solid binding's mount/teardown logic is tested, but its JSX component shell
+has so far only been exercised through a real Solid (`vite-plugin-solid`) build
+in development, not in CI — treat it as the newest of the bindings and file an
+issue if your Solid setup trips on it. The component is a thin `ref`'d `<div>`;
+if you hit a transform edge, `mountFluxMarkdown` from `flux-md/dom` inside
+`onMount`/`onCleanup` is the zero-surprise fallback.
 
 ## What it does
 

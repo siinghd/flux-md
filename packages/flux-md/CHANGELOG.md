@@ -4,6 +4,49 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.6.0 — 2026-05-28
+
+### Added — flux-md is no longer React-only
+
+The core (`FluxClient` + the WASM worker) was always framework-neutral; only
+the renderer was React-bound. This release adds five new entry points, each
+**thin lifecycle glue** over one new framework-agnostic DOM renderer — none
+re-implements the subscribe/diff loop, and none destroys your client (you own
+the worker/stream).
+
+- **`flux-md/dom`** — the foundation. `mountFluxMarkdown(client, container,
+  options?) → { destroy(), refresh() }` incrementally patches a DOM subtree
+  using the parser's stable block IDs: a committed block's node is never
+  recreated (so one-shot work like syntax highlighting and the copy-button
+  listener runs exactly once), only the streaming tail re-renders. Reuses the
+  in-house highlighter for deferred code, applies your `sanitize` hook to the
+  open/speculative tail, and batches patches per `requestAnimationFrame`.
+  Block-kind overrides via `components` (`(props) => HTMLElement | string`);
+  tag-level overrides remain React-only.
+- **`flux-md/element`** — `defineFluxMarkdown(tag = "flux-markdown")` defines a
+  `<flux-markdown>` custom element. Light DOM (your markdown CSS applies),
+  SSR-safe (no auto-register), and usable three ways: a caller-owned `client`
+  property, a self-owned client driven by `append()`/`finalize()`, or zero-JS
+  via a `src` URL it fetch-streams / inline text / a `markdown` attribute.
+  Config flags map to tri-state attributes (`gfm-math`, `dir-auto`, …). Covers
+  **Angular** with `CUSTOM_ELEMENTS_SCHEMA` — no separate package.
+- **`flux-md/vue`** — a `<FluxMarkdown>` component + `useFluxMarkdown`
+  composable (Vue 3, optional peer dep).
+- **`flux-md/svelte`** — a `fluxMarkdown` action, `use:fluxMarkdown={{ client }}`
+  (Svelte 4 and 5, optional peer dep).
+- **`flux-md/solid`** — a `<FluxMarkdown>` component (Solid, optional peer dep).
+  Newest binding: its mount/teardown glue is tested, but the JSX component shell
+  has only been exercised via a real `vite-plugin-solid` build, not in CI — the
+  `flux-md/dom` mount inside `onMount`/`onCleanup` is the fallback if your Solid
+  toolchain trips on it.
+
+Purely additive — existing `flux-md` / `flux-md/react` / `flux-md/client` users
+are unaffected (the React renderer and core are byte-identical; the only change
+to existing code was a type-only import repoint so the neutral entry points
+typecheck without React). `vue`, `svelte`, and `solid-js` join `react` as
+optional peer dependencies — import only the binding you need. See the new
+"Framework bindings" section in the README. 65 → 85 tests.
+
 ## 0.5.6 — 2026-05-28
 
 ### Performance
