@@ -1,6 +1,16 @@
-import { createElement, memo, useMemo, useSyncExternalStore, type CSSProperties } from "react";
+import {
+  createElement,
+  memo,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type CSSProperties,
+} from "react";
 import type { Block, BlockComponentProps, Components } from "./types";
-import type { FluxClient } from "./client";
+import { FluxClient } from "./client";
+import type { ParserConfig } from "./types-core";
 import { CodeBlock } from "./renderers/CodeBlock";
 import { MathBlock } from "./renderers/Math";
 import { Mermaid } from "./renderers/Mermaid";
@@ -48,7 +58,23 @@ import { htmlToReact } from "./html-to-react";
  */
 
 interface FluxMarkdownProps {
-  client: FluxClient;
+  /**
+   * A caller-owned client (you drive `append`/`finalize` and own its lifecycle —
+   * the component never destroys it). Mutually exclusive with `stream`; if both
+   * are given, `client` wins (a dev warning fires).
+   */
+  client?: FluxClient;
+  /**
+   * A stream to render directly — the 1-line common case. Pass a `Response`, a
+   * `ReadableStream<Uint8Array>`, or an `AsyncIterable<string>` (e.g. SSE
+   * deltas) and the component owns an internal client, pipes the stream, and
+   * destroys it on unmount. A new `stream` identity supersedes the old.
+   */
+  stream?: AsyncIterable<string> | ReadableStream<Uint8Array> | Response;
+  /** Parser config for the internally-created client (stream mode only). */
+  streamConfig?: ParserConfig;
+  /** Called if piping the `stream` rejects (the source errored). Not the worker error channel. */
+  onStreamError?: (err: Error) => void;
   components?: Components;
   /**
    * Skip layout/paint for off-screen blocks via CSS `content-visibility: auto`
@@ -77,7 +103,15 @@ interface FluxMarkdownProps {
   sanitize?: (html: string) => string;
 }
 
-function FluxMarkdownImpl({ client, components, virtualize, stickToBottom, sanitize }: FluxMarkdownProps) {
+// The original render path: subscribe to a (required, caller- or hook-owned)
+// client and render its blocks. NEVER creates or destroys a client.
+function FluxMarkdownFromClient({
+  client,
+  components,
+  virtualize,
+  stickToBottom,
+  sanitize,
+}: FluxMarkdownProps & { client: FluxClient }) {
   const blocks = useSyncExternalStore(client.subscribe, client.getSnapshot, client.getSnapshot);
   // Normalize "no overrides" to a stable `undefined` so memo comparisons and
   // the fast path don't churn on an empty object identity.
@@ -90,6 +124,88 @@ function FluxMarkdownImpl({ client, components, virtualize, stickToBottom, sanit
       {stickToBottom && <div aria-hidden="true" style={{ scrollSnapAlign: "end" }} className="flux-bottom-anchor" />}
     </div>
   );
+}
+
+/**
+ * Own a {@link FluxClient} for the lifetime of a component and drive it from a
+ * `stream` (a `Response`, `ReadableStream<Uint8Array>`, or
+ * `AsyncIterable<string>`). Returns the client (read `outline()` / `getMetrics()`
+ * off it, or pass it to `<FluxMarkdown client={…} />`). The client is created
+ * once and destroyed on unmount; a new `stream` identity supersedes the old
+ * (the prior pipe is aborted, the parser is reset, the new stream is piped).
+ *
+ * Caveat (matches the manual `useEffect` form): a single-use stream — a
+ * `Response`/`ReadableStream`, or an async generator — can only be consumed
+ * once, so React **StrictMode**'s dev-only double-mount may truncate it in
+ * development. Production mounts once and is unaffected. If you need dev-exact
+ * streaming, drive a caller-owned client manually.
+ */
+export function useFluxStream(
+  stream: AsyncIterable<string> | ReadableStream<Uint8Array> | Response | null | undefined,
+  options?: { config?: ParserConfig; onError?: (err: Error) => void },
+): FluxClient {
+  // One client per hook instance. (React StrictMode double-invokes this
+  // initializer in DEV, constructing a throwaway second client whose worker
+  // slot isn't reclaimed — a minor dev-only artifact; production runs it once.
+  // The committed client is what's used, and its lifecycle below is correct.)
+  const [client] = useState(() => new FluxClient({ config: options?.config }));
+  // Read onError through a ref so its identity never re-subscribes the stream.
+  const onErrorRef = useRef(options?.onError);
+  onErrorRef.current = options?.onError;
+  // Track the last stream so we reset() only on a genuine source change — never
+  // on a StrictMode replay of the same stream (which would discard its head).
+  const prevStream = useRef<typeof stream>(undefined);
+
+  // Own the client's pool attachment. On (re)mount, reattach (StrictMode's
+  // dev double-mount destroys on the simulated unmount, then remounts the SAME
+  // instance — without reattach its patches would be dropped and it'd render
+  // blank); destroy on real unmount.
+  useEffect(() => {
+    client.reattach();
+    return () => client.destroy();
+  }, [client]);
+
+  // Consume the current stream; supersede (abort, no finalize) on change/unmount.
+  useEffect(() => {
+    if (stream == null) return;
+    const ac = new AbortController();
+    if (prevStream.current !== undefined && prevStream.current !== stream) {
+      client.reset(); // a different stream replaced a prior one
+    }
+    prevStream.current = stream;
+    client.pipeFrom(stream, { signal: ac.signal }).catch((e) => {
+      if (!ac.signal.aborted) {
+        onErrorRef.current?.(e instanceof Error ? e : new Error(String(e)));
+      }
+    });
+    return () => ac.abort();
+  }, [stream, client]);
+
+  return client;
+}
+
+// Stream mode: own a client via the hook, then render the normal client path.
+function FluxMarkdownFromStream(props: FluxMarkdownProps) {
+  const client = useFluxStream(props.stream, {
+    config: props.streamConfig,
+    onError: props.onStreamError,
+  });
+  return <FluxMarkdownFromClient {...props} client={client} />;
+}
+
+// Dispatch by rendering one of two SIBLING components (never a hook in a branch,
+// which would violate the Rules of Hooks): `stream` mode owns a client, `client`
+// mode uses the caller's. `memo` skips re-render when props are unchanged. If
+// both are given `client` wins (it owns the lifecycle); passing neither is a
+// usage error and throws (rather than crashing cryptically downstream).
+function FluxMarkdownImpl(props: FluxMarkdownProps) {
+  if (props.stream != null && props.client == null) {
+    return <FluxMarkdownFromStream {...props} />;
+  }
+  if (props.client == null) {
+    throw new Error("<FluxMarkdown>: pass either a `client` or a `stream` prop.");
+  }
+  return <FluxMarkdownFromClient {...(props as FluxMarkdownProps & { client: FluxClient })} />;
 }
 
 export const FluxMarkdown = memo(FluxMarkdownImpl);

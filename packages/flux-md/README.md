@@ -52,32 +52,60 @@ for await (const delta of streamFromAi()) {
 client.finalize();
 ```
 
-In React:
+In React — pass the stream straight to `<FluxMarkdown>`. It owns the client,
+pipes the stream, supersedes it if it changes, and cleans up on unmount:
+
+```tsx
+import { FluxMarkdown } from "flux-md/react";
+
+export function ChatMessage({ stream }: { stream: AsyncIterable<string> }) {
+  return <FluxMarkdown stream={stream} />;
+}
+```
+
+`stream` accepts an `AsyncIterable<string>` (e.g. SSE deltas), a `Response`, or
+a `ReadableStream<Uint8Array>` — so `<FluxMarkdown stream={await fetch("/api/chat")} />`
+works too.
+
+Need the client handle (for `outline()` / `getMetrics()` / a shared client)? Use
+the `useFluxStream` hook — same lifecycle, returns the owned client:
+
+```tsx
+import { FluxMarkdown, useFluxStream } from "flux-md/react";
+
+export function ChatMessage({ stream }: { stream: AsyncIterable<string> }) {
+  const client = useFluxStream(stream);
+  return <FluxMarkdown client={client} />;
+}
+```
+
+<details>
+<summary>Full manual control (caller-owned client)</summary>
+
+When you want to drive the stream yourself, pass a `client` you own — the
+component never destroys it:
 
 ```tsx
 import { useEffect, useState } from "react";
 import { FluxClient, FluxMarkdown } from "flux-md";
 
 export function ChatMessage({ stream }: { stream: AsyncIterable<string> }) {
-  // One client per component instance. Destroy on unmount, not on stream change.
   const [client] = useState(() => new FluxClient());
   useEffect(() => () => client.destroy(), [client]);
-
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      for await (const chunk of stream) {
-        if (cancelled) return; // stream changed / unmounted mid-flight
-        client.append(chunk);
-      }
-      if (!cancelled) client.finalize();
-    })();
-    return () => { cancelled = true; };
+    const ac = new AbortController();
+    client.pipeFrom(stream, { signal: ac.signal }); // pipeFrom also accepts AsyncIterable
+    return () => ac.abort();
   }, [client, stream]);
-
   return <FluxMarkdown client={client} />;
 }
 ```
+
+</details>
+
+> **StrictMode note:** a stream (SSE generator / `Response`) can be consumed only
+> once, so React StrictMode's dev-only double-mount may truncate it in
+> development. Production mounts once and is unaffected.
 
 Multiple concurrent streams just need multiple clients — each runs in its own worker, so they don't share main-thread budget.
 
@@ -265,7 +293,10 @@ class FluxClient {
     onBlock?: (block: Block) => void;                 // fires once per block as it commits
   });
   append(chunk: string): void;                      // queue text for parsing
-  pipeFrom(src: ReadableStream<Uint8Array> | Response): Promise<void>; // read → append → finalize
+  pipeFrom(                                         // read → append → finalize
+    src: ReadableStream<Uint8Array> | Response | AsyncIterable<string>,
+    opts?: { signal?: AbortSignal },                // abort to supersede (no finalize)
+  ): Promise<void>;
   finalize(): void;                                 // mark stream complete
   reset(): void;                                    // wipe and reuse
   destroy(): void;                                  // free this stream's parser

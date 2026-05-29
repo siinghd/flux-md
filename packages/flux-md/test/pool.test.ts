@@ -214,6 +214,87 @@ test("pipeFrom accepts a Response and finalizes an empty (null-body) one", async
   expect(created[0].sent.some((m) => m.type === "finalize")).toBe(true);
 });
 
+test("pipeFrom(AsyncIterable) appends each chunk in order and finalizes exactly once", async () => {
+  const { pool, created } = makePool(1);
+  const c = new FluxClient({ pool });
+  async function* gen() {
+    yield "a";
+    yield "b";
+    yield "c";
+  }
+  await c.pipeFrom(gen());
+  const appends = created[0].sent
+    .filter((m) => m.type === "append")
+    .map((m) => (m as { chunk: string }).chunk);
+  expect(appends).toEqual(["a", "b", "c"]);
+  expect(created[0].sent.filter((m) => m.type === "finalize").length).toBe(1);
+});
+
+test("pipeFrom(AsyncIterable) with a pre-aborted signal appends nothing and never finalizes", async () => {
+  const { pool, created } = makePool(1);
+  const c = new FluxClient({ pool });
+  const ac = new AbortController();
+  ac.abort();
+  async function* gen() {
+    yield "a";
+    yield "b";
+  }
+  await c.pipeFrom(gen(), { signal: ac.signal });
+  expect(created[0].sent.some((m) => m.type === "append")).toBe(false);
+  expect(created[0].sent.some((m) => m.type === "finalize")).toBe(false);
+});
+
+test("pipeFrom(AsyncIterable) aborted mid-stream stops appending and does not finalize", async () => {
+  const { pool, created } = makePool(1);
+  const c = new FluxClient({ pool });
+  const ac = new AbortController();
+  let openGate!: () => void;
+  const gate = new Promise<void>((r) => (openGate = r));
+  async function* gen() {
+    yield "a";
+    yield "b";
+    await gate; // hold here until the test aborts + opens the gate
+    yield "c";
+  }
+  const p = c.pipeFrom(gen(), { signal: ac.signal });
+  await new Promise((r) => setTimeout(r, 0)); // let a, b append; loop now awaits the gate
+  ac.abort();
+  openGate();
+  await p;
+  const appends = created[0].sent
+    .filter((m) => m.type === "append")
+    .map((m) => (m as { chunk: string }).chunk);
+  expect(appends).toEqual(["a", "b"]); // c is dropped by the post-abort guard
+  expect(created[0].sent.some((m) => m.type === "finalize")).toBe(false);
+});
+
+test("pipeFrom(ReadableStream) aborted while stalled cancels the reader and does not finalize", async () => {
+  const { pool, created } = makePool(1);
+  const c = new FluxClient({ pool });
+  const ac = new AbortController();
+  let cancelled = false;
+  const enc = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(ctrl) {
+      ctrl.enqueue(enc.encode("a")); // one chunk, then stall (never close)
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const p = c.pipeFrom(stream, { signal: ac.signal });
+  await new Promise((r) => setTimeout(r, 0)); // "a" appends; read() now pends
+  ac.abort();
+  await p;
+  expect(cancelled).toBe(true); // abort listener cancelled the reader
+  const appends = created[0].sent
+    .filter((m) => m.type === "append")
+    .map((m) => (m as { chunk: string }).chunk)
+    .join("");
+  expect(appends).toContain("a");
+  expect(created[0].sent.some((m) => m.type === "finalize")).toBe(false);
+});
+
 test("onBlock fires once per committed block in document order, not for the active tail", () => {
   const { pool, created } = makePool(1);
   const got: number[] = [];
@@ -229,6 +310,19 @@ test("onBlock fires once per committed block in document order, not for the acti
     appendedBytes: 0, parseMicros: 0, retainedBytes: 0, wasmMemoryBytes: 0,
   });
   expect(got).toEqual([1, 2]); // committed in order; the active block (3) does not fire
+});
+
+test("reattach() re-sends config on the next append (the worker discards it on dispose)", () => {
+  const { pool, created } = makePool(1);
+  const c = new FluxClient({ pool, config: { gfmMath: true } });
+  c.append("x"); // first message carries config
+  c.destroy(); // posts dispose → the worker deletes the stored config
+  c.reattach(); // StrictMode remount of the same client
+  c.append("y"); // must re-send config, since the worker dropped it on dispose
+  const withConfig = created[0].sent.filter(
+    (m) => m.type === "append" && (m as { config?: unknown }).config !== undefined,
+  );
+  expect(withConfig.length).toBe(2); // the first append AND the post-reattach one
 });
 
 test("release frees the stream slot, sends dispose, keeps the worker warm", () => {

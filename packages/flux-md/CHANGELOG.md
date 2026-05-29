@@ -4,6 +4,39 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.9.0 — 2026-05-29
+
+Kills the React streaming boilerplate. The common case — render an LLM stream —
+goes from ~17 lines of hand-rolled lifecycle to one:
+
+```tsx
+<FluxMarkdown stream={stream} />
+```
+
+### Added
+
+- **`stream` prop on React `<FluxMarkdown>`** — pass an `AsyncIterable<string>`
+  (SSE deltas), a `Response`, or a `ReadableStream<Uint8Array>` and the
+  component owns an internal client, pipes the stream, supersedes it on change,
+  and destroys it on unmount. The `client` prop is unchanged (now optional);
+  passing a `client` keeps the existing caller-owned behavior.
+- **`useFluxStream(stream, options?)` hook (React)** — same lifecycle, returns
+  the owned `FluxClient` (so you can read `outline()` / `getMetrics()` or pass it
+  to `<FluxMarkdown client={…} />`).
+- **`pipeFrom` now also accepts an `AsyncIterable<string>`** and an optional
+  `{ signal }` — the signal is checked every iteration, so an aborted stream
+  appends no further chunks and is **not** finalized (and a byte reader is
+  `cancel()`'d). Existing `pipeFrom(Response | ReadableStream)` calls are
+  unchanged.
+
+### Notes
+
+- A stream is single-use, so React StrictMode's dev-only double-mount may
+  truncate it in development; production mounts once and is unaffected (the
+  prior manual `useEffect` form had the same caveat).
+- Rules of Hooks are respected — `<FluxMarkdown>` dispatches to one of two
+  sibling components, never a conditional hook.
+
 ## 0.8.0 — 2026-05-29
 
 A self-review of 0.7.0 (adversarial multi-agent pass) fixed two robustness gaps
