@@ -23,6 +23,20 @@ Web Workers); it does not run under SSR/RSC. The framework packages — `react`,
 need the one whose binding you import. The core (`flux-md`, `flux-md/client`,
 `flux-md/dom`, `flux-md/element`) needs none.
 
+> **Vite — one-line config.** Vite's dependency pre-bundling (esbuild) hoists
+> the wasm-bindgen glue into `.vite/deps/`, which breaks the relative
+> `new URL("…_bg.wasm", import.meta.url)` lookup so the worker can't load WASM
+> (you'll see a 404 / "magic word" error). Exclude flux-md from pre-bundling:
+>
+> ```ts
+> // vite.config.ts
+> export default defineConfig({
+>   optimizeDeps: { exclude: ["flux-md"] },
+> });
+> ```
+>
+> No other bundler needs this — it's specific to Vite's optimizer.
+
 ## Quick start
 
 ```ts
