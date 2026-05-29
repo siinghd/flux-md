@@ -39,6 +39,20 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Build WASM
         run: bun run build:wasm
+      - name: Assert the publish tarball ships a non-empty WASM artifact
+        working-directory: packages/flux-md
+        # The WASM is git-ignored (src/wasm/.gitignore = "*") and rescued into
+        # the tarball only by an empty .npmignore override. If that override is
+        # ever lost, the build still succeeds but `npm publish` silently ships a
+        # package with no WASM — this step is the tripwire.
+        run: |
+          tarball=$(npm pack --silent | tail -1)
+          echo "packed $tarball"
+          tar -tzvf "$tarball" | grep 'src/wasm/flux_md_core_bg\.wasm'
+          size=$(tar -tzvf "$tarball" | awk '/src\/wasm\/flux_md_core_bg\.wasm$/ { print $3; exit }')
+          echo "wasm payload: ${size:-0} bytes"
+          test "${size:-0}" -gt 0
+          rm -f "$tarball"
       - name: Typecheck the package
         working-directory: packages/flux-md
         run: bunx tsc --noEmit -p tsconfig.json

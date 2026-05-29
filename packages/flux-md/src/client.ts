@@ -22,6 +22,32 @@ export function emptyBlockStore(): BlockStore {
   return { committed: new Map(), committedOrder: [], active: [], snapshot: [] };
 }
 
+/** A heading entry for building a table of contents — see {@link FluxClient.outline}. */
+export interface OutlineEntry {
+  /** Heading level 1–6. */
+  level: number;
+  /** Plain-text heading content (tags stripped, entities decoded). */
+  text: string;
+  /** Stable block id — usable as a scroll target / React key. */
+  id: number;
+}
+
+/** Strip tags (→ space) and decode the small entity set the core emits, then
+ *  collapse whitespace. The core's HTML is well-formed and escapes `>` inside
+ *  attributes, so the simple tag regex is safe here. `&amp;` decodes last so
+ *  `&amp;lt;` → `&lt;`, not `<`. */
+function htmlToText(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function applyPatch(store: BlockStore, patch: Patch): void {
   for (const b of patch.newly_committed) {
     if (!store.committed.has(b.id)) store.committedOrder.push(b.id);
@@ -47,8 +73,12 @@ export function applyPatch(store: BlockStore, patch: Patch): void {
 interface PoolWorker {
   worker: WorkerLike;
   ready: boolean;
+  /** Set once WASM init fails; whenWorkerReady rejects with this thereafter. */
+  failed: Error | null;
   streamCount: number;
-  readyResolvers: Array<() => void>;
+  /** Live stream ids on this worker — so a fatal failure can notify each one. */
+  streamIds: Set<number>;
+  readyWaiters: Array<{ resolve: () => void; reject: (e: Error) => void }>;
 }
 
 /**
@@ -79,6 +109,7 @@ export class FluxPool {
     const streamId = this.nextStreamId++;
     const pw = this.pick();
     pw.streamCount++;
+    pw.streamIds.add(streamId);
     this.handlers.set(streamId, handler);
     return { streamId, pw };
   }
@@ -86,6 +117,7 @@ export class FluxPool {
   /** Free a stream's parser in its worker; keep the worker warm for siblings. */
   release(streamId: number, pw: PoolWorker): void {
     this.handlers.delete(streamId);
+    pw.streamIds.delete(streamId);
     pw.streamCount = Math.max(0, pw.streamCount - 1);
     try {
       pw.worker.postMessage({ type: "dispose", streamId });
@@ -98,10 +130,11 @@ export class FluxPool {
     pw.worker.postMessage(msg);
   }
 
-  /** Resolves when the given worker has finished WASM init. */
+  /** Resolves when the given worker has finished WASM init; rejects if it failed. */
   whenWorkerReady(pw: PoolWorker): Promise<void> {
     if (pw.ready) return Promise.resolve();
-    return new Promise((resolve) => pw.readyResolvers.push(resolve));
+    if (pw.failed) return Promise.reject(pw.failed);
+    return new Promise((resolve, reject) => pw.readyWaiters.push({ resolve, reject }));
   }
 
   /** Terminate every worker (test teardown / full shutdown). */
@@ -131,7 +164,14 @@ export class FluxPool {
   }
 
   private create(): PoolWorker {
-    const pw: PoolWorker = { worker: this.factory(), ready: false, streamCount: 0, readyResolvers: [] };
+    const pw: PoolWorker = {
+      worker: this.factory(),
+      ready: false,
+      failed: null,
+      streamCount: 0,
+      streamIds: new Set(),
+      readyWaiters: [],
+    };
     pw.worker.addEventListener("message", (ev) => this.onMessage(pw, ev.data));
     this.workers.push(pw);
     return pw;
@@ -140,9 +180,23 @@ export class FluxPool {
   private onMessage(pw: PoolWorker, msg: FromWorker): void {
     if (msg.type === "ready") {
       pw.ready = true;
-      const resolvers = pw.readyResolvers;
-      pw.readyResolvers = [];
-      for (const r of resolvers) r();
+      const waiters = pw.readyWaiters;
+      pw.readyWaiters = [];
+      for (const w of waiters) w.resolve();
+      return;
+    }
+    if (msg.type === "error" && msg.fatal) {
+      // A fatal (WASM-init) failure dooms every stream on this worker. Reject
+      // anyone awaiting readiness, then notify each live stream's client so its
+      // onError fires — the message carries no real streamId to route by. The
+      // doomed worker stays in the pool: a later stream that pick()s it rejects
+      // immediately via pw.failed (no auto-recovery — fine for a load failure).
+      const err = new Error(msg.message);
+      pw.failed = err;
+      const waiters = pw.readyWaiters;
+      pw.readyWaiters = [];
+      for (const w of waiters) w.reject(err);
+      for (const sid of pw.streamIds) this.handlers.get(sid)?.(msg);
       return;
     }
     this.handlers.get(msg.streamId)?.(msg);
@@ -194,6 +248,7 @@ export class FluxClient {
   private configSent = false;
   private listeners = new Set<() => void>();
   private store: BlockStore = emptyBlockStore();
+  private onError?: (err: { message: string; fatal?: boolean }) => void;
 
   // Perf
   private appendedBytes = 0;
@@ -209,10 +264,20 @@ export class FluxClient {
    *   process-wide pool — pass a dedicated `FluxPool` only for isolation).
    * @param options.config per-stream parser flags (see {@link ParserConfig});
    *   omitted fields use library defaults. Applied once, immutable thereafter.
+   * @param options.onError invoked on a worker/parse error or a fatal WASM-init
+   *   failure (`fatal: true`). Without it, errors are only `console.error`d and
+   *   a load failure surfaces solely as a rejected {@link FluxClient.whenReady}.
    */
-  constructor(options: { pool?: FluxPool; config?: ParserConfig } = {}) {
+  constructor(
+    options: {
+      pool?: FluxPool;
+      config?: ParserConfig;
+      onError?: (err: { message: string; fatal?: boolean }) => void;
+    } = {},
+  ) {
     this.pool = options.pool ?? getDefaultPool();
     this.config = options.config;
+    this.onError = options.onError;
     const { streamId, pw } = this.pool.acquire((msg) => this.onMessage(msg));
     this.streamId = streamId;
     this.pw = pw;
@@ -290,6 +355,37 @@ export class FluxClient {
     };
   }
 
+  /**
+   * A heading outline of the current snapshot (committed + active), in document
+   * order — for a table of contents. Works mid-stream; entries appear as their
+   * headings stream in. The `id` is stable, so a built ToC won't re-key.
+   */
+  outline(): OutlineEntry[] {
+    const out: OutlineEntry[] = [];
+    for (const b of this.store.snapshot) {
+      if (b.kind.type === "Heading") {
+        out.push({ level: (b.kind.data as number) ?? 1, text: htmlToText(b.html), id: b.id });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The rendered document as plain text — tags stripped, entities decoded,
+   * blocks separated by blank lines. Derived from the rendered HTML (the source
+   * markdown is parsed away in WASM and not retained client-side), so it is a
+   * readable approximation for search indexing / summaries, not a round-trip of
+   * the original source.
+   */
+  toPlaintext(): string {
+    const parts: string[] = [];
+    for (const b of this.store.snapshot) {
+      const t = htmlToText(b.html);
+      if (t) parts.push(t);
+    }
+    return parts.join("\n\n");
+  }
+
   private onMessage(msg: FromWorker) {
     switch (msg.type) {
       case "patch":
@@ -303,8 +399,12 @@ export class FluxClient {
         this.emit();
         break;
       case "error":
-        // eslint-disable-next-line no-console
-        console.error("flux worker error:", msg.message);
+        if (this.onError) {
+          this.onError({ message: msg.message, fatal: msg.fatal });
+        } else {
+          // eslint-disable-next-line no-console
+          console.error("flux worker error:", msg.message);
+        }
         break;
     }
   }

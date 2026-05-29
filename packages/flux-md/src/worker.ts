@@ -27,8 +27,16 @@ async function setup() {
   // init() returns the wasm-bindgen instance; capture its `.memory` export so
   // we can report WASM-side memory usage on every patch. No parser yet — they
   // are created per stream, on demand.
-  wasmExports = await init({ module_or_path: wasmUrl });
-  post({ type: "ready" });
+  try {
+    wasmExports = await init({ module_or_path: wasmUrl });
+    post({ type: "ready" });
+  } catch (e: unknown) {
+    // WASM failed to load/instantiate: this worker can never parse anything.
+    // Report it so the pool rejects whenReady() (rather than hanging forever)
+    // and clients' onError fires. streamId is irrelevant for a worker-level
+    // failure — the pool routes a fatal error to every stream it hosts.
+    post({ type: "error", streamId: -1, message: e instanceof Error ? e.message : String(e), fatal: true });
+  }
 }
 
 function getOrCreate(streamId: number): FluxParser {
@@ -44,6 +52,7 @@ function getOrCreate(streamId: number): FluxParser {
     p.setGfmFootnotes(c?.gfmFootnotes ?? false);
     p.setGfmMath(c?.gfmMath ?? false);
     p.setDirAuto(c?.dirAuto ?? false);
+    p.setA11y(c?.a11y ?? false);
     p.setUnsafeHtml(c?.unsafeHtml ?? false);
     p.setComponentTags(c?.componentTags ?? []);
     parsers.set(streamId, p);

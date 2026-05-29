@@ -215,6 +215,126 @@ test("self-owned client created with config from tri-state attributes", () => {
   el.remove();
 });
 
+// A fetch body whose chunks are delivered on demand: read() pends until push()
+// or close() supplies the next result. Lets a test hold a stream "in flight".
+function makeControllableStream() {
+  const enc = new TextEncoder();
+  const ready: Array<{ done: boolean; value?: Uint8Array }> = [];
+  const waiters: Array<(r: { done: boolean; value?: Uint8Array }) => void> = [];
+  const emit = (r: { done: boolean; value?: Uint8Array }) => {
+    const w = waiters.shift();
+    if (w) w(r);
+    else ready.push(r);
+  };
+  return {
+    push: (text: string) => emit({ done: false, value: enc.encode(text) }),
+    close: () => emit({ done: true }),
+    reader: {
+      read: () =>
+        new Promise<{ done: boolean; value?: Uint8Array }>((resolve) => {
+          const r = ready.shift();
+          if (r) resolve(r);
+          else waiters.push(resolve);
+        }),
+    },
+  };
+}
+
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
+test("rapid src switch aborts the prior fetch and never interleaves two streams into one parser", async () => {
+  const streams = new Map<string, ReturnType<typeof makeControllableStream>>();
+  const signals = new Map<string, AbortSignal | undefined>();
+  const realFetch = (globalThis as Record<string, unknown>).fetch;
+  (globalThis as Record<string, unknown>).fetch = (url: string, init?: { signal?: AbortSignal }) => {
+    const s = makeControllableStream();
+    streams.set(url, s);
+    signals.set(url, init?.signal);
+    return Promise.resolve({
+      body: { getReader: () => s.reader },
+      text: () => Promise.resolve(""),
+    });
+  };
+
+  try {
+    const snap = snapshotSends();
+    const el = document.createElement("flux-markdown");
+    el.setAttribute("src", "a.md");
+    document.body.appendChild(el); // connect → streamFromSrc("a.md"), pends at first read
+    await flush();
+    const { worker: w, sid } = recoverStream(snap);
+
+    // Switch src before A produced anything → must abort A, start B.
+    el.setAttribute("src", "b.md");
+    await flush();
+    expect(signals.get("a.md")?.aborted).toBe(true);
+
+    // A is superseded: its (late) chunk must NOT reach the parser.
+    streams.get("a.md")!.push("AAA");
+    streams.get("a.md")!.close();
+    await flush();
+
+    // B streams normally.
+    streams.get("b.md")!.push("BBB");
+    streams.get("b.md")!.close();
+    await flush();
+
+    const appends = w.sent
+      .filter((m) => m.streamId === sid && m.type === "append")
+      .map((m) => (m as { chunk: string }).chunk)
+      .join("");
+    expect(appends).toContain("BBB");
+    expect(appends).not.toContain("AAA");
+
+    el.remove();
+  } finally {
+    (globalThis as Record<string, unknown>).fetch = realFetch;
+  }
+});
+
+test("switching from src to a markdown attribute supersedes the in-flight fetch", async () => {
+  const streams = new Map<string, ReturnType<typeof makeControllableStream>>();
+  const signals = new Map<string, AbortSignal | undefined>();
+  const realFetch = (globalThis as Record<string, unknown>).fetch;
+  (globalThis as Record<string, unknown>).fetch = (url: string, init?: { signal?: AbortSignal }) => {
+    const s = makeControllableStream();
+    streams.set(url, s);
+    signals.set(url, init?.signal);
+    return Promise.resolve({ body: { getReader: () => s.reader }, text: () => Promise.resolve("") });
+  };
+
+  try {
+    const snap = snapshotSends();
+    const el = document.createElement("flux-markdown");
+    el.setAttribute("src", "a.md");
+    document.body.appendChild(el); // connect → streamFromSrc("a.md"), pends at first read
+    await flush();
+    const { worker: w, sid } = recoverStream(snap);
+
+    // Drop src and supply inline markdown instead → one-shot, must abort the fetch.
+    el.removeAttribute("src");
+    el.setAttribute("markdown", "# inline");
+    await flush();
+    expect(signals.get("a.md")?.aborted).toBe(true);
+
+    // The stale fetch resolving late must NOT append into the one-shot stream.
+    streams.get("a.md")!.push("AAA");
+    streams.get("a.md")!.close();
+    await flush();
+
+    const appends = w.sent
+      .filter((m) => m.streamId === sid && m.type === "append")
+      .map((m) => (m as { chunk: string }).chunk)
+      .join("");
+    expect(appends).toContain("# inline");
+    expect(appends).not.toContain("AAA");
+
+    el.remove();
+  } finally {
+    (globalThis as Record<string, unknown>).fetch = realFetch;
+  }
+});
+
 test("config attribute change while a caller-owned client is set is ignored (warns)", () => {
   const { client } = makeExternalClient();
   client.append("");

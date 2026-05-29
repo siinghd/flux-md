@@ -38,6 +38,7 @@ const CONFIG_ATTRS = [
   "gfm-footnotes",
   "gfm-math",
   "dir-auto",
+  "a11y",
   "unsafe-html",
 ];
 
@@ -61,6 +62,14 @@ export function defineFluxMarkdown(tag = "flux-markdown"): void {
     #sanitize: ((html: string) => string) | undefined = undefined;
     #handle: MountHandle | null = null;
     #connected = false;
+    // In-flight `src` fetch supersession. A self-owned client is REUSED across
+    // src changes (not torn down), so two concurrent #streamFromSrc runs would
+    // capture the same client and reset() even reuses the worker streamId — an
+    // identity guard alone can't separate them. Each run captures the current
+    // #srcSeq; a newer src (or teardown) bumps it and aborts the fetch, so a
+    // stale run bails before interleaving its chunks into the parser.
+    #srcSeq = 0;
+    #srcAbort: AbortController | null = null;
 
     // --- Accessor properties (objects/functions can't be attributes) ---------
 
@@ -106,7 +115,9 @@ export function defineFluxMarkdown(tag = "flux-markdown"): void {
     }
 
     reset(): void {
-      // Keep config; just clear the current stream's blocks.
+      // Keep config; just clear the current stream's blocks. Also abandon any
+      // in-flight `src` fetch so it can't append into the freshly-reset stream.
+      this.#cancelSrcStream();
       this.#client?.reset();
     }
 
@@ -171,6 +182,8 @@ export function defineFluxMarkdown(tag = "flux-markdown"): void {
 
     disconnectedCallback(): void {
       this.#connected = false;
+      // Stop any in-flight `src` fetch before we (maybe) destroy its client.
+      this.#cancelSrcStream();
       // ALWAYS tear down the mount (the only teardown path for the renderer).
       this.#handle?.destroy();
       this.#handle = null;
@@ -210,6 +223,7 @@ export function defineFluxMarkdown(tag = "flux-markdown"): void {
       set("gfm-footnotes", "gfmFootnotes");
       set("gfm-math", "gfmMath");
       set("dir-auto", "dirAuto");
+      set("a11y", "a11y");
       set("unsafe-html", "unsafeHtml");
 
       const tags = this.getAttribute("component-tags");
@@ -252,6 +266,8 @@ export function defineFluxMarkdown(tag = "flux-markdown"): void {
     // Destroys the client only if self-owned, then clears it and the mount so
     // the next mount targets a fresh client.
     #teardownClient(): void {
+      // A swap/destroy abandons the current client; stop feeding it from src.
+      this.#cancelSrcStream();
       this.#handle?.destroy();
       this.#handle = null;
       if (this.#ownsClient) this.#client?.destroy();
@@ -263,6 +279,12 @@ export function defineFluxMarkdown(tag = "flux-markdown"): void {
     // in priority order: `src` (fetch+stream) > `markdown` (one-shot) >
     // textContent (one-shot). A caller-owned client never reaches here.
     #resolveInitialContent(): void {
+      // Single chokepoint: every content-source resolution supersedes any
+      // in-flight `src` fetch. This covers the src→markdown / src→textContent
+      // transitions too — #oneShot reuses (resets + finalizes) the same client,
+      // so without this a still-pending fetch would append into the finished
+      // stream. (#streamFromSrc bumps again; the extra bump is harmless.)
+      this.#cancelSrcStream();
       const src = this.getAttribute("src");
       if (src) {
         void this.#streamFromSrc(src);
@@ -301,17 +323,38 @@ export function defineFluxMarkdown(tag = "flux-markdown"): void {
       this.#client!.finalize();
     }
 
+    // Abort any in-flight `src` fetch and invalidate its read loop, so it can
+    // no longer append into a client we're about to reuse, swap, or destroy.
+    #cancelSrcStream(): void {
+      this.#srcSeq++;
+      this.#srcAbort?.abort();
+      this.#srcAbort = null;
+    }
+
     // Fetch a URL and stream its body. TextDecoder with {stream:true} carries a
     // multibyte sequence that straddles a chunk boundary into the next decode.
     async #streamFromSrc(src: string): Promise<void> {
+      // Supersede any prior in-flight src, then tag this run with a fresh token.
+      this.#cancelSrcStream();
+      const token = this.#srcSeq;
+      const abort = new AbortController();
+      this.#srcAbort = abort;
+
       this.#ensureClient();
       this.#client!.reset();
       const owned = this.#client!;
+      // True while THIS run is still the active stream: not superseded by a
+      // newer src, and the client wasn't swapped/destroyed out from under us.
+      const current = () => this.#srcSeq === token && this.#client === owned;
+
       try {
-        const res = await fetch(src);
+        const res = await fetch(src, { signal: abort.signal });
+        if (!current()) return;
         const body = res.body;
         if (!body) {
-          owned.append(await res.text());
+          const text = await res.text();
+          if (!current()) return;
+          owned.append(text);
           owned.finalize();
           return;
         }
@@ -319,16 +362,15 @@ export function defineFluxMarkdown(tag = "flux-markdown"): void {
         const decoder = new TextDecoder();
         for (;;) {
           const { done, value } = await reader.read();
-          // The element may have been disconnected (and `owned` destroyed) or
-          // the client swapped mid-stream; stop feeding a stale client.
-          if (this.#client !== owned) return;
+          if (!current()) return;
           if (done) break;
           if (value) owned.append(decoder.decode(value, { stream: true }));
         }
-        if (this.#client !== owned) return;
         owned.append(decoder.decode()); // flush any trailing partial sequence
         owned.finalize();
       } catch (err) {
+        // A supersede/disconnect aborts the fetch — intentional, not an error.
+        if (abort.signal.aborted || !current()) return;
         // eslint-disable-next-line no-console
         console.error("<flux-markdown>: failed to stream src", src, err);
       }

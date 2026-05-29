@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { FluxClient, FluxPool } from "../src/client";
-import type { FromWorker, ToWorker, WorkerLike } from "../src/types";
+import type { Block, FromWorker, ToWorker, WorkerLike } from "../src/types";
 
 // A synchronous fake worker: records what was posted to it and lets the test
 // fire responses back through the registered listener. No real Worker/WASM.
@@ -103,6 +103,60 @@ test("whenWorkerReady resolves on ready, and immediately for later siblings", as
   await pool.whenWorkerReady(s2.pw); // resolves immediately
 });
 
+test("a fatal worker error rejects whenWorkerReady and notifies every live stream", async () => {
+  const { pool, created } = makePool(1); // both streams share one worker
+  const got1: FromWorker[] = [];
+  const got2: FromWorker[] = [];
+  const s1 = pool.acquire((m) => got1.push(m));
+  const s2 = pool.acquire((m) => got2.push(m));
+  expect(s1.pw).toBe(s2.pw);
+
+  const ready = pool.whenWorkerReady(s1.pw);
+  // Fatal WASM-init failure — carries no real streamId.
+  created[0].fire({ type: "error", streamId: -1, message: "WASM boom", fatal: true });
+
+  await expect(ready).rejects.toThrow("WASM boom");
+  // Both live streams were notified, so each client's onError can fire.
+  expect(got1.at(-1)).toMatchObject({ type: "error", fatal: true, message: "WASM boom" });
+  expect(got2.at(-1)).toMatchObject({ type: "error", fatal: true, message: "WASM boom" });
+  // A later readiness check on the doomed worker rejects immediately too.
+  await expect(pool.whenWorkerReady(s1.pw)).rejects.toThrow("WASM boom");
+});
+
+test("a non-fatal (per-stream) error routes only to that stream's handler", () => {
+  const { pool, created } = makePool(1);
+  const got1: FromWorker[] = [];
+  const got2: FromWorker[] = [];
+  const s1 = pool.acquire((m) => got1.push(m));
+  pool.acquire((m) => got2.push(m));
+  created[0].fire({ type: "error", streamId: s1.streamId, message: "parse oops" });
+  expect(got1.length).toBe(1);
+  expect(got2.length).toBe(0);
+});
+
+test("FluxClient.onError receives worker errors (no console.error fallback)", () => {
+  const { pool, created } = makePool(1);
+  const errors: Array<{ message: string; fatal?: boolean }> = [];
+  const c = new FluxClient({ pool, onError: (e) => errors.push(e) });
+  c.append("x"); // wire the worker + discover the stream id
+  const sid = (created[0].sent[0] as { streamId: number }).streamId;
+  created[0].fire({ type: "error", streamId: sid, message: "parse oops" });
+  expect(errors.length).toBe(1);
+  expect(errors[0].message).toBe("parse oops");
+  expect(errors[0].fatal).toBeUndefined();
+});
+
+test("FluxClient.whenReady rejects and onError fires on a fatal init failure", async () => {
+  const { pool, created } = makePool(1);
+  const errors: Array<{ message: string; fatal?: boolean }> = [];
+  const c = new FluxClient({ pool, onError: (e) => errors.push(e) });
+  const ready = c.whenReady();
+  created[0].fire({ type: "error", streamId: -1, message: "no WASM", fatal: true });
+  await expect(ready).rejects.toThrow("no WASM");
+  expect(errors.length).toBe(1);
+  expect(errors[0].fatal).toBe(true);
+});
+
 test("release frees the stream slot, sends dispose, keeps the worker warm", () => {
   const { pool, created } = makePool(4);
   const s = pool.acquire(() => {});
@@ -162,6 +216,40 @@ test("no config → no config field on any message (worker uses defaults)", () =
   c.append("a");
   c.finalize();
   expect(created[0].sent.every((m) => (m as any).config === undefined)).toBe(true);
+});
+
+test("outline() and toPlaintext() derive from the streamed snapshot", () => {
+  const { pool, created } = makePool(1);
+  const c = new FluxClient({ pool });
+  c.append("x"); // wire the worker + discover the stream id
+  const sid = (created[0].sent[0] as { streamId: number }).streamId;
+
+  const heading = (id: number, level: number, text: string): Block => ({
+    id, kind: { type: "Heading", data: level }, start: 0, end: 0,
+    html: `<h${level}>${text}</h${level}>`, open: false, speculative: false,
+  });
+  const para = (id: number, html: string): Block => ({
+    id, kind: { type: "Paragraph" }, start: 0, end: 0, html, open: false, speculative: false,
+  });
+
+  created[0].fire({
+    type: "patch", streamId: sid,
+    patch: {
+      newly_committed: [
+        heading(1, 1, "Title"),
+        para(2, "<p>Hello &amp; <strong>world</strong></p>"),
+        heading(3, 2, "Sub"),
+      ],
+      active: [],
+    },
+    appendedBytes: 0, parseMicros: 0, retainedBytes: 0, wasmMemoryBytes: 0,
+  });
+
+  expect(c.outline()).toEqual([
+    { level: 1, text: "Title", id: 1 },
+    { level: 2, text: "Sub", id: 3 },
+  ]);
+  expect(c.toPlaintext()).toBe("Title\n\nHello & world\n\nSub");
 });
 
 test("default constructor still joins a pool and streams (no behavior change)", () => {

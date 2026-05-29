@@ -4,6 +4,46 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.7.0 — 2026-05-29
+
+DX, robustness, and accessibility round — the streaming core (perf, CommonMark
+652/652, GFM) was already comprehensive, so this release sharpens the surface
+around it.
+
+### Added
+
+- **`onError` on `FluxClient`** — `new FluxClient({ onError })` receives worker
+  and parse errors (previously only `console.error`'d). A **WASM-init failure**
+  now also surfaces: `whenReady()` **rejects** instead of hanging forever, and
+  `onError` fires with `{ fatal: true }`.
+- **`a11y` parser option** (`ParserConfig.a11y` / `setA11y` / `<flux-markdown
+  a11y>`) — opt-in accessibility markup that intentionally deviates from strict
+  GFM byte-output: wraps a task-list checkbox + its text in a `<label>` (so the
+  box is programmatically associated for screen readers), and adds
+  `scope="col"` to table header cells. **Off by default** (conformance output
+  unchanged). Streaming output stays byte-identical to one-shot.
+- **`FluxClient.outline()`** — a heading table-of-contents (level / text /
+  stable id) from the current snapshot, in document order; works mid-stream.
+- **`FluxClient.toPlaintext()`** — the rendered document as plain text (tags
+  stripped, entities decoded, blocks blank-line separated) for search indexing
+  / summaries.
+
+### Fixed
+
+- **`<flux-markdown>` `src` race** — rapidly changing `src` (or switching
+  between a `src` URL and inline `markdown`/`textContent`) could interleave two
+  fetch streams into one parser, corrupting the parse tree. The element now
+  supersedes any in-flight fetch (monotonic token + `AbortController`) at a
+  single chokepoint.
+
+### Docs / packaging
+
+- README documents the one-line Vite `optimizeDeps.exclude` requirement.
+- `"sideEffects": ["./src/worker.ts"]` so bundlers can drop unused framework
+  adapters from the export surface.
+- CI now publishes via a tag-triggered workflow with `npm publish --provenance`,
+  and asserts every published tarball ships a non-empty WASM artifact.
+
 ## 0.6.0 — 2026-05-28
 
 ### Added — flux-md is no longer React-only

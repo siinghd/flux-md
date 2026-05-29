@@ -120,6 +120,7 @@ pub struct StreamParser {
     gfm_footnotes: bool,
     gfm_math: bool,
     dir_auto: bool,
+    a11y: bool,
     /// Opt-in allowlist of custom "component" tag names (e.g. `Thinking`,
     /// `Callout`). A `<Tag>…</Tag>` whose name is listed is parsed as a container
     /// whose inner content is markdown, and dispatched to a React component —
@@ -384,6 +385,7 @@ impl StreamParser {
             gfm_footnotes: false,
             gfm_math: false,
             dir_auto: false,
+            a11y: false,
             component_tags: Vec::new(),
             fence_cache: None,
             para_cache: None,
@@ -464,6 +466,18 @@ impl StreamParser {
 
     pub fn set_dir_auto(&mut self, on: bool) {
         self.dir_auto = on;
+    }
+
+    /// Opt-in accessibility markup that deviates from strict GFM byte-output:
+    /// `<label>`-wrap a task-list checkbox with its text, and `scope="col"` on
+    /// table header cells. Off by default (CommonMark/GFM output unchanged).
+    pub fn with_a11y(mut self, on: bool) -> Self {
+        self.a11y = on;
+        self
+    }
+
+    pub fn set_a11y(&mut self, on: bool) {
+        self.a11y = on;
     }
 
     /// Set the opt-in component-tag allowlist (e.g. `["Thinking", "Callout"]`).
@@ -583,6 +597,7 @@ impl StreamParser {
             gfm_alerts: self.gfm_alerts,
             gfm_math: self.gfm_math,
             dir_auto: self.dir_auto,
+            a11y: self.a11y,
             gfm_footnotes,
             footnotes: fn_nums.clone(),
             // Seed the per-label occurrence counter from the committed counts so
@@ -986,6 +1001,7 @@ impl StreamParser {
             gfm_alerts: self.gfm_alerts,
             gfm_math: self.gfm_math,
             dir_auto: self.dir_auto,
+            a11y: self.a11y,
             gfm_footnotes: self.gfm_footnotes,
             footnotes,
             footnote_occ: std::cell::RefCell::new(self.committed_footnote_occurrences.clone()),
@@ -1590,9 +1606,17 @@ fn render_item_line(
         return Some(());
     }
 
+    // a11y: mirror `render_list_item`'s `<label>` wrap — ONLY the tight,
+    // non-empty task item (the single-paragraph inline shape) qualifies, so the
+    // cached and full-reparse paths stay byte-identical.
+    let wrap_label = opts.a11y && checkbox.is_some() && !loose && !rest.is_empty();
+
     out.push_str("<li");
     out.push_str(opts.dir());
     out.push('>');
+    if wrap_label {
+        out.push_str("<label>");
+    }
     if let Some(checked) = checkbox {
         out.push_str(if checked {
             "<input type=\"checkbox\" checked disabled> "
@@ -1612,6 +1636,9 @@ fn render_item_line(
         out.push_str("</p>");
     } else if !rest.is_empty() {
         render_inline(rest, opts, out);
+    }
+    if wrap_label {
+        out.push_str("</label>");
     }
     out.push_str("</li>");
     Some(())

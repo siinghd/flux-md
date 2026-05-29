@@ -1,0 +1,69 @@
+name: Publish to npm
+
+# Release automation: tag a release (vX.Y.Z) to build, gate on the full test
+# suite, and publish to npm with SLSA provenance. Provenance attestations can
+# only be produced from a CI workflow with id-token, never from a local publish.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Pack only — build + test but do not publish"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write # required for `npm publish --provenance`
+
+jobs:
+  publish:
+    name: Build, gate, publish (provenance)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/flux-md-core
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+      - run: bun install --frozen-lockfile
+
+      # Gate the release on the same checks CI enforces, so a tag can never ship
+      # a broken build.
+      - name: Build WASM
+        run: bun run build:wasm
+      - name: Typecheck the package
+        working-directory: packages/flux-md
+        run: bunx tsc --noEmit -p tsconfig.json
+      - name: JS package tests
+        run: bun run test:components
+      - name: Rust core (CommonMark + GFM floors)
+        env:
+          CMARK_MIN_PASS: "652"
+          GFM_MIN_PASS: "23"
+        run: bun run test:rust
+      - name: Assert the tarball ships a non-empty WASM artifact
+        working-directory: packages/flux-md
+        run: |
+          tarball=$(npm pack --silent | tail -1)
+          tar -tzvf "$tarball" | grep 'src/wasm/flux_md_core_bg\.wasm'
+          size=$(tar -tzvf "$tarball" | awk '/src\/wasm\/flux_md_core_bg\.wasm$/ { print $3; exit }')
+          test "${size:-0}" -gt 0
+          rm -f "$tarball"
+
+      - name: Publish to npm (with provenance)
+        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
+        working-directory: packages/flux-md
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
