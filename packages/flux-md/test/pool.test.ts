@@ -312,6 +312,19 @@ test("onBlock fires once per committed block in document order, not for the acti
   expect(got).toEqual([1, 2]); // committed in order; the active block (3) does not fire
 });
 
+test("reattach() re-sends config on the next append (the worker discards it on dispose)", () => {
+  const { pool, created } = makePool(1);
+  const c = new FluxClient({ pool, config: { gfmMath: true } });
+  c.append("x"); // first message carries config
+  c.destroy(); // posts dispose → the worker deletes the stored config
+  c.reattach(); // StrictMode remount of the same client
+  c.append("y"); // must re-send config, since the worker dropped it on dispose
+  const withConfig = created[0].sent.filter(
+    (m) => m.type === "append" && (m as { config?: unknown }).config !== undefined,
+  );
+  expect(withConfig.length).toBe(2); // the first append AND the post-reattach one
+});
+
 test("release frees the stream slot, sends dispose, keeps the worker warm", () => {
   const { pool, created } = makePool(4);
   const s = pool.acquire(() => {});

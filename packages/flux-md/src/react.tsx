@@ -144,7 +144,10 @@ export function useFluxStream(
   stream: AsyncIterable<string> | ReadableStream<Uint8Array> | Response | null | undefined,
   options?: { config?: ParserConfig; onError?: (err: Error) => void },
 ): FluxClient {
-  // One client per hook instance, created exactly once (survives StrictMode).
+  // One client per hook instance. (React StrictMode double-invokes this
+  // initializer in DEV, constructing a throwaway second client whose worker
+  // slot isn't reclaimed — a minor dev-only artifact; production runs it once.
+  // The committed client is what's used, and its lifecycle below is correct.)
   const [client] = useState(() => new FluxClient({ config: options?.config }));
   // Read onError through a ref so its identity never re-subscribes the stream.
   const onErrorRef = useRef(options?.onError);
@@ -153,8 +156,14 @@ export function useFluxStream(
   // on a StrictMode replay of the same stream (which would discard its head).
   const prevStream = useRef<typeof stream>(undefined);
 
-  // Destroy ONLY on unmount — keyed [client], never per render or stream change.
-  useEffect(() => () => client.destroy(), [client]);
+  // Own the client's pool attachment. On (re)mount, reattach (StrictMode's
+  // dev double-mount destroys on the simulated unmount, then remounts the SAME
+  // instance — without reattach its patches would be dropped and it'd render
+  // blank); destroy on real unmount.
+  useEffect(() => {
+    client.reattach();
+    return () => client.destroy();
+  }, [client]);
 
   // Consume the current stream; supersede (abort, no finalize) on change/unmount.
   useEffect(() => {

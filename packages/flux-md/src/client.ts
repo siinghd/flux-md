@@ -128,6 +128,18 @@ export class FluxPool {
     }
   }
 
+  /** Inverse of {@link release}: re-register a stream's handler so it receives
+   *  patches again. For React StrictMode's dev double-mount, which destroys a
+   *  client on the simulated unmount and remounts the SAME instance. The worker
+   *  lazily recreates the disposed parser on the next append. */
+  reattach(streamId: number, pw: PoolWorker, handler: (msg: FromWorker) => void): void {
+    if (!this.handlers.has(streamId)) {
+      pw.streamCount++;
+      pw.streamIds.add(streamId);
+    }
+    this.handlers.set(streamId, handler);
+  }
+
   send(pw: PoolWorker, msg: ToWorker): void {
     pw.worker.postMessage(msg);
   }
@@ -273,6 +285,7 @@ export class FluxClient {
   private store: BlockStore = emptyBlockStore();
   private onError?: (err: { message: string; fatal?: boolean }) => void;
   private onBlock?: (block: Block) => void;
+  private attached = true;
 
   // Perf
   private appendedBytes = 0;
@@ -425,9 +438,27 @@ export class FluxClient {
   }
 
   destroy() {
+    if (!this.attached) return; // idempotent
     // Free this stream's parser; the shared worker stays warm for siblings.
     this.pool.release(this.streamId, this.pw);
     this.listeners.clear();
+    this.attached = false;
+  }
+
+  /**
+   * Re-register with the pool after {@link destroy} so the client receives
+   * patches again. Needed only for React StrictMode's dev double-mount, where
+   * the renderer destroys on the simulated unmount then remounts the SAME
+   * client instance; apps don't normally call this. No-op if still attached.
+   */
+  reattach() {
+    if (this.attached) return;
+    this.pool.reattach(this.streamId, this.pw, (msg) => this.onMessage(msg));
+    this.attached = true;
+    // The worker discarded this stream's config on `dispose` (unlike `reset`,
+    // which keeps it), so re-send it on the next message — otherwise the parser
+    // would be rebuilt with library defaults (gfmMath / componentTags / … lost).
+    this.configSent = false;
   }
 
   subscribe = (fn: () => void) => {
