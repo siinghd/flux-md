@@ -89,6 +89,13 @@ export interface ParserConfig {
    * apps that render RTL or mixed-direction content.
    */
   dirAuto?: boolean;
+  /**
+   * Opt-in accessibility markup that deviates from strict GFM byte-output:
+   * wraps a task-list checkbox + its text in a `<label>` (programmatic
+   * association for screen readers) and adds `scope="col"` to table header
+   * cells. Default false (so CommonMark/GFM conformance output is unchanged).
+   */
+  a11y?: boolean;
   /** Pass raw HTML through unescaped. Default false. **Never enable for untrusted input.** */
   unsafeHtml?: boolean;
   /**

@@ -52,6 +52,7 @@ function getOrCreate(streamId: number): FluxParser {
     p.setGfmFootnotes(c?.gfmFootnotes ?? false);
     p.setGfmMath(c?.gfmMath ?? false);
     p.setDirAuto(c?.dirAuto ?? false);
+    p.setA11y(c?.a11y ?? false);
     p.setUnsafeHtml(c?.unsafeHtml ?? false);
     p.setComponentTags(c?.componentTags ?? []);
     parsers.set(streamId, p);

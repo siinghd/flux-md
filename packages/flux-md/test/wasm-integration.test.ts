@@ -79,6 +79,13 @@ test.skipIf(!haveWasm)("real WASM: setGfmMath toggles math output end-to-end (fl
   expect(on.blocks.some((b) => b.html.includes("math-inline"))).toBe(true);
 });
 
+test.skipIf(!haveWasm)("real WASM: setA11y wraps a task-list checkbox in a <label>", () => {
+  const off = parseAll("- [ ] todo\n");
+  const on = parseAll("- [ ] todo\n", (p) => p.setA11y(true));
+  expect(off.blocks.some((b) => b.html.includes("<label>"))).toBe(false);
+  expect(on.blocks.some((b) => b.html.includes("<label><input"))).toBe(true);
+});
+
 test.skipIf(!haveWasm)("real WASM: setComponentTags renders an allowlisted tag as a Component block", () => {
   // Guards the recently-churned setComponentTags serde path specifically.
   const { blocks } = parseAll("<Thinking>\n\nhi **there**\n\n</Thinking>\n", (p) =>

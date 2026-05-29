@@ -52,6 +52,11 @@ pub struct RenderOpts {
     /// Emit `dir="auto"` on block-level text elements for per-block bidi. Off by
     /// default (strict-CommonMark output is unchanged).
     pub dir_auto: bool,
+    /// Emit extra accessibility markup that deviates from strict GFM byte-output:
+    /// wrap a task-list checkbox + its inline text in a `<label>` (programmatic
+    /// association), and add `scope="col"` to table header cells. Off by default
+    /// so the CommonMark/GFM conformance output is unchanged.
+    pub a11y: bool,
     /// GFM footnotes. Off by default. When on, an inline `[^label]` whose label
     /// appears in `footnotes` renders as a superscript link.
     pub gfm_footnotes: bool,
@@ -982,16 +987,6 @@ fn render_list_item(item: &[u8], ordered: bool, loose: bool, opts: &RenderOpts, 
     }
     let body_trimmed = body.trim_end_matches(|c: char| matches!(c, '\n' | '\r' | ' ' | '\t'));
 
-    out.push_str("<li");
-    out.push_str(opts.dir());
-    out.push('>');
-    if let Some(checked) = task_state {
-        out.push_str(if checked {
-            "<input type=\"checkbox\" checked disabled> "
-        } else {
-            "<input type=\"checkbox\" disabled> "
-        });
-    }
     // Always scan the body; decide inline-vs-block based on the structure
     // we actually find. A nested list, code block, or quote inside a tight
     // item must still render as a block — only standalone paragraph content
@@ -1001,6 +996,29 @@ fn render_list_item(item: &[u8], ordered: bool, loose: bool, opts: &RenderOpts, 
         tmp.push('\n');
     }
     let sub = crate::scanner::scan(&tmp, opts.scan_ctx());
+
+    // a11y: wrap a task checkbox + its text in a <label> for programmatic
+    // association — but ONLY for a tight, non-empty, single-paragraph item,
+    // the one shape where a <label> is valid (it must not wrap a nested list /
+    // block). The streaming ListCache mirrors this exact condition, so the two
+    // paths stay byte-identical (see render_item_line in parser.rs).
+    let inline_task =
+        !loose && sub.len() == 1 && matches!(sub[0].kind, RawBlockKind::Paragraph);
+    let wrap_label = opts.a11y && task_state.is_some() && inline_task;
+
+    out.push_str("<li");
+    out.push_str(opts.dir());
+    out.push('>');
+    if wrap_label {
+        out.push_str("<label>");
+    }
+    if let Some(checked) = task_state {
+        out.push_str(if checked {
+            "<input type=\"checkbox\" checked disabled> "
+        } else {
+            "<input type=\"checkbox\" disabled> "
+        });
+    }
     if sub.is_empty() {
         // Empty item.
     } else if !loose && sub.len() == 1 && matches!(sub[0].kind, RawBlockKind::Paragraph) {
@@ -1019,6 +1037,9 @@ fn render_list_item(item: &[u8], ordered: bool, loose: bool, opts: &RenderOpts, 
                 render_block(&tmp, b, opts, out);
             }
         }
+    }
+    if wrap_label {
+        out.push_str("</label>");
     }
     out.push_str("</li>");
 }
@@ -1066,6 +1087,11 @@ pub(crate) fn push_table_cell(
 ) {
     out.push('<');
     out.push_str(tag);
+    // a11y: scope a header cell to its column (helps screen readers; deviates
+    // from strict GFM byte-output, hence opt-in).
+    if opts.a11y && tag == "th" {
+        out.push_str(" scope=\"col\"");
+    }
     if let Some(a) = align.and_then(|a| a.as_ref()) {
         out.push_str(" style=\"text-align:");
         out.push_str(a);

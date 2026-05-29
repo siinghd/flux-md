@@ -119,6 +119,14 @@ impl FluxParser {
         self.inner.set_dir_auto(on);
     }
 
+    /// Opt-in accessibility markup that deviates from strict GFM byte-output:
+    /// `<label>`-wrap a task-list checkbox with its text, and add `scope="col"`
+    /// to table header cells. Off by default (conformance output unchanged).
+    #[wasm_bindgen(js_name = setA11y)]
+    pub fn set_a11y(&mut self, on: bool) {
+        self.inner.set_a11y(on);
+    }
+
     /// Set the opt-in component-tag allowlist (e.g. `["Thinking", "Callout"]`).
     /// A `<Tag>…</Tag>` whose name is listed renders as a component whose inner
     /// content is markdown — safely, without unsafe HTML (the tag is allowlisted

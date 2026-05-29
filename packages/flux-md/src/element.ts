@@ -38,6 +38,7 @@ const CONFIG_ATTRS = [
   "gfm-footnotes",
   "gfm-math",
   "dir-auto",
+  "a11y",
   "unsafe-html",
 ];
 
@@ -222,6 +223,7 @@ export function defineFluxMarkdown(tag = "flux-markdown"): void {
       set("gfm-footnotes", "gfmFootnotes");
       set("gfm-math", "gfmMath");
       set("dir-auto", "dirAuto");
+      set("a11y", "a11y");
       set("unsafe-html", "unsafeHtml");
 
       const tags = this.getAttribute("component-tags");
