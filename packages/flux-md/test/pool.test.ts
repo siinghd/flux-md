@@ -157,6 +157,80 @@ test("FluxClient.whenReady rejects and onError fires on a fatal init failure", a
   expect(errors[0].fatal).toBe(true);
 });
 
+test("a throwing stream handler can't break the fatal fan-out or the message loop", () => {
+  const { pool, created } = makePool(1); // both streams share one worker
+  let bNotified = false;
+  pool.acquire(() => {
+    throw new Error("handler boom"); // stream a's handler always throws
+  });
+  pool.acquire((m) => {
+    if (m.type === "error" && m.fatal) bNotified = true; // stream b
+  });
+  // a throws, but the dispatch boundary isolates it: the fire must not throw and
+  // b must still receive the fatal notification.
+  expect(() =>
+    created[0].fire({ type: "error", streamId: -1, message: "boom", fatal: true }),
+  ).not.toThrow();
+  expect(bNotified).toBe(true);
+});
+
+test("a fatally-failed worker is not re-picked by a new stream", () => {
+  const { pool, created } = makePool(2);
+  const s1 = pool.acquire(() => {});
+  created[0].fire({ type: "error", streamId: -1, message: "dead", fatal: true });
+  // A new stream must NOT land on the dead worker (it would post into it and hang).
+  const s2 = pool.acquire(() => {});
+  expect(s2.pw).not.toBe(s1.pw);
+  expect(s2.pw.failed).toBeNull();
+});
+
+test("pipeFrom reads a stream, appends decoded chunks, and finalizes", async () => {
+  const { pool, created } = makePool(1);
+  const c = new FluxClient({ pool });
+  const enc = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(ctrl) {
+      ctrl.enqueue(enc.encode("# Hi\n"));
+      ctrl.enqueue(enc.encode("body text"));
+      ctrl.close();
+    },
+  });
+  await c.pipeFrom(stream);
+  const sent = created[0].sent;
+  const appends = sent
+    .filter((m) => m.type === "append")
+    .map((m) => (m as { chunk: string }).chunk)
+    .join("");
+  expect(appends).toContain("# Hi");
+  expect(appends).toContain("body text");
+  expect(sent.some((m) => m.type === "finalize")).toBe(true);
+});
+
+test("pipeFrom accepts a Response and finalizes an empty (null-body) one", async () => {
+  const { pool, created } = makePool(1);
+  const c = new FluxClient({ pool });
+  // A Response-like with a null body (e.g. 204) → completed empty stream.
+  await c.pipeFrom({ body: null } as unknown as Response);
+  expect(created[0].sent.some((m) => m.type === "finalize")).toBe(true);
+});
+
+test("onBlock fires once per committed block in document order, not for the active tail", () => {
+  const { pool, created } = makePool(1);
+  const got: number[] = [];
+  const c = new FluxClient({ pool, onBlock: (b) => got.push(b.id) });
+  c.append("x");
+  const sid = (created[0].sent[0] as { streamId: number }).streamId;
+  const blk = (id: number): Block => ({
+    id, kind: { type: "Paragraph" }, start: 0, end: 0, html: "<p></p>", open: false, speculative: false,
+  });
+  created[0].fire({
+    type: "patch", streamId: sid,
+    patch: { newly_committed: [blk(1), blk(2)], active: [blk(3)] },
+    appendedBytes: 0, parseMicros: 0, retainedBytes: 0, wasmMemoryBytes: 0,
+  });
+  expect(got).toEqual([1, 2]); // committed in order; the active block (3) does not fire
+});
+
 test("release frees the stream slot, sends dispose, keeps the worker warm", () => {
   const { pool, created } = makePool(4);
   const s = pool.acquire(() => {});

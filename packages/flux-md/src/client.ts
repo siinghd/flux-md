@@ -33,9 +33,11 @@ export interface OutlineEntry {
 }
 
 /** Strip tags (→ space) and decode the small entity set the core emits, then
- *  collapse whitespace. The core's HTML is well-formed and escapes `>` inside
- *  attributes, so the simple tag regex is safe here. `&amp;` decodes last so
- *  `&amp;lt;` → `&lt;`, not `<`. */
+ *  collapse whitespace. INVARIANT: the simple `<[^>]*>` strip is only safe
+ *  because every input here is HTML the Rust core produced via escape_html /
+ *  escape_attr — which escape `>` inside attribute values, so no `>` ever
+ *  appears except as a real tag close. This must NOT be fed externally-authored
+ *  HTML. `&amp;` decodes last so `&amp;lt;` → `&lt;`, not `<`. */
 function htmlToText(html: string): string {
   return html
     .replace(/<[^>]*>/g, " ")
@@ -154,13 +156,17 @@ export class FluxPool {
     return this.workers.length;
   }
 
-  // Create a new worker while under cap and every existing worker is busy;
-  // otherwise attach to the least-loaded existing worker.
+  // Create a new worker while under cap and every live worker is busy; otherwise
+  // attach to the least-loaded LIVE worker. A fatally-failed worker is never
+  // handed out (a stream on it would post into a dead worker and hang) — it is
+  // retained only to reject outstanding whenWorkerReady waiters.
   private pick(): PoolWorker {
-    if (this.workers.length < this.cap && this.workers.every((w) => w.streamCount > 0)) {
+    const live = this.workers.filter((w) => !w.failed);
+    if (this.workers.length < this.cap && live.every((w) => w.streamCount > 0)) {
       return this.create();
     }
-    return this.workers.reduce((a, b) => (b.streamCount < a.streamCount ? b : a));
+    if (live.length === 0) return this.create();
+    return live.reduce((a, b) => (b.streamCount < a.streamCount ? b : a));
   }
 
   private create(): PoolWorker {
@@ -189,17 +195,34 @@ export class FluxPool {
       // A fatal (WASM-init) failure dooms every stream on this worker. Reject
       // anyone awaiting readiness, then notify each live stream's client so its
       // onError fires — the message carries no real streamId to route by. The
-      // doomed worker stays in the pool: a later stream that pick()s it rejects
-      // immediately via pw.failed (no auto-recovery — fine for a load failure).
+      // worker is kept only to reject those waiters; pick() never reuses it.
       const err = new Error(msg.message);
       pw.failed = err;
       const waiters = pw.readyWaiters;
       pw.readyWaiters = [];
-      for (const w of waiters) w.reject(err);
-      for (const sid of pw.streamIds) this.handlers.get(sid)?.(msg);
+      for (const w of waiters) {
+        try {
+          w.reject(err);
+        } catch {
+          /* a waiter's rejection handler is the caller's problem, not ours */
+        }
+      }
+      for (const sid of pw.streamIds) this.dispatch(sid, msg);
       return;
     }
-    this.handlers.get(msg.streamId)?.(msg);
+    this.dispatch(msg.streamId, msg);
+  }
+
+  // Route a message to a stream's handler, isolating a throwing client callback
+  // (e.g. a user-supplied onError) so it can neither break the worker message
+  // loop nor starve sibling streams sharing this worker.
+  private dispatch(streamId: number, msg: FromWorker): void {
+    try {
+      this.handlers.get(streamId)?.(msg);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("flux: stream message handler threw", e);
+    }
   }
 }
 
@@ -249,6 +272,7 @@ export class FluxClient {
   private listeners = new Set<() => void>();
   private store: BlockStore = emptyBlockStore();
   private onError?: (err: { message: string; fatal?: boolean }) => void;
+  private onBlock?: (block: Block) => void;
 
   // Perf
   private appendedBytes = 0;
@@ -267,17 +291,23 @@ export class FluxClient {
    * @param options.onError invoked on a worker/parse error or a fatal WASM-init
    *   failure (`fatal: true`). Without it, errors are only `console.error`d and
    *   a load failure surfaces solely as a rejected {@link FluxClient.whenReady}.
+   * @param options.onBlock invoked once per block as it commits (in document
+   *   order, after the store updates) — for side effects like lazily
+   *   highlighting a finished code block or analytics. A committed block never
+   *   re-fires; the streaming tail does not (subscribe for live tail updates).
    */
   constructor(
     options: {
       pool?: FluxPool;
       config?: ParserConfig;
       onError?: (err: { message: string; fatal?: boolean }) => void;
+      onBlock?: (block: Block) => void;
     } = {},
   ) {
     this.pool = options.pool ?? getDefaultPool();
     this.config = options.config;
     this.onError = options.onError;
+    this.onBlock = options.onBlock;
     const { streamId, pw } = this.pool.acquire((msg) => this.onMessage(msg));
     this.streamId = streamId;
     this.pw = pw;
@@ -307,6 +337,37 @@ export class FluxClient {
 
   finalize() {
     this.pool.send(this.pw, { type: "finalize", streamId: this.streamId, config: this.firstConfig() });
+  }
+
+  /**
+   * Pipe a byte stream straight in: read it to completion, `append()` each
+   * decoded chunk, then `finalize()`. The LLM-native path — `await
+   * client.pipeFrom(await fetch("/api/chat"))` (pass a `Response` or its
+   * `ReadableStream` body). `TextDecoder({ stream: true })` carries a multibyte
+   * sequence that straddles a chunk boundary into the next read. Resolves once
+   * finalized; rejects (without finalizing) if the stream errors/aborts — abort
+   * the underlying fetch to cancel. Browser-only (uses `TextDecoder`).
+   */
+  async pipeFrom(source: ReadableStream<Uint8Array> | Response): Promise<void> {
+    const body = "body" in source ? source.body : source;
+    if (!body) {
+      // An empty Response body (e.g. 204) is a completed, empty stream.
+      this.finalize();
+      return;
+    }
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) this.append(decoder.decode(value, { stream: true }));
+      }
+      this.append(decoder.decode()); // flush any trailing partial sequence
+      this.finalize();
+    } finally {
+      reader.releaseLock();
+    }
   }
 
   reset() {
@@ -397,6 +458,12 @@ export class FluxClient {
         this.patchCount += 1;
         this.lastPatchMs = performance.now();
         this.emit();
+        // After subscribers see the new snapshot, fire the per-block hook for
+        // anything that just committed (document order). A throw here is
+        // isolated by the pool's dispatch boundary and won't skip emit().
+        if (this.onBlock) {
+          for (const b of msg.patch.newly_committed) this.onBlock(b);
+        }
         break;
       case "error":
         if (this.onError) {
