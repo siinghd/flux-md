@@ -124,7 +124,9 @@ export type FromWorker =
       retainedBytes: number;
       wasmMemoryBytes: number;
     }
-  | { type: "error"; streamId: number; message: string };
+  // `fatal` marks a worker-level failure (WASM init) that dooms every stream on
+  // the worker — not a single parse error. It carries no meaningful streamId.
+  | { type: "error"; streamId: number; message: string; fatal?: boolean };
 
 /**
  * Minimal structural interface satisfied by the DOM `Worker`. Injectable so the
