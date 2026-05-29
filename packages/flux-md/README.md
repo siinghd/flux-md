@@ -258,18 +258,28 @@ if you hit a transform edge, `mountFluxMarkdown` from `flux-md/dom` inside
 
 ```ts
 class FluxClient {
-  constructor(options?: { pool?: FluxPool; config?: ParserConfig });
+  constructor(options?: {
+    pool?: FluxPool;
+    config?: ParserConfig;
+    onError?: (err: { message: string; fatal?: boolean }) => void; // worker/parse + WASM-init errors
+  });
   append(chunk: string): void;                      // queue text for parsing
   finalize(): void;                                 // mark stream complete
   reset(): void;                                    // wipe and reuse
   destroy(): void;                                  // free this stream's parser
-  whenReady(): Promise<void>;                       // resolves once WASM loaded
+  whenReady(): Promise<void>;                       // resolves once WASM loaded; rejects on init failure
   subscribe(listener: () => void): () => void;      // React-friendly store
   getSnapshot(): Block[];                           // ordered current blocks
+  outline(): { level: number; text: string; id: number }[]; // heading table-of-contents (works mid-stream)
+  toPlaintext(): string;                            // rendered document as plain text (search / summaries)
   getMetrics(): { bytes, patches, totalParseMs, throughputKBs,
                    retainedBytes, wasmMemoryBytes, ... };
 }
 ```
+
+Pass `onError` to be notified of worker/parse errors and a fatal WASM-init
+failure (`{ fatal: true }`); without it, errors are only `console.error`'d and a
+load failure surfaces as a rejected `whenReady()`.
 
 #### Per-stream config
 
@@ -281,6 +291,7 @@ const client = new FluxClient({
     gfmFootnotes: true,   // [^1] + [^1]: → footnote section (default false)
     gfmMath: true,        // $…$ / \(…\) inline + $$…$$ / \[…\] display math (default false)
     dirAuto: true,        // per-block dir="auto" for RTL/bidi text (default false)
+    a11y: true,           // task-list <label> + <th scope="col"> a11y markup (default false)
     unsafeHtml: false,    // pass raw HTML through (default false — keep it false for untrusted input)
     componentTags: ["Thinking", "Callout"], // custom tags with markdown inside (default none)
   },
@@ -302,6 +313,10 @@ When to enable each flag:
   definitions. Off by default; see the footnote streaming caveat above.
 - `dirAuto: true` — when content can be RTL / mixed-direction. Emits per-block
   `dir="auto"` so the browser detects direction independently per block.
+- `a11y: true` — opt-in accessibility markup that deviates from strict GFM
+  byte-output: wraps task-list checkboxes in a `<label>` (screen-reader
+  association) and adds `scope="col"` to table headers. Off by default so
+  conformance output stays exact.
 - `unsafeHtml: true` — only when rendering trusted HTML. For untrusted /
   LLM-produced HTML, pair this with `<FluxMarkdown sanitize={…} />` (DOMPurify or
   similar — see [Security](#security)).
