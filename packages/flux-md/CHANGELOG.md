@@ -4,6 +4,35 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.8.0 — 2026-05-29
+
+A self-review of 0.7.0 (adversarial multi-agent pass) fixed two robustness gaps
+in the worker pool and added two small, streaming-native conveniences.
+
+### Added
+
+- **`FluxClient.pipeFrom(src)`** — hand it a `Response` or a
+  `ReadableStream<Uint8Array>` and it reads the body, `append()`s each decoded
+  chunk, and `finalize()`s. The LLM-native one-liner:
+  `await client.pipeFrom(await fetch("/api/chat"))`.
+- **`onBlock` option** — `new FluxClient({ onBlock })` fires once per block as it
+  commits (document order), for side effects like lazily highlighting a finished
+  code block or analytics. Committed blocks never re-fire.
+
+### Fixed
+
+- **Worker pool: a throwing stream handler no longer breaks sibling streams.** A
+  user `onError` (or any handler) that threw could abort the fatal-error fan-out
+  mid-loop and escape the worker message listener; dispatch is now isolated.
+- **Worker pool: a fatally-failed worker is no longer re-assigned.** `pick()`
+  skipped the `failed` flag, so after a WASM-init failure a new stream could be
+  routed onto the dead worker and hang (a client that didn't `await whenReady()`
+  had no safety net). Failed workers are now excluded from selection.
+- **`<flux-markdown>`: manual `append()`/`finalize()` supersede an in-flight
+  `src` fetch** (mirroring `reset()`), so mixing the two can't interleave.
+- Hardened the CI/publish tarball check (explicit failure if `npm pack` yields
+  no tarball) and documented the `htmlToText` core-HTML-only invariant.
+
 ## 0.7.0 — 2026-05-29
 
 DX, robustness, and accessibility round — the streaming core (perf, CommonMark

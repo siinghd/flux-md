@@ -262,8 +262,10 @@ class FluxClient {
     pool?: FluxPool;
     config?: ParserConfig;
     onError?: (err: { message: string; fatal?: boolean }) => void; // worker/parse + WASM-init errors
+    onBlock?: (block: Block) => void;                 // fires once per block as it commits
   });
   append(chunk: string): void;                      // queue text for parsing
+  pipeFrom(src: ReadableStream<Uint8Array> | Response): Promise<void>; // read → append → finalize
   finalize(): void;                                 // mark stream complete
   reset(): void;                                    // wipe and reuse
   destroy(): void;                                  // free this stream's parser
@@ -277,9 +279,18 @@ class FluxClient {
 }
 ```
 
+`pipeFrom` is the LLM-native shortcut — hand it a `fetch` response and it
+reads, appends, and finalizes for you:
+
+```ts
+const client = new FluxClient();
+await client.pipeFrom(await fetch("/api/chat")); // streams the body in, then finalizes
+```
+
 Pass `onError` to be notified of worker/parse errors and a fatal WASM-init
 failure (`{ fatal: true }`); without it, errors are only `console.error`'d and a
-load failure surfaces as a rejected `whenReady()`.
+load failure surfaces as a rejected `whenReady()`. Pass `onBlock` to run a side
+effect each time a block commits (e.g. lazy-highlight a finished code block).
 
 #### Per-stream config
 
