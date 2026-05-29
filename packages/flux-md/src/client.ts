@@ -22,6 +22,32 @@ export function emptyBlockStore(): BlockStore {
   return { committed: new Map(), committedOrder: [], active: [], snapshot: [] };
 }
 
+/** A heading entry for building a table of contents — see {@link FluxClient.outline}. */
+export interface OutlineEntry {
+  /** Heading level 1–6. */
+  level: number;
+  /** Plain-text heading content (tags stripped, entities decoded). */
+  text: string;
+  /** Stable block id — usable as a scroll target / React key. */
+  id: number;
+}
+
+/** Strip tags (→ space) and decode the small entity set the core emits, then
+ *  collapse whitespace. The core's HTML is well-formed and escapes `>` inside
+ *  attributes, so the simple tag regex is safe here. `&amp;` decodes last so
+ *  `&amp;lt;` → `&lt;`, not `<`. */
+function htmlToText(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function applyPatch(store: BlockStore, patch: Patch): void {
   for (const b of patch.newly_committed) {
     if (!store.committed.has(b.id)) store.committedOrder.push(b.id);
@@ -327,6 +353,37 @@ export class FluxClient {
       // sum) when aggregating across clients; summing double-counts.
       wasmMemoryBytes: this.wasmMemoryBytes,
     };
+  }
+
+  /**
+   * A heading outline of the current snapshot (committed + active), in document
+   * order — for a table of contents. Works mid-stream; entries appear as their
+   * headings stream in. The `id` is stable, so a built ToC won't re-key.
+   */
+  outline(): OutlineEntry[] {
+    const out: OutlineEntry[] = [];
+    for (const b of this.store.snapshot) {
+      if (b.kind.type === "Heading") {
+        out.push({ level: (b.kind.data as number) ?? 1, text: htmlToText(b.html), id: b.id });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The rendered document as plain text — tags stripped, entities decoded,
+   * blocks separated by blank lines. Derived from the rendered HTML (the source
+   * markdown is parsed away in WASM and not retained client-side), so it is a
+   * readable approximation for search indexing / summaries, not a round-trip of
+   * the original source.
+   */
+  toPlaintext(): string {
+    const parts: string[] = [];
+    for (const b of this.store.snapshot) {
+      const t = htmlToText(b.html);
+      if (t) parts.push(t);
+    }
+    return parts.join("\n\n");
   }
 
   private onMessage(msg: FromWorker) {

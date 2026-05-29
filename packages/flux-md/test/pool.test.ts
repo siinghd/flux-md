@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { FluxClient, FluxPool } from "../src/client";
-import type { FromWorker, ToWorker, WorkerLike } from "../src/types";
+import type { Block, FromWorker, ToWorker, WorkerLike } from "../src/types";
 
 // A synchronous fake worker: records what was posted to it and lets the test
 // fire responses back through the registered listener. No real Worker/WASM.
@@ -216,6 +216,40 @@ test("no config → no config field on any message (worker uses defaults)", () =
   c.append("a");
   c.finalize();
   expect(created[0].sent.every((m) => (m as any).config === undefined)).toBe(true);
+});
+
+test("outline() and toPlaintext() derive from the streamed snapshot", () => {
+  const { pool, created } = makePool(1);
+  const c = new FluxClient({ pool });
+  c.append("x"); // wire the worker + discover the stream id
+  const sid = (created[0].sent[0] as { streamId: number }).streamId;
+
+  const heading = (id: number, level: number, text: string): Block => ({
+    id, kind: { type: "Heading", data: level }, start: 0, end: 0,
+    html: `<h${level}>${text}</h${level}>`, open: false, speculative: false,
+  });
+  const para = (id: number, html: string): Block => ({
+    id, kind: { type: "Paragraph" }, start: 0, end: 0, html, open: false, speculative: false,
+  });
+
+  created[0].fire({
+    type: "patch", streamId: sid,
+    patch: {
+      newly_committed: [
+        heading(1, 1, "Title"),
+        para(2, "<p>Hello &amp; <strong>world</strong></p>"),
+        heading(3, 2, "Sub"),
+      ],
+      active: [],
+    },
+    appendedBytes: 0, parseMicros: 0, retainedBytes: 0, wasmMemoryBytes: 0,
+  });
+
+  expect(c.outline()).toEqual([
+    { level: 1, text: "Title", id: 1 },
+    { level: 2, text: "Sub", id: 3 },
+  ]);
+  expect(c.toPlaintext()).toBe("Title\n\nHello & world\n\nSub");
 });
 
 test("default constructor still joins a pool and streams (no behavior change)", () => {
