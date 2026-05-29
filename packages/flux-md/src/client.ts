@@ -340,15 +340,42 @@ export class FluxClient {
   }
 
   /**
-   * Pipe a byte stream straight in: read it to completion, `append()` each
-   * decoded chunk, then `finalize()`. The LLM-native path — `await
-   * client.pipeFrom(await fetch("/api/chat"))` (pass a `Response` or its
-   * `ReadableStream` body). `TextDecoder({ stream: true })` carries a multibyte
-   * sequence that straddles a chunk boundary into the next read. Resolves once
-   * finalized; rejects (without finalizing) if the stream errors/aborts — abort
-   * the underlying fetch to cancel. Browser-only (uses `TextDecoder`).
+   * Pipe a source straight in: read it to completion, `append()` each chunk,
+   * then `finalize()`. The LLM-native path — e.g.
+   * `await client.pipeFrom(await fetch("/api/chat"))`. Accepts:
+   *   - a `Response` or its `ReadableStream<Uint8Array>` body (bytes; decoded
+   *     with `TextDecoder({ stream: true })` so a multibyte sequence straddling
+   *     a chunk boundary carries into the next read), or
+   *   - an `AsyncIterable<string>` (e.g. an SSE delta generator) — string chunks
+   *     appended verbatim.
+   *
+   * Pass `opts.signal` to supersede/cancel: the signal is checked on every
+   * iteration, so once aborted no further chunk is appended and **finalize is
+   * skipped** (a superseded stream must not finalize). For a byte source the
+   * reader is also `cancel()`'d to tear down the upstream. Resolves once
+   * finalized (or cleanly on abort); rejects if the source itself errors.
+   * Browser-only for byte sources (uses `TextDecoder`).
    */
-  async pipeFrom(source: ReadableStream<Uint8Array> | Response): Promise<void> {
+  async pipeFrom(
+    source: ReadableStream<Uint8Array> | Response | AsyncIterable<string>,
+    opts?: { signal?: AbortSignal },
+  ): Promise<void> {
+    const signal = opts?.signal;
+
+    if (signal?.aborted) return; // already superseded before we started
+
+    // AsyncIterable<string> (SSE deltas, generators). Detected by elimination:
+    // a ReadableStream has `getReader`, a Response has `body` — neither here.
+    if (!("getReader" in source) && !("body" in source)) {
+      for await (const chunk of source as AsyncIterable<string>) {
+        if (signal?.aborted) return; // superseded/unmounted: drop late chunks, no finalize
+        this.append(chunk);
+      }
+      if (!signal?.aborted) this.finalize();
+      return;
+    }
+
+    // Byte source: a Response (use its body) or a ReadableStream directly.
     const body = "body" in source ? source.body : source;
     if (!body) {
       // An empty Response body (e.g. 204) is a completed, empty stream.
@@ -356,17 +383,30 @@ export class FluxClient {
       return;
     }
     const reader = body.getReader();
+    // A pending read() can't observe `aborted` until the next chunk; cancel()
+    // on abort tears down the upstream and resolves the pending read so the
+    // loop's post-read check fires and bails without finalizing.
+    const onAbort = () => {
+      reader.cancel().catch(() => {});
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
     const decoder = new TextDecoder();
     try {
       for (;;) {
         const { done, value } = await reader.read();
+        if (signal?.aborted) return; // superseded: no finalize (cancel already fired)
         if (done) break;
         if (value) this.append(decoder.decode(value, { stream: true }));
       }
       this.append(decoder.decode()); // flush any trailing partial sequence
       this.finalize();
     } finally {
-      reader.releaseLock();
+      signal?.removeEventListener("abort", onAbort);
+      try {
+        reader.releaseLock();
+      } catch {
+        /* already released (e.g. by cancel) */
+      }
     }
   }
 
