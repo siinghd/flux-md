@@ -95,3 +95,34 @@ test.skipIf(!haveWasm)("real WASM: setComponentTags renders an allowlisted tag a
   expect(comp).toBeDefined();
   expect(comp.kind.data?.tag).toBe("Thinking");
 });
+
+const TABLE_MD = "| **A** | B |\n|:--|:-:|\n| x | [y](z) |\n";
+
+test.skipIf(!haveWasm)("real WASM: a Table carries structured kind.data when setBlockData is on", () => {
+  // Guards the new setBlockData serde path across the real boundary: the
+  // {headers,rows,aligns} of {text,html} cells must survive serde_wasm_bindgen.
+  const { blocks } = parseAll(TABLE_MD, (p) => p.setBlockData(true));
+  const table = blocks.find((b) => b.kind.type === "Table");
+  expect(table).toBeDefined();
+  const d = table.kind.data;
+  expect(d).toBeDefined();
+  // headers: text is inline-STRIPPED plaintext, html is inline-rendered display.
+  expect(d.headers.map((c: { text: string }) => c.text)).toEqual(["A", "B"]);
+  expect(d.headers[0].html).toBe("<strong>A</strong>");
+  // aligns straight from the delimiter row.
+  expect(d.aligns).toEqual(["left", "center"]);
+  // rows: plaintext for logic; html for display (the link's full attrs preserved).
+  expect(d.rows.length).toBe(1);
+  expect(d.rows[0].map((c: { text: string }) => c.text)).toEqual(["x", "y"]);
+  expect(d.rows[0][1].html).toContain('<a href="z"');
+});
+
+test.skipIf(!haveWasm)("real WASM: WITHOUT setBlockData a Table has no kind.data (byte-identical-off tripwire)", () => {
+  // The default-off contract across the real serde boundary: `kind` is exactly
+  // `{type:"Table"}` — no `data` key — so a non-user pays zero serde bytes.
+  const { blocks } = parseAll(TABLE_MD);
+  const table = blocks.find((b) => b.kind.type === "Table");
+  expect(table).toBeDefined();
+  expect(table.kind.data).toBeUndefined();
+  expect(Object.keys(table.kind)).toEqual(["type"]);
+});

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::rc::Rc;
 
 /// One coarse-grained block in the document. IDs are monotonic and stable for
 /// the lifetime of the parser instance; once a block is assigned ID N, no
@@ -38,6 +39,13 @@ pub enum BlockKind {
     /// dispatch a custom renderer via `components.Alert`.
     Alert { kind: AlertKind },
     Table,
+    /// Opt-in structured table channel (`setBlockData`). Same serialized tag as
+    /// `Table` (`{"type":"Table","data":{…}}`); carries the parsed
+    /// headers/rows/aligns so a consumer can sort/filter/transpose/CSV/chart from
+    /// DATA without re-parsing the display HTML. Default-off ⇒ `Table` (no `data`
+    /// key), byte-identical to before.
+    #[serde(rename = "Table")]
+    TableWithData(TableData),
     Rule,
     Html,
     /// An opt-in custom component tag (e.g. `<Thinking>…</Thinking>`) whose name
@@ -45,6 +53,37 @@ pub enum BlockKind {
     /// `tag` is the element name; `attrs` are the sanitized (name, value) pairs.
     /// Dispatched on the JS side via `components[tag]` (or `components.Component`).
     Component { tag: String, attrs: Vec<(String, String)> },
+}
+
+/// Structured table payload for the opt-in `kind.data` channel (the
+/// `TableWithData` variant). Serializes to
+/// `{ headers: TableCell[], rows: TableCell[][], aligns: (string|null)[] }`.
+/// `headers`/`rows` carry both the inline-stripped `text` (for sort/filter/CSV/
+/// chart logic) and the inline-rendered `html` (for display) of each cell;
+/// `aligns` is the per-column alignment ("left"|"center"|"right"|null).
+///
+/// Each committed row is held behind an `Rc` so the streaming `TableCache` can
+/// re-emit the full table on every patch (the active block always carries all
+/// rows so far, mirroring `Block::html`) with an O(rows) refcount bump per
+/// patch instead of an O(cells) deep `String` clone — the perf-critical
+/// difference for large streamed tables. The `rc` serde feature makes
+/// `Rc<Vec<TableCell>>` serialize transparently, so the wire shape is unchanged:
+/// `{ headers: TableCell[], rows: TableCell[][], aligns: (string|null)[] }`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TableData {
+    pub headers: Vec<TableCell>,
+    pub rows: Vec<Rc<Vec<TableCell>>>,
+    pub aligns: Vec<Option<&'static str>>,
+}
+
+/// One table cell in the structured channel. `text` is the plaintext (inline
+/// markdown stripped) for logic; `html` is the inline-rendered display HTML —
+/// byte-identical to the inline content inside the corresponding `<td>`/`<th>`
+/// in `Block::html`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TableCell {
+    pub text: String,
+    pub html: String,
 }
 
 /// The five GitHub alert keywords. Serializes to lowercase ("note", …).
@@ -108,6 +147,7 @@ impl BlockKind {
             BlockKind::Blockquote => "Blockquote",
             BlockKind::Alert { .. } => "Alert",
             BlockKind::Table => "Table",
+            BlockKind::TableWithData(_) => "Table",
             BlockKind::Rule => "Rule",
             BlockKind::Html => "Html",
             BlockKind::Component { .. } => "Component",

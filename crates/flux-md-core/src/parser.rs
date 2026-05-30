@@ -10,7 +10,7 @@ use crate::render::{
     parse_alignments, push_code_fence_open, push_table_cell, render_block,
     render_footnote_section, split_table_cells, LinkRef, RenderOpts,
 };
-use crate::blocks::BlockKind;
+use crate::blocks::{BlockKind, TableCell, TableData};
 use crate::scanner::{
     count_table_columns, is_blank_line, is_setext_underline, is_table_delimiter_row, line_end,
     line_slice, parse_link_ref_def, scan, scan_marker, would_start_other_block, MarkerScan,
@@ -121,6 +121,10 @@ pub struct StreamParser {
     gfm_math: bool,
     dir_auto: bool,
     a11y: bool,
+    /// Opt-in structured `kind.data` channel for Table blocks (`setBlockData`).
+    /// Off by default — when off, Table serializes as `{"type":"Table"}` (no
+    /// `data` key) and output is byte-identical to before.
+    block_data: bool,
     /// Opt-in allowlist of custom "component" tag names (e.g. `Thinking`,
     /// `Callout`). A `<Tag>…</Tag>` whose name is listed is parsed as a container
     /// whose inner content is markdown, and dispatched to a React component —
@@ -249,6 +253,17 @@ struct TableCache {
     /// committed body row). The trailing partial-row path emits its own `<tbody>`
     /// when speculatively rendering the very first row of the body.
     tbody_opened: bool,
+    /// Structured `kind.data` channel (only populated when `block_data` is on):
+    /// the header cells (locked once, parallel to the `<thead>` in
+    /// `cached_prefix`). Empty + unused when off.
+    header_cells: Vec<TableCell>,
+    /// Structured channel: the committed body-row cells, pushed at the exact
+    /// step a row's `<tr>` is folded into `cached_prefix` so DATA never diverges
+    /// from HTML. The speculative trailing partial row is NOT stored here (it is
+    /// rebuilt fresh each append, mirroring `partial_html`). Empty when off.
+    /// Each row is `Rc`-shared so re-emitting the full table per patch costs an
+    /// O(rows) refcount bump, not an O(cells) `String` deep clone.
+    body_cells: Vec<Rc<Vec<TableCell>>>,
 }
 
 /// Incremental render state for a single open GFM blockquote / alert at the
@@ -386,6 +401,7 @@ impl StreamParser {
             gfm_math: false,
             dir_auto: false,
             a11y: false,
+            block_data: false,
             component_tags: Vec::new(),
             fence_cache: None,
             para_cache: None,
@@ -478,6 +494,20 @@ impl StreamParser {
 
     pub fn set_a11y(&mut self, on: bool) {
         self.a11y = on;
+    }
+
+    /// Enable the opt-in structured `kind.data` channel for Table blocks: a Table
+    /// then carries `{ headers, rows, aligns }` (per-cell `{ text, html }`) so a
+    /// consumer can build a sort/filter/transpose/chart/CSV toolbar from DATA
+    /// without re-parsing the HTML. Off by default (Table serializes as
+    /// `{"type":"Table"}`, no `data` key — byte-identical output).
+    pub fn with_block_data(mut self, on: bool) -> Self {
+        self.block_data = on;
+        self
+    }
+
+    pub fn set_block_data(&mut self, on: bool) {
+        self.block_data = on;
     }
 
     /// Set the opt-in component-tag allowlist (e.g. `["Thinking", "Callout"]`).
@@ -598,6 +628,7 @@ impl StreamParser {
             gfm_math: self.gfm_math,
             dir_auto: self.dir_auto,
             a11y: self.a11y,
+            block_data: self.block_data,
             gfm_footnotes,
             footnotes: fn_nums.clone(),
             // Seed the per-label occurrence counter from the committed counts so
@@ -608,9 +639,14 @@ impl StreamParser {
 
         let mut produced: Vec<Block> = Vec::with_capacity(renderable.len());
         for raw in &renderable {
-            let kind = classify(&raw.kind, &tail[raw.range.clone()], self.gfm_alerts);
+            let mut kind = classify(&raw.kind, &tail[raw.range.clone()], self.gfm_alerts);
             let mut html = String::with_capacity(64);
-            render_block(tail, raw, &opts, &mut html);
+            // render_block returns Some(TableData) only for a top-level table when
+            // block_data is on — promote the bare Table kind to TableWithData so
+            // the structured channel is populated. Off ⇒ None ⇒ kind unchanged.
+            if let Some(td) = render_block(tail, raw, &opts, &mut html) {
+                kind = BlockKind::TableWithData(td);
+            }
             produced.push(Block {
                 id: 0,
                 kind,
@@ -1002,6 +1038,7 @@ impl StreamParser {
             gfm_math: self.gfm_math,
             dir_auto: self.dir_auto,
             a11y: self.a11y,
+            block_data: self.block_data,
             gfm_footnotes: self.gfm_footnotes,
             footnotes,
             footnote_occ: std::cell::RefCell::new(self.committed_footnote_occurrences.clone()),
@@ -1141,16 +1178,25 @@ impl StreamParser {
                 cache.tbody_opened = true;
             }
             cache.cached_prefix.push_str("<tr>");
+            let mut row: Vec<TableCell> = Vec::new();
             for i in 0..cache.ncol {
-                push_table_cell(
+                let cell = push_table_cell(
                     "td",
                     cells.get(i).map(String::as_str).unwrap_or(""),
                     cache.aligns.get(i),
                     &opts,
                     &mut cache.cached_prefix,
                 );
+                if let Some(c) = cell {
+                    row.push(c);
+                }
             }
             cache.cached_prefix.push_str("</tr>");
+            // Structured channel: fold this committed row's cells in lock-step
+            // with its `<tr>` — once folded it's never re-rendered (HTML invariant).
+            if opts.block_data {
+                cache.body_cells.push(Rc::new(row));
+            }
             cache.lines_upto = next;
             pos = next;
         }
@@ -1161,6 +1207,10 @@ impl StreamParser {
         // (≤ one row's worth), so re-rendering it each append is O(row).
         let partial = &bytes[cache.lines_upto..end];
         let mut partial_html = String::new();
+        // Structured channel: the speculative partial row's cells, built parallel
+        // to `partial_html` and NOT folded into `cache.body_cells` (mirrors how
+        // `partial_html` is not folded into `cached_prefix`).
+        let mut partial_row: Option<Vec<TableCell>> = None;
         if !partial.is_empty() && !is_blank_line(bytes, cache.lines_upto) {
             if partial.contains(&b'\r') {
                 return None;
@@ -1168,16 +1218,23 @@ impl StreamParser {
             let line_str = std::str::from_utf8(partial).unwrap_or("");
             let cells = split_table_cells(line_str);
             partial_html.push_str("<tr>");
+            let mut row: Vec<TableCell> = Vec::new();
             for i in 0..cache.ncol {
-                push_table_cell(
+                let cell = push_table_cell(
                     "td",
                     cells.get(i).map(String::as_str).unwrap_or(""),
                     cache.aligns.get(i),
                     &opts,
                     &mut partial_html,
                 );
+                if let Some(c) = cell {
+                    row.push(c);
+                }
             }
             partial_html.push_str("</tr>");
+            if opts.block_data {
+                partial_row = Some(row);
+            }
         }
 
         // Assemble final HTML: cached_prefix [+ "<tbody>" if first row is partial]
@@ -1196,9 +1253,27 @@ impl StreamParser {
         }
         html.push_str("</table>");
 
+        // Structured channel: assemble TableData = header + committed body rows +
+        // the speculative partial row (if any), exactly mirroring the HTML the
+        // consumer renders. emit-on-every-patch so DATA never lags HTML.
+        let kind = if opts.block_data {
+            // O(rows) Rc refcount bumps, not an O(cells) String deep clone.
+            let mut rows = cache.body_cells.clone();
+            if let Some(row) = partial_row {
+                rows.push(Rc::new(row));
+            }
+            BlockKind::TableWithData(TableData {
+                headers: cache.header_cells.clone(),
+                rows,
+                aligns: cache.aligns.clone(),
+            })
+        } else {
+            BlockKind::Table
+        };
+
         let block = Block {
             id: cache.id,
-            kind: BlockKind::Table,
+            kind,
             start: cache.start,
             end,
             html,
@@ -1862,14 +1937,20 @@ fn build_table_cache(buffer: &str, start: usize, id: u64, opts: &RenderOpts) -> 
     cached_prefix.push_str("<table");
     cached_prefix.push_str(opts.dir());
     cached_prefix.push_str("><thead><tr>");
+    // Structured channel: capture the header cells at the exact step the `<th>`s
+    // are written, from the same `push_table_cell` (so DATA matches HTML).
+    let mut td_header_cells: Vec<TableCell> = Vec::new();
     for i in 0..ncol {
-        push_table_cell(
+        let cell = push_table_cell(
             "th",
             header_cells.get(i).map(String::as_str).unwrap_or(""),
             aligns.get(i),
             opts,
             &mut cached_prefix,
         );
+        if let Some(c) = cell {
+            td_header_cells.push(c);
+        }
     }
     cached_prefix.push_str("</tr></thead>");
 
@@ -1881,6 +1962,8 @@ fn build_table_cache(buffer: &str, start: usize, id: u64, opts: &RenderOpts) -> 
         ncol,
         aligns,
         tbody_opened: false,
+        header_cells: td_header_cells,
+        body_cells: Vec::new(),
     })
 }
 

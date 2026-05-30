@@ -8,7 +8,7 @@ import {
   useSyncExternalStore,
   type CSSProperties,
 } from "react";
-import type { Block, BlockComponentProps, Components } from "./types";
+import type { Block, BlockComponentProps, Components, TableData } from "./types";
 import { FluxClient } from "./client";
 import type { ParserConfig } from "./types-core";
 import { CodeBlock } from "./renderers/CodeBlock";
@@ -259,6 +259,11 @@ function blockKindProps(block: Block): BlockComponentProps {
     // An override replaces the `<tag>` wrapper, so it gets the *inner* HTML
     // (markdown already rendered) rather than the full wrapped block.
     props.html = componentInnerHtml(block.html, props.tag);
+  } else if (block.kind.type === "Table") {
+    // Pure structured data (present only when `blockData` is on) — unlike
+    // `attrs` there is no React/DOM name-form divergence, so this is the same
+    // line as block-props.ts's branch.
+    props.table = block.kind.data as TableData | undefined;
   }
   return props;
 }

@@ -17,6 +17,31 @@ export interface BlockKind {
   data?: unknown;
 }
 
+/** Column alignment from the `|:--|:-:|--:|` delimiter row; `null` = unset. */
+export type Align = "left" | "center" | "right" | null;
+
+/**
+ * One table cell as STRUCTURED DATA (opt-in via {@link ParserConfig.blockData}).
+ * `text` is the inline-stripped plaintext — sort/filter/CSV/chart from DATA,
+ * with no HTML re-parse. `html` is the inline-rendered display markup, byte-for-
+ * byte the inline content inside the matching `<td>`/`<th>` of `block.html`.
+ */
+export interface TableCell {
+  text: string;
+  html: string;
+}
+
+/**
+ * A Table block's `kind.data` when {@link ParserConfig.blockData} is on. Lets a
+ * consumer build a sort/filter/transpose/chart/CSV toolbar from DATA alone —
+ * no HAST tree, no HTML re-parse. `aligns[i]` is column `i`'s alignment.
+ */
+export interface TableData {
+  headers: TableCell[];
+  rows: TableCell[][];
+  aligns: Align[];
+}
+
 export interface Block {
   id: number;
   kind: BlockKind;
@@ -58,6 +83,15 @@ export interface BlockComponentProps {
    * wrap it itself.
    */
   attrs?: Record<string, string>;
+  /**
+   * Structured table data — present for `Table` blocks when
+   * {@link ParserConfig.blockData} is on (otherwise `undefined`). Equivalent to
+   * `block.kind.data`, given a typed, documented name. `{ headers, rows, aligns }`
+   * with each cell carrying `text` (plaintext, for sort/filter/CSV/chart) and
+   * `html` (display). Build a sort/filter/transpose/chart/CSV toolbar from DATA —
+   * no HTML re-parse, no HAST tree.
+   */
+  table?: TableData;
 }
 
 /**
@@ -108,6 +142,14 @@ export interface ParserConfig {
    * off. Names match case-sensitively.
    */
   componentTags?: string[];
+  /**
+   * Opt-in structured table data. When on, a `Table` block's `kind.data` is
+   * populated with `{ headers, rows, aligns }` (each cell `{ text, html }`) so a
+   * consumer can build a sort/filter/transpose/chart/CSV toolbar from DATA — no
+   * HTML re-parse, no HAST tree. Default false (non-users pay zero allocation /
+   * serde bytes; output and the `kind` serde shape stay byte-identical when off).
+   */
+  blockData?: boolean;
 }
 
 // Each message carries a `streamId` so one worker can multiplex many parsers

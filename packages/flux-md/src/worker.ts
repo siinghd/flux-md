@@ -55,6 +55,7 @@ function getOrCreate(streamId: number): FluxParser {
     p.setA11y(c?.a11y ?? false);
     p.setUnsafeHtml(c?.unsafeHtml ?? false);
     p.setComponentTags(c?.componentTags ?? []);
+    p.setBlockData(c?.blockData ?? false);
     parsers.set(streamId, p);
   }
   return p;
