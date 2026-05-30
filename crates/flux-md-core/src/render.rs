@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::blocks::{AlertKind, BlockKind};
+use crate::blocks::{AlertKind, BlockKind, TableCell, TableData};
 use crate::inline::render_inline;
 use crate::scanner::{
     component_inner_range, indent_cols, is_blank_line, line_end, line_slice, scan, scan_marker,
@@ -57,6 +57,12 @@ pub struct RenderOpts {
     /// association), and add `scope="col"` to table header cells. Off by default
     /// so the CommonMark/GFM conformance output is unchanged.
     pub a11y: bool,
+    /// Emit the opt-in structured `kind.data` channel for blocks that support it
+    /// (currently Table → `{headers,rows,aligns}` with per-cell `{text,html}`).
+    /// Off by default so non-users pay zero allocation/serde bytes and the
+    /// CommonMark/GFM byte-output is unchanged (Table serializes as
+    /// `{"type":"Table"}`, no `data` key).
+    pub block_data: bool,
     /// GFM footnotes. Off by default. When on, an inline `[^label]` whose label
     /// appears in `footnotes` renders as a superscript link.
     pub gfm_footnotes: bool,
@@ -195,7 +201,12 @@ pub fn classify(raw: &RawBlockKind, slice: &str, gfm_alerts: bool) -> BlockKind 
     }
 }
 
-pub fn render_block(source: &str, raw: &RawBlock, opts: &RenderOpts, out: &mut String) {
+/// Render one block to HTML. Returns `Some(TableData)` only for a top-level GFM
+/// table when `opts.block_data` is on (the opt-in structured `kind.data`
+/// channel); `None` for every other kind and whenever the flag is off. Nested
+/// (recursive) call sites ignore the return — only blocks that appear at the
+/// document top level get a `kind.data`.
+pub fn render_block(source: &str, raw: &RawBlock, opts: &RenderOpts, out: &mut String) -> Option<TableData> {
     let slice = &source[raw.range.clone()];
     match &raw.kind {
         RawBlockKind::Heading { level } => render_heading(slice, *level, opts, out),
@@ -208,7 +219,7 @@ pub fn render_block(source: &str, raw: &RawBlock, opts: &RenderOpts, out: &mut S
         RawBlockKind::MathFence { terminated } => render_math_block(slice, *terminated, out),
         RawBlockKind::Blockquote => render_blockquote(slice, opts, out),
         RawBlockKind::List { ordered, start } => render_list(slice, *ordered, *start, opts, out),
-        RawBlockKind::Table => render_table(slice, opts, out),
+        RawBlockKind::Table => return render_table(slice, opts, out),
         RawBlockKind::HorizontalRule => out.push_str("<hr>"),
         RawBlockKind::HtmlBlock { .. } => render_html_block(slice, opts, out),
         RawBlockKind::ComponentBlock { tag, terminated } => {
@@ -216,6 +227,7 @@ pub fn render_block(source: &str, raw: &RawBlock, opts: &RenderOpts, out: &mut S
         }
         RawBlockKind::LinkRefDefinition => { /* no output */ }
     }
+    None
 }
 
 /// ATX heading inner content — also strip trailing whitespace from final
@@ -1044,22 +1056,31 @@ fn render_list_item(item: &[u8], ordered: bool, loose: bool, opts: &RenderOpts, 
     out.push_str("</li>");
 }
 
-fn render_table(slice: &str, opts: &RenderOpts, out: &mut String) {
+/// Render a GFM table to HTML. When `opts.block_data` is on, also returns the
+/// structured `TableData` (headers/rows/aligns with per-cell `{text,html}`) for
+/// the opt-in `kind.data` channel; returns `None` when off (zero extra work).
+fn render_table(slice: &str, opts: &RenderOpts, out: &mut String) -> Option<TableData> {
     let lines: Vec<&str> = slice.lines().collect();
     if lines.len() < 2 {
         render_paragraph(slice, opts, out);
-        return;
+        return None;
     }
     let header = split_table_cells(lines[0]);
     let aligns = parse_alignments(lines[1]);
     // §GFM: every row is normalized to the header's column count — extra cells
     // are dropped, missing cells are rendered empty.
     let ncol = header.len();
+    // Structured channel: only allocated when the flag is on.
+    let mut td_headers: Vec<TableCell> = Vec::new();
+    let mut td_rows: Vec<Rc<Vec<TableCell>>> = Vec::new();
     out.push_str("<table");
     out.push_str(opts.dir());
     out.push_str("><thead><tr>");
     for i in 0..ncol {
-        push_table_cell("th", header.get(i).map(String::as_str).unwrap_or(""), aligns.get(i), opts, out);
+        let cell = push_table_cell("th", header.get(i).map(String::as_str).unwrap_or(""), aligns.get(i), opts, out);
+        if let Some(c) = cell {
+            td_headers.push(c);
+        }
     }
     out.push_str("</tr></thead>");
     let body: Vec<&&str> = lines[2..].iter().filter(|l| !l.trim().is_empty()).collect();
@@ -1068,23 +1089,47 @@ fn render_table(slice: &str, opts: &RenderOpts, out: &mut String) {
         for line in body {
             let cells = split_table_cells(line);
             out.push_str("<tr>");
+            let mut row: Vec<TableCell> = Vec::new();
             for i in 0..ncol {
-                push_table_cell("td", cells.get(i).map(String::as_str).unwrap_or(""), aligns.get(i), opts, out);
+                let cell = push_table_cell("td", cells.get(i).map(String::as_str).unwrap_or(""), aligns.get(i), opts, out);
+                if let Some(c) = cell {
+                    row.push(c);
+                }
+            }
+            if opts.block_data {
+                td_rows.push(Rc::new(row));
             }
             out.push_str("</tr>");
         }
         out.push_str("</tbody>");
     }
     out.push_str("</table>");
+    if opts.block_data {
+        Some(TableData { headers: td_headers, rows: td_rows, aligns })
+    } else {
+        None
+    }
 }
 
+/// Render one cell's inline content to HTML (no `<td>`/`<th>` wrapper). Shared
+/// by `push_table_cell` and the streaming `TableCache` so the structured
+/// `TableCell.html` is byte-identical to the inline content the full path emits.
+pub(crate) fn render_cell_inner(content: &str, opts: &RenderOpts) -> String {
+    let mut s = String::new();
+    render_inline(content, opts, &mut s);
+    s
+}
+
+/// Render a `<td>`/`<th>` cell into `out`. When `opts.block_data` is on, also
+/// returns the structured `TableCell` ({text,html}) for the same cell; returns
+/// `None` when off. The emitted HTML is byte-identical either way.
 pub(crate) fn push_table_cell(
     tag: &str,
     content: &str,
     align: Option<&Option<&'static str>>,
     opts: &RenderOpts,
     out: &mut String,
-) {
+) -> Option<TableCell> {
     out.push('<');
     out.push_str(tag);
     // a11y: scope a header cell to its column (helps screen readers; deviates
@@ -1098,10 +1143,111 @@ pub(crate) fn push_table_cell(
         out.push('"');
     }
     out.push('>');
-    render_inline(content, opts, out);
+    // OFF path (default): render straight into `out` — no intermediate String,
+    // no memcpy (byte-identical to the pre-refactor behavior, zero new alloc).
+    // ON path: capture the inner html once to also build the structured cell.
+    let cell = if opts.block_data {
+        let inner = render_cell_inner(content, opts);
+        out.push_str(&inner);
+        Some(TableCell { text: strip_inline_html(&inner), html: inner })
+    } else {
+        render_inline(content, opts, out);
+        None
+    };
     out.push_str("</");
     out.push_str(tag);
     out.push('>');
+    cell
+}
+
+/// Derive a cell's plaintext from its rendered inline HTML: strip tags, then
+/// decode the four entities `escape_html` produces (`&lt; &gt; &amp; &quot;`)
+/// plus `&#39;` (harmless if absent), and collapse internal whitespace runs.
+///
+/// Ordering is load-bearing: tags are stripped FIRST. In escaped cell text a
+/// literal `<`/`>` is already `&lt;`/`&gt;`, so decoding first would turn `&lt;`
+/// into `<` and make the stripper eat the following text. Pass 1 is quote-aware
+/// (a `>` inside a quoted attribute value does not end the tag), so it also
+/// strips correctly through raw inline HTML — e.g. `<span title="x > y">` under
+/// `unsafeHtml`, where an attribute value can carry a literal `>`.
+///
+/// Fidelity note: attribute-borne text is not surfaced, so an image-only cell
+/// (`![alt](src)`) yields empty plaintext (its `alt` lives in an attribute). A
+/// v1 limitation for the sort/filter/CSV channel; the display `html` is intact.
+pub(crate) fn strip_inline_html(html: &str) -> String {
+    // Pass 1: drop everything between `<` and the matching `>`, treating a `>`
+    // inside a quoted attribute value as literal (matters only for raw inline
+    // HTML under unsafeHtml; on the safe path every attribute `>` is `&gt;`).
+    let mut stripped = String::with_capacity(html.len());
+    let mut in_tag = false;
+    let mut in_quote: Option<char> = None;
+    for c in html.chars() {
+        if in_tag {
+            match in_quote {
+                Some(q) if c == q => in_quote = None,
+                Some(_) => {}
+                None => match c {
+                    '"' | '\'' => in_quote = Some(c),
+                    '>' => in_tag = false,
+                    _ => {}
+                },
+            }
+        } else if c == '<' {
+            in_tag = true;
+        } else {
+            stripped.push(c);
+        }
+    }
+    // Pass 2: decode the entities and collapse whitespace in one walk.
+    let mut out = String::with_capacity(stripped.len());
+    let bytes = stripped.as_bytes();
+    let mut i = 0;
+    let mut pending_ws = false;
+    let mut started = false;
+    let push_ch = |out: &mut String, ch: char, pending_ws: &mut bool, started: &mut bool| {
+        if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' {
+            if *started {
+                *pending_ws = true;
+            }
+        } else {
+            if *pending_ws {
+                out.push(' ');
+                *pending_ws = false;
+            }
+            out.push(ch);
+            *started = true;
+        }
+    };
+    while i < bytes.len() {
+        if bytes[i] == b'&' {
+            if stripped[i..].starts_with("&lt;") {
+                push_ch(&mut out, '<', &mut pending_ws, &mut started);
+                i += 4;
+                continue;
+            } else if stripped[i..].starts_with("&gt;") {
+                push_ch(&mut out, '>', &mut pending_ws, &mut started);
+                i += 4;
+                continue;
+            } else if stripped[i..].starts_with("&quot;") {
+                push_ch(&mut out, '"', &mut pending_ws, &mut started);
+                i += 6;
+                continue;
+            } else if stripped[i..].starts_with("&#39;") {
+                push_ch(&mut out, '\'', &mut pending_ws, &mut started);
+                i += 5;
+                continue;
+            } else if stripped[i..].starts_with("&amp;") {
+                push_ch(&mut out, '&', &mut pending_ws, &mut started);
+                i += 5;
+                continue;
+            }
+        }
+        // Advance one full char (handles multi-byte UTF-8).
+        let ch = stripped[i..].chars().next().unwrap();
+        push_ch(&mut out, ch, &mut pending_ws, &mut started);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 fn render_html_block(slice: &str, opts: &RenderOpts, out: &mut String) {
@@ -1204,4 +1350,117 @@ fn trim_trailing_newlines(s: &str) -> &str {
 #[allow(dead_code)]
 fn _keep_imports(bytes: &[u8], pos: usize) {
     let _ = is_blank_line(bytes, pos);
+}
+
+#[cfg(test)]
+mod strip_tests {
+    use super::strip_inline_html;
+
+    #[test]
+    fn strips_tags_and_decodes_entities() {
+        assert_eq!(strip_inline_html("<strong>A</strong>"), "A");
+        assert_eq!(
+            strip_inline_html("<a href=\"z\" target=\"_blank\" rel=\"noopener\">y</a>"),
+            "y"
+        );
+        // escaped `<`/`>` in cell text decode back to literals (not eaten).
+        assert_eq!(strip_inline_html("a &lt;b&gt; c"), "a <b> c");
+        assert_eq!(strip_inline_html("x &amp;&amp; y"), "x && y");
+    }
+
+    #[test]
+    fn quote_aware_attribute_with_literal_gt() {
+        // unsafeHtml: a raw `>` inside a quoted attribute value must NOT end the
+        // tag early (regression: produced `y">hi` instead of `hi`).
+        assert_eq!(strip_inline_html("<span title=\"x > y\">hi</span>"), "hi");
+        assert_eq!(strip_inline_html("<img alt='a > b' src=\"s\">"), "");
+        // the other quote char inside a value is literal, not a toggle.
+        assert_eq!(strip_inline_html("<span title=\"it's > ok\">z</span>"), "z");
+    }
+}
+
+#[cfg(test)]
+mod strip_pass_bench {
+    //! Isolated cost of the cell plaintext pass (`strip_inline_html`) — the one
+    //! piece of work `kind.data` adds on top of html the parser already produces.
+    //! `strip_inline_html` is `pub(crate)`, unreachable from `examples/`, so this
+    //! lives here where it has crate access. `#[ignore]`d so it never runs on the
+    //! CI floor (`cargo test --release`) and does not perturb the test count.
+    //!
+    //!   cargo test --release strip_pass_cost -- --ignored --nocapture
+    //!
+    //! It harvests the EXACT rendered cell HTML the production ON-path builds
+    //! (via a real `StreamParser` with `block_data` on), then times only the
+    //! strip pass over that corpus, against the cost of rendering the cell inline
+    //! HTML itself — so strip's *share* of per-cell ON-path work is honest.
+
+    use crate::blocks::BlockKind;
+    use crate::parser::StreamParser;
+    use std::time::Instant;
+
+    /// Parse a markup-heavy table and return every cell's rendered html (the real
+    /// strip-pass input). `cell.html` here is byte-identical to the inline content
+    /// inside each `<td>`/`<th>`.
+    fn harvest_cells(rows: usize) -> Vec<String> {
+        let mut doc = String::from("| **Col A** | *Col B* | `Col C` |\n| --- | --- | --- |\n");
+        for i in 0..rows {
+            doc.push_str(&format!(
+                "| **Item {i}** with *em* and `code` | a [link](https://example.com/{i}) here | plain text {i} |\n"
+            ));
+        }
+        let mut p = StreamParser::new().with_gfm_autolinks(true).with_block_data(true);
+        p.append(&doc);
+        p.finalize();
+        let mut cells = Vec::new();
+        for b in p.all_blocks() {
+            if let BlockKind::TableWithData(td) = &b.kind {
+                for h in &td.headers {
+                    cells.push(h.html.clone());
+                }
+                for r in &td.rows {
+                    for c in r.iter() {
+                        cells.push(c.html.clone());
+                    }
+                }
+            }
+        }
+        cells
+    }
+
+    #[test]
+    #[ignore]
+    fn strip_pass_cost() {
+        let cells = harvest_cells(4_000); // ~12k cells, markup-heavy
+        let total_html_bytes: usize = cells.iter().map(|s| s.len()).sum();
+        let n = cells.len();
+
+        // Warm up.
+        let mut sink = 0usize;
+        for c in &cells {
+            sink += super::strip_inline_html(c).len();
+        }
+        std::hint::black_box(sink);
+
+        let reps = 50;
+        let t0 = Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..reps {
+            for c in &cells {
+                acc += super::strip_inline_html(c).len();
+            }
+        }
+        std::hint::black_box(acc);
+        let elapsed = t0.elapsed();
+
+        let per_cell_ns = elapsed.as_nanos() as f64 / (reps as f64 * n as f64);
+        let cells_per_pass = n as f64;
+        let throughput_mbps =
+            (total_html_bytes as f64 * reps as f64) / 1e6 / elapsed.as_secs_f64();
+        println!(
+            "\nstrip_inline_html: {n} markup cells, {total_html_bytes} html bytes, {reps} reps\n  total {:.2} ms  =>  {per_cell_ns:.1} ns/cell  ({:.1} M cells/s)  {throughput_mbps:.1} MB/s of html scanned",
+            elapsed.as_secs_f64() * 1e3,
+            (cells_per_pass * reps as f64) / 1e6 / elapsed.as_secs_f64(),
+        );
+        assert!(per_cell_ns > 0.0);
+    }
 }

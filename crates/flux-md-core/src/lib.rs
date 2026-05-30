@@ -127,6 +127,16 @@ impl FluxParser {
         self.inner.set_a11y(on);
     }
 
+    /// Opt-in structured `kind.data` channel for Table blocks: a Table then
+    /// carries `{ headers, rows, aligns }` (per-cell `{ text, html }`) so a
+    /// consumer can build a sort/filter/transpose/chart/CSV toolbar from DATA
+    /// without re-parsing the HTML. Off by default — when off, Table serializes
+    /// as `{"type":"Table"}` (no `data` key) and output is byte-identical.
+    #[wasm_bindgen(js_name = setBlockData)]
+    pub fn set_block_data(&mut self, on: bool) {
+        self.inner.set_block_data(on);
+    }
+
     /// Set the opt-in component-tag allowlist (e.g. `["Thinking", "Callout"]`).
     /// A `<Tag>…</Tag>` whose name is listed renders as a component whose inner
     /// content is markdown — safely, without unsafe HTML (the tag is allowlisted

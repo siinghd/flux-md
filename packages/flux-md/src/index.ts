@@ -30,4 +30,7 @@ export type {
   ToWorker,
   WorkerLike,
   ParserConfig,
+  Align,
+  TableCell,
+  TableData,
 } from "./types";

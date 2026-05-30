@@ -1,4 +1,4 @@
-import type { Block, BlockComponentProps } from "./types-core";
+import type { Block, BlockComponentProps, TableData } from "./types-core";
 
 // Pure helpers duplicated from the JSX renderer / its CodeBlock so the
 // framework-neutral DOM renderer carries no framework dependency. The JSX
@@ -91,6 +91,10 @@ export function blockProps(block: Block): BlockComponentProps {
     // An override replaces the `<tag>` wrapper, so it gets the *inner* HTML
     // (markdown already rendered) rather than the full wrapped block.
     props.html = componentInnerHtml(block.html, props.tag);
+  } else if (block.kind.type === "Table") {
+    // Structured data is present only when `blockData` is on (else `undefined`).
+    // Pure data — identical for the DOM and JSX renderers, no name-form divergence.
+    props.table = block.kind.data as TableData | undefined;
   }
   return props;
 }
