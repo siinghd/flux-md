@@ -59,6 +59,11 @@ export function mountSolid(
  * is equivalent to `<div ref={container} class={props.class} style={props.style} />`.
  */
 export function FluxMarkdown(props: FluxMarkdownProps): JSX.Element {
+  // SSR: this renderer is client-only and imperative (creates/owns its own DOM
+  // node, no hydration expected). Solid runs component bodies on the server, so
+  // guard the document access; the browser path is byte-identical (document is
+  // always defined there). onMount never fires on the server anyway.
+  if (typeof document === "undefined") return undefined as unknown as JSX.Element;
   const container = document.createElement("div");
   if (props.class) container.className = props.class;
   if (typeof props.style === "string") container.setAttribute("style", props.style);

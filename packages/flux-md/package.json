@@ -48,6 +48,7 @@
   },
   "scripts": {
     "test": "bun test",
+    "test:ssr-cold": "bun test/ssr-cold.mjs",
     "prepublishOnly": "cd ../.. && bun run build:wasm"
   },
   "keywords": ["markdown", "streaming", "wasm", "rust", "react", "vue", "svelte", "solid", "web-component", "custom-element", "incremental", "llm", "ai", "math", "katex", "latex", "bidi", "rtl"],

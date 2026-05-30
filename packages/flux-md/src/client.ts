@@ -277,8 +277,8 @@ export function getDefaultPool(): FluxPool {
  */
 export class FluxClient {
   private pool: FluxPool;
-  private pw: PoolWorker;
-  private streamId: number;
+  private pw: PoolWorker | null = null;
+  private streamId = 0;
   private config?: ParserConfig;
   private configSent = false;
   private listeners = new Set<() => void>();
@@ -321,17 +321,38 @@ export class FluxClient {
     this.config = options.config;
     this.onError = options.onError;
     this.onBlock = options.onBlock;
+  }
+
+  /**
+   * Lazily reserve this client's stream id and bind it to a pool worker. The
+   * SOLE place that calls pool.acquire() — so the worker is created on the FIRST
+   * worker-bound operation (append/finalize/reset/pipeFrom/whenReady), never at
+   * construct time. This is what makes `new FluxClient()` SSR-safe: nothing here
+   * runs during an SSR render (which only subscribes + reads the snapshot).
+   *
+   * Idempotent: once this.pw is set it returns it immediately and never
+   * re-acquires — this.pw is never nulled (destroy() deliberately keeps it so
+   * StrictMode's destroy()→reattach() on the SAME instance re-registers the same
+   * slot). Note: streamId/worker assignment now follows first-worker-bound-op
+   * order, not construction order — a client constructed first no longer
+   * necessarily owns the lowest streamId. This affects neither the pool cap nor
+   * multiplexing (pick() is unchanged and remains the only path to create()).
+   */
+  private ensureAcquired(): PoolWorker {
+    if (this.pw) return this.pw;
     const { streamId, pw } = this.pool.acquire((msg) => this.onMessage(msg));
     this.streamId = streamId;
     this.pw = pw;
+    return pw;
   }
 
   get ready(): boolean {
-    return this.pw.ready;
+    return this.pw?.ready ?? false;
   }
 
   whenReady(): Promise<void> {
-    return this.pool.whenWorkerReady(this.pw);
+    const pw = this.ensureAcquired();
+    return this.pool.whenWorkerReady(pw);
   }
 
   // The config rides on the first message a stream sends; the worker applies it
@@ -344,12 +365,14 @@ export class FluxClient {
   }
 
   append(chunk: string) {
+    const pw = this.ensureAcquired();
     if (this.firstAppendMs === 0) this.firstAppendMs = performance.now();
-    this.pool.send(this.pw, { type: "append", streamId: this.streamId, chunk, config: this.firstConfig() });
+    this.pool.send(pw, { type: "append", streamId: this.streamId, chunk, config: this.firstConfig() });
   }
 
   finalize() {
-    this.pool.send(this.pw, { type: "finalize", streamId: this.streamId, config: this.firstConfig() });
+    const pw = this.ensureAcquired();
+    this.pool.send(pw, { type: "finalize", streamId: this.streamId, config: this.firstConfig() });
   }
 
   /**
@@ -433,14 +456,19 @@ export class FluxClient {
     this.retainedBytes = 0;
     this.wasmMemoryBytes = 0;
     // Same streamId + worker — the worker frees and lazily recreates the parser.
-    this.pool.send(this.pw, { type: "reset", streamId: this.streamId });
+    const pw = this.ensureAcquired();
+    this.pool.send(pw, { type: "reset", streamId: this.streamId });
     this.emit();
   }
 
   destroy() {
     if (!this.attached) return; // idempotent
     // Free this stream's parser; the shared worker stays warm for siblings.
-    this.pool.release(this.streamId, this.pw);
+    // Only release a real slot — a never-acquired client (constructed during an
+    // SSR render then unmounted) has no pool slot to free, so skip the call.
+    // We deliberately do NOT null this.pw here: StrictMode's destroy()→reattach()
+    // on the SAME instance needs the same pw/streamId to re-register.
+    if (this.pw) this.pool.release(this.streamId, this.pw);
     this.listeners.clear();
     this.attached = false;
   }
@@ -453,6 +481,14 @@ export class FluxClient {
    */
   reattach() {
     if (this.attached) return;
+    if (!this.pw) {
+      // Never acquired (e.g. constructed during SSR, first real mount on client).
+      // No prior pool slot to re-register; just mark attached. The next
+      // worker-bound op acquires lazily. configSent is already false, so the
+      // first append will carry config exactly as a brand-new client would.
+      this.attached = true;
+      return;
+    }
     this.pool.reattach(this.streamId, this.pw, (msg) => this.onMessage(msg));
     this.attached = true;
     // The worker discarded this stream's config on `dispose` (unlike `reset`,
