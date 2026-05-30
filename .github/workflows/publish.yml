@@ -74,8 +74,34 @@ jobs:
           echo "OK: tarball ships WASM (${size} bytes)"
           rm -rf "$dest"
 
+      # Decide whether to actually publish — so a tag for an already-published
+      # version, a dry-run, or a repo without NPM_TOKEN set SKIPS (green) instead
+      # of failing red. The build + tarball checks above still gate the release.
+      - name: Decide whether to publish
+        id: gate
+        working-directory: packages/flux-md
+        env:
+          HAS_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          ver="$(node -p "require('./package.json').version")"
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "::notice::dry_run requested — skipping publish (build + checks ran)."
+            echo "publish=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "${HAS_TOKEN}" != "true" ]; then
+            echo "::notice::NPM_TOKEN secret not set — skipping publish. Set it to enable provenance publishing from a tag."
+            echo "publish=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if npm view "flux-md@${ver}" version >/dev/null 2>&1; then
+            echo "::notice::flux-md@${ver} is already published — skipping (no-op)."
+            echo "publish=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
       - name: Publish to npm (with provenance)
-        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
+        if: ${{ steps.gate.outputs.publish == 'true' }}
         working-directory: packages/flux-md
         run: npm publish --provenance --access public
         env:
