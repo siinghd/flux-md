@@ -4,7 +4,7 @@
   "version": "0.9.0",
   "workspaces": ["packages/*", "web"],
   "scripts": {
-    "build:wasm": "cd crates/flux-md-core && wasm-pack build --target web --release --out-dir ../../packages/flux-md/src/wasm",
+    "build:wasm": "cd crates/flux-md-core && wasm-pack build --target web --release --out-dir ../../packages/flux-md/src/wasm && rm -f ../../packages/flux-md/src/wasm/.gitignore",
     "test:rust": "cd crates/flux-md-core && cargo test --release",
     "test:spec": "cd crates/flux-md-core && CMARK_MIN_PASS=652 cargo test --release --test cmark_spec -- --nocapture",
     "test:gfm": "cd crates/flux-md-core && GFM_MIN_PASS=23 cargo test --release --test gfm_spec -- --nocapture",

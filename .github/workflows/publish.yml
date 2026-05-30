@@ -54,13 +54,22 @@ jobs:
         run: bun run test:rust
       - name: Assert the tarball ships a non-empty WASM artifact
         working-directory: packages/flux-md
+        # wasm-pack emits a nested src/wasm/.gitignore ("*"); build:wasm deletes
+        # it so the files:["src"] allowlist ships the WASM. Tripwire against a
+        # WASM-less publish. Pack into a clean temp dir and glob the tarball
+        # (don't parse npm's stdout, which varies by version).
         run: |
-          tarball=$(npm pack --silent | tail -1)
-          test -n "$tarball" || { echo "::error::npm pack produced no tarball"; exit 1; }
-          tar -tzvf "$tarball" | grep 'src/wasm/flux_md_core_bg\.wasm'
-          size=$(tar -tzvf "$tarball" | awk '/src\/wasm\/flux_md_core_bg\.wasm$/ { print $3; exit }')
-          test "${size:-0}" -gt 0
-          rm -f "$tarball"
+          set -euo pipefail
+          dest="$(mktemp -d)"
+          npm pack --pack-destination "$dest" >/dev/null 2>&1
+          tarball="$(echo "$dest"/*.tgz)"
+          test -f "$tarball" || { echo "::error::npm pack produced no tarball"; exit 1; }
+          tar -tzf "$tarball" | grep -q '/src/wasm/flux_md_core_bg\.wasm$' \
+            || { echo "::error::publish tarball is missing src/wasm/flux_md_core_bg.wasm"; exit 1; }
+          size=$(tar -tzvf "$tarball" | awk '/\/src\/wasm\/flux_md_core_bg\.wasm$/ { print $3; exit }')
+          test "${size:-0}" -gt 0 || { echo "::error::WASM artifact is present but empty"; exit 1; }
+          echo "OK: tarball ships WASM (${size} bytes)"
+          rm -rf "$dest"
 
       - name: Publish to npm (with provenance)
         if: ${{ github.event_name == 'push' || !inputs.dry_run }}
