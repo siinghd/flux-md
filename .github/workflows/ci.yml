@@ -63,5 +63,11 @@ jobs:
         run: bunx tsc --noEmit -p tsconfig.json
       - name: Component / pool / store tests
         run: bun run test:components
+      - name: SSR cold-import (fresh process, no browser globals)
+        # Load-bearing SSR guard: a fresh process so module top-level code runs
+        # cold (the in-process ssr.test.ts can pass under bun's warm cache). Trips
+        # if any entrypoint touches a browser global at import/construct/render.
+        working-directory: packages/flux-md
+        run: bun run test:ssr-cold
       - name: Web build
         run: bun run build:web

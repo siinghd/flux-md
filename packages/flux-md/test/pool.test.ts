@@ -240,8 +240,9 @@ test("pipeFrom(AsyncIterable) with a pre-aborted signal appends nothing and neve
     yield "b";
   }
   await c.pipeFrom(gen(), { signal: ac.signal });
-  expect(created[0].sent.some((m) => m.type === "append")).toBe(false);
-  expect(created[0].sent.some((m) => m.type === "finalize")).toBe(false);
+  // Lazy acquire: a pre-aborted pipeFrom returns before any worker-bound op, so
+  // no worker is ever created — which trivially implies no append and no finalize.
+  expect(created.length).toBe(0);
 });
 
 test("pipeFrom(AsyncIterable) aborted mid-stream stops appending and does not finalize", async () => {
