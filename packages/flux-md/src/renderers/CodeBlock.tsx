@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { highlight } from "../hi";
+import { extractLang } from "../block-props";
 
 /**
  * Deferred-highlighting code block. Open (streaming) blocks render plain;
@@ -19,10 +20,6 @@ function decodeText(html: string): string {
     .replace(/&amp;/g, "&");
 }
 
-function extractLang(html: string): string {
-  const m = html.match(/data-lang="([^"]+)"/);
-  return m ? m[1] : "";
-}
 
 interface Props {
   html: string;

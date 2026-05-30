@@ -101,6 +101,20 @@ interface FluxMarkdownProps {
    * run through it. When omitted, rendering is byte-identical and zero-cost.
    */
   sanitize?: (html: string) => string;
+  /** Appended to the root's `className` (the `flux-md` class is always present). */
+  className?: string;
+  /** Set on the root element. */
+  id?: string;
+  /** Set on the root element (e.g. `"article"`, `"log"`). */
+  role?: string;
+  /**
+   * Make the root a live region so screen readers announce streamed content.
+   * `"polite"` (recommended) coalesces rapid updates and announces when the
+   * reader is idle — it does **not** read every token. Off by default.
+   */
+  "aria-live"?: "off" | "polite" | "assertive";
+  /** Live-region atomicity; pair with `aria-live`. Off by default. */
+  "aria-atomic"?: boolean;
 }
 
 // The original render path: subscribe to a (required, caller- or hook-owned)
@@ -111,13 +125,24 @@ function FluxMarkdownFromClient({
   virtualize,
   stickToBottom,
   sanitize,
+  className,
+  id,
+  role,
+  "aria-live": ariaLive,
+  "aria-atomic": ariaAtomic,
 }: FluxMarkdownProps & { client: FluxClient }) {
   const blocks = useSyncExternalStore(client.subscribe, client.getSnapshot, client.getSnapshot);
   // Normalize "no overrides" to a stable `undefined` so memo comparisons and
   // the fast path don't churn on an empty object identity.
   const comps = components && Object.keys(components).length > 0 ? components : undefined;
   return (
-    <div className="flux-md">
+    <div
+      className={className ? `flux-md ${className}` : "flux-md"}
+      id={id}
+      role={role}
+      aria-live={ariaLive}
+      aria-atomic={ariaAtomic}
+    >
       {blocks.map((b) => (
         <BlockView key={b.id} block={b} components={comps} virtualize={virtualize} sanitize={sanitize} />
       ))}

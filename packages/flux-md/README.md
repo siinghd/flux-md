@@ -412,6 +412,13 @@ Subscribes to a `FluxClient`, renders each block keyed by its stable parser-assi
 <FluxMarkdown client={client} />
 ```
 
+The root element accepts opt-in `className` (appended to `flux-md`), `id`,
+`role`, and `aria-live` / `aria-atomic`. Set `aria-live="polite"` to make the
+output a live region so screen readers announce streamed content as it settles —
+`polite` coalesces rapid updates and does **not** read every token. The same
+options exist on the DOM mount (`mountFluxMarkdown(client, el, { ariaLive: "polite" })`),
+covering the Web Component and the Vue/Svelte/Solid adapters.
+
 #### Custom components / overrides
 
 Pass a `components` map to replace how elements render. Keys come in **two

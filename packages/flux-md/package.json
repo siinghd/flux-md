@@ -30,12 +30,21 @@
     "solid-js": "^1.8.0"
   },
   "peerDependenciesMeta": {
-    "react": { "optional": true },
-    "vue": { "optional": true },
-    "svelte": { "optional": true },
-    "solid-js": { "optional": true }
+    "react": {
+      "optional": true
+    },
+    "vue": {
+      "optional": true
+    },
+    "svelte": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@types/bun": "^1.3.14",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "happy-dom": "^15.11.6",
@@ -49,6 +58,7 @@
   "scripts": {
     "test": "bun test",
     "test:ssr-cold": "bun test/ssr-cold.mjs",
+    "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
     "prepublishOnly": "cd ../.. && bun run build:wasm"
   },
   "keywords": ["markdown", "streaming", "wasm", "rust", "react", "vue", "svelte", "solid", "web-component", "custom-element", "incremental", "llm", "ai", "math", "katex", "latex", "bidi", "rtl"],

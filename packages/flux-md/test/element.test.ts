@@ -4,6 +4,13 @@ import { FluxClient, FluxPool } from "../src/client";
 import { defineFluxMarkdown, parseTriBool } from "../src/element";
 import type { Block, FromWorker, ToWorker, WorkerLike } from "../src/types";
 
+// The `<flux-markdown>` custom element's public surface (not on lib.dom's HTMLElement).
+type FluxEl = HTMLElement & {
+  client?: FluxClient;
+  finalize(): void;
+  getClient(): FluxClient | null;
+};
+
 // Synchronous fake worker (same pattern as dom.test.ts / pool.test.ts).
 class FakeWorker implements WorkerLike {
   sent: ToWorker[] = [];
@@ -119,7 +126,7 @@ test("property-client mode: mounts on connect, NEVER destroys the caller-owned c
   const sid = worker().sent[0].streamId;
   const destroySpy = spyOn(client, "destroy");
 
-  const el = document.createElement("flux-markdown");
+  const el = document.createElement("flux-markdown") as FluxEl;
   el.client = client; // caller-owned
   document.body.appendChild(el); // connectedCallback → mount
 
@@ -157,7 +164,7 @@ test("property-client mode honors a pre-upgrade (own-property) client assignment
 });
 
 test("self-owned mode via append()/finalize(): renders AND disconnect destroys the self-owned client", () => {
-  const el = document.createElement("flux-markdown");
+  const el = document.createElement("flux-markdown") as FluxEl;
   document.body.appendChild(el); // no external client, no src/markdown/text → no client yet
 
   const snap = snapshotSends();
@@ -380,7 +387,7 @@ test("public append() supersedes an in-flight src fetch (no interleave)", async 
 test("config attribute change while a caller-owned client is set is ignored (warns)", () => {
   const { client } = makeExternalClient();
   client.append("");
-  const el = document.createElement("flux-markdown");
+  const el = document.createElement("flux-markdown") as FluxEl;
   el.client = client;
   document.body.appendChild(el);
 
