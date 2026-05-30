@@ -47,6 +47,9 @@ jobs:
         run: bunx tsc --noEmit -p tsconfig.json
       - name: JS package tests
         run: bun run test:components
+      - name: SSR cold-import (fresh process, no browser globals)
+        working-directory: packages/flux-md
+        run: bun run test:ssr-cold
       - name: Rust core (CommonMark + GFM floors)
         env:
           CMARK_MIN_PASS: "652"
