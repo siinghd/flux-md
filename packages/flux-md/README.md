@@ -280,6 +280,32 @@ if you hit a transform edge, `mountFluxMarkdown` from `flux-md/dom` inside
 | Heavy renderers (syntax, math, mermaid) | Deferred until block close | Re-run per chunk |
 | XSS sanitization | Allowlist in Rust + URL scheme check | Downstream sanitizer pass on the JS thread |
 
+## Styling
+
+flux-md emits semantic HTML under a `.flux-md` root and **ships no CSS by
+default** — bring your own design system, or opt into the bundled theme:
+
+```ts
+import "flux-md/styles.css";
+```
+
+It gives good-looking output out of the box, **including the built-in syntax
+highlighter's colors** (without any CSS, `highlight()` renders uncolored). The
+theme is scoped to `.flux-md`, zero-runtime, and **does not change the rendered
+HTML** — skip the import and nothing is styled.
+
+Re-theme by overriding a few CSS variables; it's light by default and switches to
+dark automatically via `prefers-color-scheme` (force a mode with
+`class="flux-md flux-dark"` or `flux-light`):
+
+```css
+.flux-md {
+  --flux-accent: #7c3aed;   /* links */
+  --flux-bg-code: #faf7ff;  /* code background */
+  --flux-t-kw: #c026d3;     /* syntax: keywords (also --flux-t-str/num/com/fn/ty/…) */
+}
+```
+
 ## Public API
 
 ### `FluxClient`

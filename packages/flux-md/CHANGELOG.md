@@ -4,6 +4,18 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.12.0 — 2026-05-30
+
+### Added
+
+- **Optional default theme — `import "flux-md/styles.css"`.** A drop-in stylesheet
+  for good-looking output out of the box, **including the built-in syntax
+  highlighter's colors** (without any CSS, `highlight()` output is uncolored).
+  Scoped to `.flux-md`, driven by `--flux-*` CSS variables (re-theme by overriding
+  a few), light by default with automatic dark via `prefers-color-scheme` (force
+  with `class="flux-md flux-dark"` / `flux-light`). Opt-in and zero-runtime — the
+  rendered HTML is unchanged; skip the import to bring your own CSS.
+
 ## 0.11.0 — 2026-05-30
 
 ### Added
