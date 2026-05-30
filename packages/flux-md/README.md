@@ -336,6 +336,7 @@ const client = new FluxClient({
     a11y: true,           // task-list <label> + <th scope="col"> a11y markup (default false)
     unsafeHtml: false,    // pass raw HTML through (default false — keep it false for untrusted input)
     componentTags: ["Thinking", "Callout"], // custom tags with markdown inside (default none)
+    blockData: true,      // opt-in structured kind.data per block (default false — see "Structured block data")
   },
 });
 ```
@@ -463,8 +464,11 @@ type is at `block.kind.data.kind`).
 
 Rules worth knowing:
 
-- **There is no `node` prop.** flux-md has no hast tree; introspect via
-  `className` / `data-*` instead.
+- **There is no `node` prop / no hast tree.** Introspect via `className` /
+  `data-*`, or — better — opt into the typed **[structured-data
+  channel](#structured-block-data-setblockdata)** (`blockData: true`) and read
+  `block.kind.data` (and the typed `props.table` / `heading` / `code` / `math` /
+  `list` fields) directly — no HTML re-parsing.
 - **Open (streaming) blocks render via `innerHTML`** — their HTML is still
   partial, so a tag-level override takes effect the moment the block commits.
 - **No `components` prop ⇒ the original fast path** (`innerHTML`, byte-identical
@@ -473,6 +477,35 @@ Rules worth knowing:
 - For **code blocks** the built-in highlighter is the default; it is bypassed
   (so your override wins) when you pass `components.CodeBlock`, `components.pre`,
   or `components.code`.
+
+### Structured block data (`setBlockData`)
+
+Set `blockData: true` in the per-stream config and each block carries typed
+structured data on `block.kind.data`, also surfaced as typed fields on the
+component props — so you build toolbars, tables of contents, charts, copy
+buttons, etc. from **data**, never by re-parsing the rendered HTML (no hast tree,
+no rehype). Off by default; when off, output and CommonMark/GFM conformance are
+byte-identical, so non-users pay nothing.
+
+| Kind | `block.kind.data` | prop | use |
+|------|-------------------|------|-----|
+| `Table` | `{ headers, rows, aligns }`, cells `{ text, html }` | `props.table` | sort / filter / transpose / CSV / chart |
+| `Heading` | `{ level, text, id }` | `props.heading` | table of contents with anchors |
+| `CodeBlock` | `{ lang, code }` | `props.code` | decoded source (copy / run) |
+| `MathBlock` | `{ latex }` | `props.math` | LaTeX source (re-render) |
+| `List` | `{ ordered, start }` | `props.list` | ordered-list numbering |
+
+Each cell's `text` is inline-stripped plaintext (for sort/filter/CSV/logic);
+`html` is the inline-rendered display HTML. The data **streams** with the
+document — a growing table or a heading carries its structured data on every
+patch, in lock-step with the HTML — something a batch HTML-AST cannot do.
+
+```tsx
+// Table of contents from heading data — no DOM, works mid-stream:
+const toc = client.getSnapshot()
+  .filter((b) => b.kind.type === "Heading" && b.kind.data)
+  .map((b) => b.kind.data as { level: number; text: string; id: string });
+```
 
 ### Component tags
 

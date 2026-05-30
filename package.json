@@ -1,7 +1,7 @@
 {
   "name": "md-streamer",
   "private": true,
-  "version": "0.9.0",
+  "version": "0.10.0",
   "workspaces": ["packages/*", "web"],
   "scripts": {
     "build:wasm": "cd crates/flux-md-core && wasm-pack build --target web --release --out-dir ../../packages/flux-md/src/wasm && rm -f ../../packages/flux-md/src/wasm/.gitignore",

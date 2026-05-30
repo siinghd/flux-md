@@ -4,6 +4,37 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.10.0 — 2026-05-30
+
+Server-side rendering safety, plus an opt-in structured-data channel so consumers
+build toolbars / tables of contents / charts from **data** instead of re-parsing
+rendered HTML (no hast tree, no rehype).
+
+### Added
+
+- **SSR-safe.** `new FluxClient()` and `renderToString(<FluxMarkdown …/>)` no
+  longer touch a Web Worker during construction or server render — worker
+  creation is deferred to the first `append`/`pipeFrom` (client-side) — so the
+  library imports and server-renders cleanly across React / Vue / Solid / Svelte.
+  A fresh-process SSR cold-import check guards it in CI.
+- **Structured block data — `blockData: true`** (per-stream config; opt-in,
+  default off — output and CommonMark/GFM conformance are **byte-identical** when
+  off). When on, `block.kind.data` carries typed structured data per kind, also
+  surfaced as typed `BlockComponentProps` fields, and it **streams** in lock-step
+  with the HTML:
+  - **Table** → `{ headers, rows, aligns }`, cells `{ text, html }` (`props.table`)
+    — sort / filter / transpose / CSV / chart.
+  - **Heading** → `{ level, text, id }` (`props.heading`) — TOC with anchors.
+  - **CodeBlock** → `{ lang, code }` (`props.code`) — decoded source.
+  - **MathBlock** → `{ latex }` (`props.math`) — LaTeX source.
+  - **List** → `{ ordered, start }` (`props.list`).
+
+### Fixed
+
+- Packaging: the published tarball ships the WASM deterministically on every npm
+  version (build removes wasm-pack's nested `.gitignore`), with a tarball tripwire
+  in CI and the publish workflow.
+
 ## 0.9.0 — 2026-05-29
 
 Kills the React streaming boilerplate. The common case — render an LLM stream —
