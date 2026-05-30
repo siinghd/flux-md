@@ -1,0 +1,182 @@
+/*
+ * flux-md — optional default theme.
+ *
+ *   import "flux-md/styles.css";
+ *
+ * Opt-in: import it for good-looking output out of the box (including the
+ * built-in syntax highlighter's colors); skip it to bring your own CSS — the
+ * rendered HTML is identical either way. Everything is scoped to `.flux-md`
+ * (the renderer's root) and driven by CSS custom properties, so you re-theme by
+ * overriding a few `--flux-*` vars rather than rewriting selectors.
+ *
+ * Light by default; dark automatically via `prefers-color-scheme`. Force a mode
+ * with `<div class="flux-md flux-dark">` or `flux-light`.
+ */
+
+.flux-md {
+  /* surfaces + text (light) */
+  --flux-fg: #1f2328;
+  --flux-fg-muted: #59636e;
+  --flux-fg-faint: #818b98;
+  --flux-border: #d1d9e0;
+  --flux-bg-code: #f6f8fa;
+  --flux-bg-inline: rgba(129, 139, 152, 0.16);
+  --flux-bg-quote: rgba(129, 139, 152, 0.08);
+  --flux-accent: #0969da;
+  /* syntax tokens (light) */
+  --flux-t-kw: #cf222e;
+  --flux-t-str: #0a3069;
+  --flux-t-num: #0550ae;
+  --flux-t-com: #59636e;
+  --flux-t-fn: #6639ba;
+  --flux-t-ty: #953800;
+  --flux-t-mac: #1f6feb;
+  --flux-t-attr: #116329;
+  --flux-t-tag: #116329;
+  --flux-t-var: #953800;
+  --flux-t-pun: var(--flux-fg);
+  /* sizing */
+  --flux-radius: 6px;
+  --flux-gap: 16px;
+
+  color: var(--flux-fg);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.6;
+  font-size: 1rem;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* Dark — automatic, and as an explicit `.flux-dark` escape hatch. */
+@media (prefers-color-scheme: dark) {
+  .flux-md:not(.flux-light) {
+    --flux-fg: #e6edf3;
+    --flux-fg-muted: #9198a1;
+    --flux-fg-faint: #6e7681;
+    --flux-border: #3d444d;
+    --flux-bg-code: #151b23;
+    --flux-bg-inline: rgba(101, 108, 118, 0.2);
+    --flux-bg-quote: rgba(101, 108, 118, 0.1);
+    --flux-accent: #4493f8;
+    --flux-t-kw: #ff7b72;
+    --flux-t-str: #a5d6ff;
+    --flux-t-num: #79c0ff;
+    --flux-t-com: #8b949e;
+    --flux-t-fn: #d2a8ff;
+    --flux-t-ty: #ffa657;
+    --flux-t-mac: #79c0ff;
+    --flux-t-attr: #7ee787;
+    --flux-t-tag: #7ee787;
+    --flux-t-var: #ffa657;
+  }
+}
+.flux-md.flux-dark {
+  --flux-fg: #e6edf3;
+  --flux-fg-muted: #9198a1;
+  --flux-fg-faint: #6e7681;
+  --flux-border: #3d444d;
+  --flux-bg-code: #151b23;
+  --flux-bg-inline: rgba(101, 108, 118, 0.2);
+  --flux-bg-quote: rgba(101, 108, 118, 0.1);
+  --flux-accent: #4493f8;
+  --flux-t-kw: #ff7b72;
+  --flux-t-str: #a5d6ff;
+  --flux-t-num: #79c0ff;
+  --flux-t-com: #8b949e;
+  --flux-t-fn: #d2a8ff;
+  --flux-t-ty: #ffa657;
+  --flux-t-mac: #79c0ff;
+  --flux-t-attr: #7ee787;
+  --flux-t-tag: #7ee787;
+  --flux-t-var: #ffa657;
+}
+
+/* ---- block rhythm ---------------------------------------------------------- */
+.flux-md > * { margin: 0 0 var(--flux-gap) 0; }
+.flux-md > *:last-child { margin-bottom: 0; }
+
+/* ---- headings -------------------------------------------------------------- */
+.flux-md h1, .flux-md h2, .flux-md h3,
+.flux-md h4, .flux-md h5, .flux-md h6 {
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 24px 0 var(--flux-gap);
+}
+.flux-md h1 { font-size: 2em; padding-bottom: 0.3em; border-bottom: 1px solid var(--flux-border); }
+.flux-md h2 { font-size: 1.5em; padding-bottom: 0.3em; border-bottom: 1px solid var(--flux-border); }
+.flux-md h3 { font-size: 1.25em; }
+.flux-md h4 { font-size: 1em; }
+.flux-md h5 { font-size: 0.875em; }
+.flux-md h6 { font-size: 0.85em; color: var(--flux-fg-muted); }
+.flux-md > h1:first-child, .flux-md > h2:first-child, .flux-md > h3:first-child { margin-top: 0; }
+
+/* ---- inline ---------------------------------------------------------------- */
+.flux-md a { color: var(--flux-accent); text-decoration: none; }
+.flux-md a:hover { text-decoration: underline; }
+.flux-md strong { font-weight: 600; }
+.flux-md em { font-style: italic; }
+.flux-md del { color: var(--flux-fg-muted); }
+.flux-md img { max-width: 100%; height: auto; }
+
+/* ---- lists ----------------------------------------------------------------- */
+.flux-md ul, .flux-md ol { padding-left: 2em; }
+.flux-md li { margin: 0.25em 0; }
+.flux-md li > ul, .flux-md li > ol { margin: 0.25em 0; }
+.flux-md li::marker { color: var(--flux-fg-faint); }
+.flux-md input[type="checkbox"] { margin: 0 0.4em 0 0; }
+
+/* ---- blockquote + alerts --------------------------------------------------- */
+.flux-md blockquote {
+  margin: 0 0 var(--flux-gap);
+  padding: 0.4em 1em;
+  color: var(--flux-fg-muted);
+  border-left: 0.25em solid var(--flux-border);
+  background: var(--flux-bg-quote);
+}
+.flux-md blockquote > :last-child { margin-bottom: 0; }
+
+/* ---- tables ---------------------------------------------------------------- */
+.flux-md table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+.flux-md th, .flux-md td { padding: 6px 13px; border: 1px solid var(--flux-border); }
+.flux-md th { font-weight: 600; background: var(--flux-bg-code); }
+.flux-md tr:nth-child(2n) td { background: var(--flux-bg-quote); }
+
+/* ---- code ------------------------------------------------------------------ */
+.flux-md code, .flux-md pre {
+  font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+.flux-md :not(pre) > code {
+  padding: 0.2em 0.4em;
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-inline);
+}
+.flux-md pre {
+  padding: 14px 16px;
+  overflow-x: auto;
+  border-radius: var(--flux-radius);
+  background: var(--flux-bg-code);
+  line-height: 1.5;
+}
+.flux-md pre code { padding: 0; background: none; border: 0; }
+
+/* ---- rule ------------------------------------------------------------------ */
+.flux-md hr { height: 1px; border: 0; background: var(--flux-border); margin: 24px 0; }
+
+/* ---- syntax highlighter (the built-in `highlight()` token spans) ----------- */
+.flux-md .t-kw   { color: var(--flux-t-kw); }
+.flux-md .t-str,
+.flux-md .t-rx   { color: var(--flux-t-str); }
+.flux-md .t-num,
+.flux-md .t-lt   { color: var(--flux-t-num); }
+.flux-md .t-com  { color: var(--flux-t-com); font-style: italic; }
+.flux-md .t-fn   { color: var(--flux-t-fn); }
+.flux-md .t-ty   { color: var(--flux-t-ty); }
+.flux-md .t-mac,
+.flux-md .t-dec  { color: var(--flux-t-mac); }
+.flux-md .t-attr,
+.flux-md .t-sel  { color: var(--flux-t-attr); }
+.flux-md .t-tag  { color: var(--flux-t-tag); }
+.flux-md .t-var  { color: var(--flux-t-var); }
+.flux-md .t-pun  { color: var(--flux-t-pun); }
+.flux-md .t-txt  { color: inherit; }
