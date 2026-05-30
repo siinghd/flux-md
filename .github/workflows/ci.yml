@@ -61,6 +61,9 @@ jobs:
       - name: Typecheck the package
         working-directory: packages/flux-md
         run: bunx tsc --noEmit -p tsconfig.json
+      - name: Typecheck the tests
+        working-directory: packages/flux-md
+        run: bunx tsc --noEmit -p tsconfig.test.json
       - name: Component / pool / store tests
         run: bun run test:components
       - name: SSR cold-import (fresh process, no browser globals)

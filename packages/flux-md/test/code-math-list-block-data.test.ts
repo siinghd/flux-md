@@ -127,7 +127,7 @@ test("CodeBlock override builds a copy-to-clipboard string from props.code (no H
   function CodeBlock(props: BlockComponentProps) {
     // The copy button's payload comes ONLY from props.code — never props.html
     // (which is entity-escaped and would need decoding).
-    if (props.code) copied = { lang: props.code.lang, code: props.code.code };
+    if (props.code) copied = { lang: props.code.lang, code: props.code.code ?? "" };
     // props.text is the same decoded source (drop-in compat).
     return createElement("pre", null, props.text ?? "");
   }
@@ -153,7 +153,7 @@ test("MathBlock override re-renders LaTeX from props.math (no HTML decode)", asy
   const { client, worker } = makeClient();
   client.append("");
 
-  let rendered: string | null = null;
+  let rendered = "";
   function MathBlock(props: BlockComponentProps) {
     // A real override hands this to KaTeX; here we just capture it. It comes
     // ONLY from props.math.latex — never the escaped props.html body.
@@ -180,7 +180,7 @@ test("List override renumbers a split ordered list from props.list.start (no HTM
   function List(props: BlockComponentProps) {
     // The continued numbering comes from props.list.start — not by re-parsing the
     // `<ol start="N">` attribute out of props.html.
-    if (props.list) starts.push(props.list.start);
+    if (props.list) starts.push(props.list.start ?? 0);
     return createElement("ol", null);
   }
 

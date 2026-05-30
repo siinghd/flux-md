@@ -61,6 +61,19 @@ export interface MountOptions {
   highlightCode?: boolean;
   /** Coalesce patches into one DOM write per animation frame. Default true. */
   batch?: boolean;
+  /** Appended to the root's `className` (the `flux-md` class is always present). */
+  className?: string;
+  /** Set on the root element. */
+  id?: string;
+  /** Set on the root element (e.g. `"article"`, `"log"`). */
+  role?: string;
+  /**
+   * Make the root a live region so screen readers announce streamed content.
+   * `"polite"` coalesces rapid updates (does not read every token). Off by default.
+   */
+  ariaLive?: "off" | "polite" | "assertive";
+  /** Live-region atomicity; pair with `ariaLive`. Off by default. */
+  ariaAtomic?: boolean;
 }
 
 // Per-kind off-screen size estimate for `contain-intrinsic-size`. Duplicated
@@ -99,7 +112,11 @@ export function mountFluxMarkdown(
   const batch = options.batch !== false && typeof requestAnimationFrame === "function";
 
   const root = document.createElement("div");
-  root.className = "flux-md";
+  root.className = options.className ? `flux-md ${options.className}` : "flux-md";
+  if (options.id) root.id = options.id;
+  if (options.role) root.setAttribute("role", options.role);
+  if (options.ariaLive) root.setAttribute("aria-live", options.ariaLive);
+  if (options.ariaAtomic !== undefined) root.setAttribute("aria-atomic", String(options.ariaAtomic));
   container.appendChild(root);
 
   // CSS-only stick-to-bottom: a permanent sentinel pinned as the last child.

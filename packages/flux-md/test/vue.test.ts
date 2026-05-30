@@ -1,7 +1,8 @@
 import { test, expect, beforeAll, spyOn } from "bun:test";
 import { GlobalWindow } from "happy-dom";
 import { FluxClient, FluxPool } from "../src/client";
-import type { Block, DomComponents, FromWorker, ToWorker, WorkerLike } from "../src/types";
+import type { Block, FromWorker, ToWorker, WorkerLike } from "../src/types";
+import type { DomComponents } from "../src/dom";
 
 // `@vue/runtime-dom` captures `const doc = typeof document !== "undefined" ?
 // document : null` at MODULE LOAD. Static imports are hoisted above beforeAll,
