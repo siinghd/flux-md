@@ -41,19 +41,23 @@ jobs:
         run: bun run build:wasm
       - name: Assert the publish tarball ships a non-empty WASM artifact
         working-directory: packages/flux-md
-        # The WASM is git-ignored (src/wasm/.gitignore = "*") and rescued into
-        # the tarball only by an empty .npmignore override. If that override is
-        # ever lost, the build still succeeds but `npm publish` silently ships a
-        # package with no WASM — this step is the tripwire.
+        # wasm-pack emits a nested src/wasm/.gitignore ("*"); build:wasm deletes
+        # it so the files:["src"] allowlist ships the WASM. If that ever breaks,
+        # the build still succeeds but `npm publish` silently ships a package
+        # with no WASM — this step is the tripwire. Pack into a clean temp dir
+        # and glob the tarball (don't parse npm's stdout, which varies by version).
         run: |
-          tarball=$(npm pack --silent | tail -1)
-          test -n "$tarball" || { echo "::error::npm pack produced no tarball"; exit 1; }
-          echo "packed $tarball"
-          tar -tzvf "$tarball" | grep 'src/wasm/flux_md_core_bg\.wasm'
-          size=$(tar -tzvf "$tarball" | awk '/src\/wasm\/flux_md_core_bg\.wasm$/ { print $3; exit }')
-          echo "wasm payload: ${size:-0} bytes"
-          test "${size:-0}" -gt 0
-          rm -f "$tarball"
+          set -euo pipefail
+          dest="$(mktemp -d)"
+          npm pack --pack-destination "$dest" >/dev/null 2>&1
+          tarball="$(echo "$dest"/*.tgz)"
+          test -f "$tarball" || { echo "::error::npm pack produced no tarball"; exit 1; }
+          tar -tzf "$tarball" | grep -q '/src/wasm/flux_md_core_bg\.wasm$' \
+            || { echo "::error::publish tarball is missing src/wasm/flux_md_core_bg.wasm"; exit 1; }
+          size=$(tar -tzvf "$tarball" | awk '/\/src\/wasm\/flux_md_core_bg\.wasm$/ { print $3; exit }')
+          test "${size:-0}" -gt 0 || { echo "::error::WASM artifact is present but empty"; exit 1; }
+          echo "OK: tarball ships WASM (${size} bytes)"
+          rm -rf "$dest"
       - name: Typecheck the package
         working-directory: packages/flux-md
         run: bunx tsc --noEmit -p tsconfig.json

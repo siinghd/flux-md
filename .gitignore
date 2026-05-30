@@ -9,7 +9,12 @@ crates/*/target/
 web/dist/
 *.tsbuildinfo
 
-# Generated WASM is built on demand (see packages/flux-md/src/wasm/.gitignore)
+# Generated WASM (wasm-pack output) — built on demand, never committed.
+# Ignored here at the repo root, ABOVE the package, so it stays out of git but
+# is still shipped by `npm pack` (npm-packlist only reads ignore files at/below
+# the package root, never the repo root). build:wasm deletes wasm-pack's own
+# src/wasm/.gitignore so no nested ignore can drop the WASM from the tarball.
+/packages/flux-md/src/wasm/
 
 # Editor / OS / local tooling state
 .DS_Store
