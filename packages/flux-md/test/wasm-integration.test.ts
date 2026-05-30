@@ -126,3 +126,34 @@ test.skipIf(!haveWasm)("real WASM: WITHOUT setBlockData a Table has no kind.data
   expect(table.kind.data).toBeUndefined();
   expect(Object.keys(table.kind)).toEqual(["type"]);
 });
+
+const HEADING_MD = "## **Bold** & plain\n";
+
+test.skipIf(!haveWasm)("real WASM: a Heading carries structured kind.data when setBlockData is on", () => {
+  // Guards the Heading enrichment serde path across the real boundary: the
+  // { level, text(plaintext), id(slug) } object must survive serde_wasm_bindgen.
+  const { blocks } = parseAll(HEADING_MD, (p) => p.setBlockData(true));
+  const h = blocks.find((b) => b.kind.type === "Heading");
+  expect(h).toBeDefined();
+  const d = h.kind.data;
+  expect(d).toBeDefined();
+  // data is the OBJECT (not the bare level) when on.
+  expect(typeof d).toBe("object");
+  expect(d.level).toBe(2);
+  // text is inline-STRIPPED plaintext (the **bold** markup is gone).
+  expect(d.text).toBe("Bold & plain");
+  // id is the github-style slug of that plaintext.
+  expect(d.id).toBe("bold-plain");
+  // display html still carries the markup (data is additive, not a replacement).
+  expect(h.html).toContain("<strong>Bold</strong>");
+});
+
+test.skipIf(!haveWasm)("real WASM: WITHOUT setBlockData a Heading's kind.data is the bare level int (byte-identical-off tripwire)", () => {
+  // The default-off contract: `kind.data` is the naked level number, exactly as
+  // before the carrier — a non-user sees no behavior change.
+  const { blocks } = parseAll(HEADING_MD);
+  const h = blocks.find((b) => b.kind.type === "Heading");
+  expect(h).toBeDefined();
+  expect(h.kind.data).toBe(2);
+  expect(Object.keys(h.kind)).toEqual(["type", "data"]);
+});

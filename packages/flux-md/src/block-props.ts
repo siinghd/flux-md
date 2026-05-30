@@ -1,4 +1,12 @@
-import type { Block, BlockComponentProps, TableData } from "./types-core";
+import type {
+  Block,
+  BlockComponentProps,
+  CodeBlockData,
+  HeadingData,
+  ListData,
+  MathBlockData,
+  TableData,
+} from "./types-core";
 
 // Pure helpers duplicated from the JSX renderer / its CodeBlock so the
 // framework-neutral DOM renderer carries no framework dependency. The JSX
@@ -78,13 +86,29 @@ export function blockProps(block: Block): BlockComponentProps {
     speculative: block.speculative,
   };
   const data = block.kind.data as
-    | { lang?: string | null; tag?: string; attrs?: [string, string][] }
+    | { lang?: string | null; code?: string; latex?: string; start?: number; ordered?: boolean; tag?: string; attrs?: [string, string][] }
     | undefined;
   if (block.kind.type === "CodeBlock") {
-    props.text = decodeCodeText(block.html);
+    // Prefer the structured `code` (present when blockData is on) over the HTML
+    // regex — it is the lossless decoded source. Fall back to the regex when off.
+    props.text = data?.code ?? decodeCodeText(block.html);
     props.language = data?.lang ?? "";
+    // Surface the typed convenience field only when the opt-in `code` is present.
+    if (typeof data?.code === "string") {
+      props.code = { lang: data.lang ?? null, code: data.code } as CodeBlockData;
+    }
   } else if (block.kind.type === "MathBlock") {
-    props.text = decodeMathText(block.html);
+    // Prefer the structured `latex` (present when blockData is on) over the regex.
+    props.text = data?.latex ?? decodeMathText(block.html);
+    if (typeof data?.latex === "string") {
+      props.math = { latex: data.latex } as MathBlockData;
+    }
+  } else if (block.kind.type === "List") {
+    // Structured list data is present only when blockData is on (the `start` key
+    // rides the opt-in channel); surface it as the typed convenience field.
+    if (data && typeof data.start === "number") {
+      props.list = { ordered: !!data.ordered, start: data.start } as ListData;
+    }
   } else if (block.kind.type === "Component") {
     props.tag = data?.tag ?? "";
     props.attrs = htmlAttrs(data?.attrs ?? []);
@@ -95,6 +119,13 @@ export function blockProps(block: Block): BlockComponentProps {
     // Structured data is present only when `blockData` is on (else `undefined`).
     // Pure data — identical for the DOM and JSX renderers, no name-form divergence.
     props.table = block.kind.data as TableData | undefined;
+  } else if (block.kind.type === "Heading") {
+    // When `blockData` is on, `kind.data` is the `{ level, text, id }` object;
+    // when off it is the bare level `number`. Surface the rich object only — the
+    // `typeof === "object"` guard keeps the off-path naked int out of `heading`.
+    if (typeof block.kind.data === "object" && block.kind.data !== null) {
+      props.heading = block.kind.data as HeadingData;
+    }
   }
   return props;
 }

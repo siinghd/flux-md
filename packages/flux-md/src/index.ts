@@ -33,4 +33,8 @@ export type {
   Align,
   TableCell,
   TableData,
+  HeadingData,
+  CodeBlockData,
+  MathBlockData,
+  ListData,
 } from "./types";

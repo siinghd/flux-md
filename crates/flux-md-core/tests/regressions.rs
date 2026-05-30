@@ -221,7 +221,7 @@ fn math_streaming_has_no_orphan_blocks() {
     p.finalize();
     let blocks: Vec<_> = p.all_blocks().collect();
     assert_eq!(blocks.len(), 1, "should converge to one block: {blocks:?}");
-    assert!(matches!(blocks[0].kind, BlockKind::MathBlock), "final kind: {:?}", blocks[0].kind);
+    assert!(matches!(blocks[0].kind, BlockKind::MathBlock(_)), "final kind: {:?}", blocks[0].kind);
 
     // (b) Prose around a math block: the active tail flips kind as `$$` opens
     // and closes, while the surrounding paragraphs must never overlap it.
