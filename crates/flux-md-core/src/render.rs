@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::blocks::{AlertKind, BlockKind, TableCell, TableData};
+use crate::blocks::{AlertKind, BlockKind, HeadingData, TableCell, TableData};
 use crate::inline::render_inline;
 use crate::scanner::{
     component_inner_range, indent_cols, is_blank_line, line_end, line_slice, scan, scan_marker,
@@ -171,8 +171,11 @@ pub fn classify(raw: &RawBlockKind, slice: &str, gfm_alerts: bool) -> BlockKind 
         }
     }
     match raw {
-        RawBlockKind::Heading { level } => BlockKind::Heading(*level),
-        RawBlockKind::SetextHeading { level } => BlockKind::Heading(*level),
+        // `rich` is filled in at the top-level promotion site (parser.rs) from
+        // `render_block`'s `Enrichment::Heading` when `block_data` is on; `None`
+        // here keeps the off-path (and nested-heading) wire byte-identical.
+        RawBlockKind::Heading { level } => BlockKind::Heading { level: *level, rich: None },
+        RawBlockKind::SetextHeading { level } => BlockKind::Heading { level: *level, rich: None },
         RawBlockKind::Paragraph => BlockKind::Paragraph,
         RawBlockKind::CodeFence { info, .. } => {
             let lang = info.split_whitespace().next().unwrap_or("");
@@ -187,7 +190,7 @@ pub fn classify(raw: &RawBlockKind, slice: &str, gfm_alerts: bool) -> BlockKind 
         RawBlockKind::MathFence { .. } => BlockKind::MathBlock,
         RawBlockKind::List { ordered, .. } => BlockKind::List { ordered: *ordered },
         RawBlockKind::Blockquote => BlockKind::Blockquote,
-        RawBlockKind::Table => BlockKind::Table,
+        RawBlockKind::Table => BlockKind::Table(None),
         RawBlockKind::HorizontalRule => BlockKind::Rule,
         RawBlockKind::HtmlBlock { .. } => BlockKind::Html,
         RawBlockKind::ComponentBlock { tag, .. } => {
@@ -201,16 +204,32 @@ pub fn classify(raw: &RawBlockKind, slice: &str, gfm_alerts: bool) -> BlockKind 
     }
 }
 
-/// Render one block to HTML. Returns `Some(TableData)` only for a top-level GFM
-/// table when `opts.block_data` is on (the opt-in structured `kind.data`
-/// channel); `None` for every other kind and whenever the flag is off. Nested
-/// (recursive) call sites ignore the return — only blocks that appear at the
-/// document top level get a `kind.data`.
-pub fn render_block(source: &str, raw: &RawBlock, opts: &RenderOpts, out: &mut String) -> Option<TableData> {
+/// The opt-in structured `kind.data` payload a top-level block can carry, in the
+/// shape `render_block` returns it. This is the generic enrichment carrier on the
+/// render side: each enriched kind gets one variant, and the promotion site
+/// (parser.rs) folds it onto the matching `BlockKind` `Option` field. Off (or for
+/// any kind without an opt-in payload) `render_block` returns `None`.
+pub enum Enrichment {
+    /// Top-level GFM table — folds onto `BlockKind::Table(Some(_))`.
+    Table(TableData),
+    /// ATX or Setext heading — folds onto `BlockKind::Heading { rich: Some(_) }`.
+    Heading(HeadingData),
+}
+
+/// Render one block to HTML. Returns `Some(Enrichment)` only for a top-level
+/// block whose kind has an opt-in `kind.data` payload (Table, Heading) when
+/// `opts.block_data` is on; `None` for every other kind and whenever the flag is
+/// off. Nested (recursive) call sites ignore the return — only blocks that
+/// appear at the document top level get a `kind.data`.
+pub fn render_block(source: &str, raw: &RawBlock, opts: &RenderOpts, out: &mut String) -> Option<Enrichment> {
     let slice = &source[raw.range.clone()];
     match &raw.kind {
-        RawBlockKind::Heading { level } => render_heading(slice, *level, opts, out),
-        RawBlockKind::SetextHeading { level } => render_setext_heading(slice, *level, opts, out),
+        RawBlockKind::Heading { level } => {
+            return render_heading(slice, *level, opts, out).map(Enrichment::Heading)
+        }
+        RawBlockKind::SetextHeading { level } => {
+            return render_setext_heading(slice, *level, opts, out).map(Enrichment::Heading)
+        }
         RawBlockKind::Paragraph => render_paragraph(slice, opts, out),
         RawBlockKind::CodeFence { info, fence_char, fence_len, terminated } => {
             render_code_fence(slice, info, *fence_char, *fence_len, *terminated, out)
@@ -219,7 +238,7 @@ pub fn render_block(source: &str, raw: &RawBlock, opts: &RenderOpts, out: &mut S
         RawBlockKind::MathFence { terminated } => render_math_block(slice, *terminated, out),
         RawBlockKind::Blockquote => render_blockquote(slice, opts, out),
         RawBlockKind::List { ordered, start } => render_list(slice, *ordered, *start, opts, out),
-        RawBlockKind::Table => return render_table(slice, opts, out),
+        RawBlockKind::Table => return render_table(slice, opts, out).map(Enrichment::Table),
         RawBlockKind::HorizontalRule => out.push_str("<hr>"),
         RawBlockKind::HtmlBlock { .. } => render_html_block(slice, opts, out),
         RawBlockKind::ComponentBlock { tag, terminated } => {
@@ -230,16 +249,78 @@ pub fn render_block(source: &str, raw: &RawBlock, opts: &RenderOpts, out: &mut S
     None
 }
 
+/// GitHub-style anchor slug for a heading's plaintext: lowercase, drop every
+/// character that is not ASCII alphanumeric / space / hyphen, then collapse runs
+/// of spaces (and surrounding whitespace) into single `-`. A pure function of the
+/// heading's own text — no document-wide dedup counter (so it is trivially
+/// streaming-consistent: a heading's slug never depends on what came before).
+/// v1 limitation: two headings with identical text yield identical slugs.
+pub(crate) fn slug(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut pending_dash = false;
+    let mut started = false;
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() {
+            if pending_dash && started {
+                out.push('-');
+            }
+            pending_dash = false;
+            started = true;
+            out.push(c.to_ascii_lowercase());
+        } else if c == '-' {
+            // A literal hyphen is kept (GitHub keeps `foo-bar` as `foo-bar`),
+            // but never doubles a pending separator.
+            if pending_dash && started {
+                out.push('-');
+                pending_dash = false;
+            }
+            if started {
+                out.push('-');
+            }
+        } else {
+            // Any other char (space, punctuation, non-ASCII) becomes a separator
+            // boundary; emitted lazily so trailing separators are dropped.
+            if started {
+                pending_dash = true;
+            }
+        }
+    }
+    out
+}
+
 /// ATX heading inner content — also strip trailing whitespace from final
-/// inline rendering (mirrors render_paragraph).
-fn render_heading_inner_trimmed(content: &str, opts: &RenderOpts, out: &mut String) {
+/// inline rendering (mirrors render_paragraph). When `opts.block_data` is on it
+/// also returns the trimmed inner HTML (the bytes written to `out` between the
+/// `<hN>`/`</hN>` tags) so the heading renderers can derive the structured
+/// `kind.data` (plaintext + slug) from the SAME inline render that produced the
+/// display HTML — no second inline pass. When OFF it returns `None` and does NOT
+/// clone the inner span, so the default path pays zero extra allocation
+/// (zero-cost-off, not merely byte-identical-off).
+fn render_heading_inner_trimmed(content: &str, opts: &RenderOpts, out: &mut String) -> Option<String> {
     let mut tmp = String::with_capacity(content.len());
     render_inline(content, opts, &mut tmp);
     let trimmed = tmp.trim_end_matches(|c: char| c == ' ' || c == '\t' || c == '\n' || c == '\r');
     out.push_str(trimmed);
+    if opts.block_data {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
 }
 
-fn render_heading(slice: &str, level: u8, opts: &RenderOpts, out: &mut String) {
+/// Build the opt-in `HeadingData` from a heading's inner HTML (already gated on
+/// `block_data`, so `inner_html` is `Some` only when the flag is on): `text` is
+/// the inline-stripped plaintext (the same `strip_inline_html` the client's
+/// `outline()`/`htmlToText` mirrors), `id` its anchor `slug`. Returns `None`
+/// when `block_data` is off (no inner span captured) so the heading carries no
+/// enrichment (off path).
+fn heading_data(level: u8, inner_html: Option<String>) -> Option<HeadingData> {
+    let text = strip_inline_html(&inner_html?);
+    let id = slug(&text);
+    Some(HeadingData { level, text, id })
+}
+
+fn render_heading(slice: &str, level: u8, opts: &RenderOpts, out: &mut String) -> Option<HeadingData> {
     let bytes = slice.as_bytes();
     let mut i = 0;
     while i < bytes.len() && bytes[i] == b' ' {
@@ -285,10 +366,11 @@ fn render_heading(slice: &str, level: u8, opts: &RenderOpts, out: &mut String) {
     out.push((b'0' + level) as char);
     out.push_str(opts.dir());
     out.push('>');
-    render_heading_inner_trimmed(content, opts, out);
+    let inner = render_heading_inner_trimmed(content, opts, out);
     out.push_str("</h");
     out.push((b'0' + level) as char);
     out.push('>');
+    heading_data(level, inner)
 }
 
 fn render_paragraph(slice: &str, opts: &RenderOpts, out: &mut String) {
@@ -431,7 +513,7 @@ fn render_math_block(slice: &str, terminated: bool, out: &mut String) {
     out.push_str("</div>");
 }
 
-fn render_setext_heading(slice: &str, level: u8, opts: &RenderOpts, out: &mut String) {
+fn render_setext_heading(slice: &str, level: u8, opts: &RenderOpts, out: &mut String) -> Option<HeadingData> {
     let bytes = slice.as_bytes();
     let mut end = bytes.len();
     while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r' | b' ' | b'\t') {
@@ -458,10 +540,11 @@ fn render_setext_heading(slice: &str, level: u8, opts: &RenderOpts, out: &mut St
     out.push((b'0' + level) as char);
     out.push_str(opts.dir());
     out.push('>');
-    render_heading_inner_trimmed(content, opts, out);
+    let inner = render_heading_inner_trimmed(content, opts, out);
     out.push_str("</h");
     out.push((b'0' + level) as char);
     out.push('>');
+    heading_data(level, inner)
 }
 
 fn render_indented_code(slice: &str, out: &mut String) {
@@ -1413,7 +1496,7 @@ mod strip_pass_bench {
         p.finalize();
         let mut cells = Vec::new();
         for b in p.all_blocks() {
-            if let BlockKind::TableWithData(td) = &b.kind {
+            if let BlockKind::Table(Some(td)) = &b.kind {
                 for h in &td.headers {
                     cells.push(h.html.clone());
                 }

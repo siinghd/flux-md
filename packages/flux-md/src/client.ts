@@ -532,7 +532,13 @@ export class FluxClient {
     const out: OutlineEntry[] = [];
     for (const b of this.store.snapshot) {
       if (b.kind.type === "Heading") {
-        out.push({ level: (b.kind.data as number) ?? 1, text: htmlToText(b.html), id: b.id });
+        // `kind.data` is the bare level `number` when `blockData` is off, or the
+        // `{ level, text, id }` object when on — accept both. `OutlineEntry.id`
+        // stays the numeric block id (stable, non-breaking); the anchor slug is
+        // reachable additively via `kind.data.id` for consumers who want it.
+        const d = b.kind.data as number | { level?: number } | undefined;
+        const level = typeof d === "number" ? d : d?.level ?? 1;
+        out.push({ level, text: htmlToText(b.html), id: b.id });
       }
     }
     return out;

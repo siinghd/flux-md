@@ -1,4 +1,4 @@
-import type { Block, BlockComponentProps, TableData } from "./types-core";
+import type { Block, BlockComponentProps, HeadingData, TableData } from "./types-core";
 
 // Pure helpers duplicated from the JSX renderer / its CodeBlock so the
 // framework-neutral DOM renderer carries no framework dependency. The JSX
@@ -95,6 +95,13 @@ export function blockProps(block: Block): BlockComponentProps {
     // Structured data is present only when `blockData` is on (else `undefined`).
     // Pure data — identical for the DOM and JSX renderers, no name-form divergence.
     props.table = block.kind.data as TableData | undefined;
+  } else if (block.kind.type === "Heading") {
+    // When `blockData` is on, `kind.data` is the `{ level, text, id }` object;
+    // when off it is the bare level `number`. Surface the rich object only — the
+    // `typeof === "object"` guard keeps the off-path naked int out of `heading`.
+    if (typeof block.kind.data === "object" && block.kind.data !== null) {
+      props.heading = block.kind.data as HeadingData;
+    }
   }
   return props;
 }

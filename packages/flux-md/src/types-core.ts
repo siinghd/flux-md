@@ -42,6 +42,25 @@ export interface TableData {
   aligns: Align[];
 }
 
+/**
+ * A Heading block's `kind.data` when {@link ParserConfig.blockData} is on. Lets a
+ * consumer build a table of contents — nested by `level`, anchored by `id` — from
+ * DATA alone, with no HTML re-parse. `text` is the inline-stripped plaintext (the
+ * heading rendered to plain text, e.g. `## **Bold** & x` → `"Bold & x"`); `id` is
+ * a GitHub-style anchor slug of that text (`"bold-x"`) for `#`-links. When
+ * `blockData` is off, a Heading's `kind.data` is instead the bare level `number`
+ * (byte-identical to before), so consumers reading `kind.data` must accept the
+ * `number | HeadingData` union.
+ *
+ * v1: duplicate heading texts produce identical slugs (no document-wide dedup
+ * counter yet) — give same-named headings distinct text if unique anchors matter.
+ */
+export interface HeadingData {
+  level: number;
+  text: string;
+  id: string;
+}
+
 export interface Block {
   id: number;
   kind: BlockKind;
@@ -92,6 +111,14 @@ export interface BlockComponentProps {
    * no HTML re-parse, no HAST tree.
    */
   table?: TableData;
+  /**
+   * Structured heading data — present for `Heading` blocks when
+   * {@link ParserConfig.blockData} is on (otherwise `undefined`). `{ level, text,
+   * id }` with `text` the inline-stripped plaintext and `id` a GitHub-style anchor
+   * slug. Build a table of contents (nested by `level`, anchored by `id`) from
+   * DATA — no HTML re-parse.
+   */
+  heading?: HeadingData;
 }
 
 /**

@@ -8,7 +8,7 @@ import {
   useSyncExternalStore,
   type CSSProperties,
 } from "react";
-import type { Block, BlockComponentProps, Components, TableData } from "./types";
+import type { Block, BlockComponentProps, Components, HeadingData, TableData } from "./types";
 import { FluxClient } from "./client";
 import type { ParserConfig } from "./types-core";
 import { CodeBlock } from "./renderers/CodeBlock";
@@ -264,6 +264,12 @@ function blockKindProps(block: Block): BlockComponentProps {
     // `attrs` there is no React/DOM name-form divergence, so this is the same
     // line as block-props.ts's branch.
     props.table = block.kind.data as TableData | undefined;
+  } else if (block.kind.type === "Heading") {
+    // When `blockData` is on, `kind.data` is `{ level, text, id }`; off, it is the
+    // bare level `number`. Surface the rich object only (mirrors block-props.ts).
+    if (typeof block.kind.data === "object" && block.kind.data !== null) {
+      props.heading = block.kind.data as HeadingData;
+    }
   }
   return props;
 }

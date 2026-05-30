@@ -8,7 +8,7 @@ use crate::render::{
     blockquote_inner, classify, collect_footnote_defs, collect_footnote_refs,
     count_footnote_refs, is_fence_close_line, is_footnote_def_block, item_body, normalize_label,
     parse_alignments, push_code_fence_open, push_table_cell, render_block,
-    render_footnote_section, split_table_cells, LinkRef, RenderOpts,
+    render_footnote_section, split_table_cells, Enrichment, LinkRef, RenderOpts,
 };
 use crate::blocks::{BlockKind, TableCell, TableData};
 use crate::scanner::{
@@ -641,11 +641,16 @@ impl StreamParser {
         for raw in &renderable {
             let mut kind = classify(&raw.kind, &tail[raw.range.clone()], self.gfm_alerts);
             let mut html = String::with_capacity(64);
-            // render_block returns Some(TableData) only for a top-level table when
-            // block_data is on — promote the bare Table kind to TableWithData so
-            // the structured channel is populated. Off ⇒ None ⇒ kind unchanged.
-            if let Some(td) = render_block(tail, raw, &opts, &mut html) {
-                kind = BlockKind::TableWithData(td);
+            // render_block returns Some(Enrichment) only for a top-level block
+            // with an opt-in payload (Table, Heading) when block_data is on —
+            // fold it onto the matching `Option` carrier field. Off ⇒ None ⇒ kind
+            // unchanged (byte-identical wire).
+            match render_block(tail, raw, &opts, &mut html) {
+                Some(Enrichment::Table(td)) => kind = BlockKind::Table(Some(td)),
+                Some(Enrichment::Heading(h)) => {
+                    kind = BlockKind::Heading { level: h.level, rich: Some(h) }
+                }
+                None => {}
             }
             produced.push(Block {
                 id: 0,
@@ -1262,13 +1267,13 @@ impl StreamParser {
             if let Some(row) = partial_row {
                 rows.push(Rc::new(row));
             }
-            BlockKind::TableWithData(TableData {
+            BlockKind::Table(Some(TableData {
                 headers: cache.header_cells.clone(),
                 rows,
                 aligns: cache.aligns.clone(),
-            })
+            }))
         } else {
-            BlockKind::Table
+            BlockKind::Table(None)
         };
 
         let block = Block {

@@ -1,5 +1,5 @@
 //! Opt-in structured table channel (`with_block_data`). When on, a Table block's
-//! `kind` becomes `BlockKind::TableWithData(TableData { headers, rows, aligns })`
+//! `kind` becomes `BlockKind::Table(Some(TableData { headers, rows, aligns }))`
 //! with per-cell `{ text, html }` so a consumer can sort/filter/transpose/CSV/
 //! chart from DATA without re-parsing the HTML. Off by default — a Table then
 //! serializes as `{"type":"Table"}` (no `data` key), byte-identical to before.
@@ -17,7 +17,7 @@ use flux_md_core::StreamParser;
 /// The `TableData` of the first table block among all blocks, if any.
 fn table_data(p: &StreamParser) -> Option<TableData> {
     for b in p.all_blocks() {
-        if let BlockKind::TableWithData(td) = &b.kind {
+        if let BlockKind::Table(Some(td)) = &b.kind {
             return Some(td.clone());
         }
     }
@@ -91,7 +91,7 @@ fn default_off_is_byte_identical_and_has_no_data_key() {
     // The Table kind must be the bare variant and serialize as {"type":"Table"}.
     let mut saw_table = false;
     for b in off.all_blocks() {
-        if matches!(b.kind, BlockKind::Table) {
+        if matches!(b.kind, BlockKind::Table(None)) {
             saw_table = true;
             assert_eq!(
                 serde_json::to_string(&b.kind).unwrap(),
@@ -100,8 +100,8 @@ fn default_off_is_byte_identical_and_has_no_data_key() {
             );
         }
         assert!(
-            !matches!(b.kind, BlockKind::TableWithData(_)),
-            "off path must never produce TableWithData"
+            !matches!(b.kind, BlockKind::Table(Some(_))),
+            "off path must never produce a populated Table payload"
         );
     }
     assert!(saw_table, "expected a Table block");
@@ -191,7 +191,7 @@ fn streaming_data_matches_one_shot() {
 }
 
 /// Within a SINGLE streamed parse, the table block's `kind.data` must mirror
-/// that same block's own `html` at every append: a `TableWithData` kind iff the
+/// that same block's own `html` at every append: a `Table(Some(_))` kind iff the
 /// html is a `<table>`, and one structured row per `<tr>` in the body with each
 /// cell's `html` appearing inside the corresponding `<td>`/`<th>`. This is the
 /// real consistency invariant (data derived from the same `push_table_cell`
@@ -211,8 +211,8 @@ fn data_mirrors_own_html_at_every_append() {
         for b in p.all_blocks() {
             let is_table_html = b.html.starts_with("<table");
             match &b.kind {
-                BlockKind::TableWithData(td) => {
-                    assert!(is_table_html, "TableWithData but html is not a table: {}", b.html);
+                BlockKind::Table(Some(td)) => {
+                    assert!(is_table_html, "populated Table but html is not a table: {}", b.html);
                     // Header cell html appears inside the rendered thead.
                     for cell in &td.headers {
                         assert!(
@@ -241,7 +241,7 @@ fn data_mirrors_own_html_at_every_append() {
                         }
                     }
                 }
-                BlockKind::Table => {
+                BlockKind::Table(None) => {
                     panic!("block_data on must never emit bare Table; html={}", b.html);
                 }
                 _ => {

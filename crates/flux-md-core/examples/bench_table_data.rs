@@ -117,7 +117,7 @@ fn touch_blocks<'a>(blocks: impl Iterator<Item = &'a Block>) -> usize {
     let mut total = 0usize;
     for b in blocks {
         total += b.html.len();
-        if let BlockKind::TableWithData(td) = &b.kind {
+        if let BlockKind::Table(Some(td)) = &b.kind {
             for h in &td.headers {
                 total += h.text.len() + h.html.len();
             }
@@ -225,7 +225,7 @@ fn patch_bytes(patch: &flux_md_core::Patch) -> usize {
 fn table_rows(b: &Block) -> usize {
     use flux_md_core::BlockKind;
     match &b.kind {
-        BlockKind::TableWithData(td) => td.rows.len(),
+        BlockKind::Table(Some(td)) => td.rows.len(),
         _ => 0,
     }
 }
