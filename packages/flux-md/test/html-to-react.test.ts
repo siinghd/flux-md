@@ -149,16 +149,19 @@ test("closed block + components → override applied via parser (parsed once)", 
   expect(getParseCount()).toBe(1);
 });
 
-test("open block + components → still innerHTML, override deferred, parser untouched", () => {
+test("#5: open block + components → override applies to the streaming tail too (parsed once)", () => {
+  // The open tail's HTML is well-formed (the parser speculatively closes it), and
+  // parseTrustedHtml auto-closes anything unterminated at EOF — so a design-system
+  // override now styles the streaming block instead of waiting for it to commit.
   const out = render(
     createElement(FluxMarkdown, {
       client: fakeClient([para("<p>partial", true)]),
       components: { p: (p: any) => createElement("p", { ...p, className: "x" }) },
     }),
   );
-  expect(out).not.toContain('class="x"');
-  expect(out).toContain("flux-open");
-  expect(getParseCount()).toBe(0);
+  expect(out).toContain('class="x"'); // override applies mid-stream (was deferred pre-#5)
+  expect(out).toContain("flux-open"); // still flagged as the open tail
+  expect(getParseCount()).toBe(1); // parsed once (was 0 — innerHTML — pre-#5)
 });
 
 test("CodeBlock with no override → dedicated highlighter renderer", () => {

@@ -1,8 +1,26 @@
-import { test, expect, beforeAll, spyOn } from "bun:test";
+import { test, expect, beforeAll, afterEach, spyOn } from "bun:test";
 import { GlobalWindow } from "happy-dom";
 import { FluxClient, FluxPool } from "../src/client";
-import { fluxMarkdown } from "../src/svelte";
+import { fluxMarkdown, fluxMarkdownString } from "../src/svelte";
 import type { Block, FromWorker, ToWorker, WorkerLike } from "../src/types";
+
+// A no-op Worker stub for the fluxMarkdownString tests below. Those tests use
+// the action's OWNED client, which joins the DEFAULT pool — whose factory calls
+// `new Worker(new URL("./worker.ts", import.meta.url))`. The first worker-bound
+// op (setContent → append/finalize) would otherwise spawn a real WASM worker.
+// The `new URL(...)` arg is harmless: this fake just records the construction.
+// The caller-owned fluxMarkdown tests inject their own FluxPool, so this stub
+// never affects them.
+class FakeDefaultWorker {
+  static instances: FakeDefaultWorker[] = [];
+  constructor(..._args: unknown[]) {
+    FakeDefaultWorker.instances.push(this);
+  }
+  postMessage() {}
+  addEventListener() {}
+  removeEventListener() {}
+  terminate() {}
+}
 
 // Register a DOM for this file. Mirror dom.test.ts exactly: deliberately do NOT
 // install requestAnimationFrame, so mountFluxMarkdown's default batch collapses
@@ -15,6 +33,7 @@ beforeAll(() => {
   g.HTMLElement = win.HTMLElement;
   g.Node = win.Node;
   g.navigator = win.navigator;
+  g.Worker = FakeDefaultWorker as unknown as typeof Worker;
 });
 
 // Synchronous fake worker (same pattern as pool.test.ts / dom.test.ts).
@@ -161,4 +180,140 @@ test("remount on changed client also never destroys either client", () => {
 
   expect(aSpy).not.toHaveBeenCalled();
   expect(bSpy).not.toHaveBeenCalled();
+});
+
+// --------------------------------------------------------------------------
+// fluxMarkdownString — controlled-string action that OWNS its client.
+// --------------------------------------------------------------------------
+
+afterEach(() => {
+  FakeDefaultWorker.instances = [];
+});
+
+test("string action: create constructs a client and feeds content done=false when streaming omitted", () => {
+  const setContentSpy = spyOn(FluxClient.prototype, "setContent");
+  try {
+    const node = document.createElement("div");
+    const action = fluxMarkdownString(node, { content: "# hi" });
+
+    // mountFluxMarkdown is worker-free (getSnapshot + subscribe), so the root
+    // mounts immediately.
+    expect(node.querySelector(".flux-md")).not.toBeNull();
+
+    // Exactly one setContent on create; stream left OPEN (done:false) because
+    // `streaming` was omitted — done is NOT inferred from the absent flag.
+    expect(setContentSpy).toHaveBeenCalledTimes(1);
+    expect(setContentSpy.mock.calls[0]).toEqual(["# hi", { done: false }]);
+
+    action.destroy!();
+  } finally {
+    setContentSpy.mockRestore();
+  }
+});
+
+test("string action: streaming:false finalizes (done=true)", () => {
+  const setContentSpy = spyOn(FluxClient.prototype, "setContent");
+  try {
+    const node = document.createElement("div");
+    const action = fluxMarkdownString(node, { content: "done text", streaming: false });
+
+    expect(setContentSpy.mock.calls[0]).toEqual(["done text", { done: true }]);
+
+    action.destroy!();
+  } finally {
+    setContentSpy.mockRestore();
+  }
+});
+
+test("string action: update re-feeds content on EVERY update (no early-return)", () => {
+  const setContentSpy = spyOn(FluxClient.prototype, "setContent");
+  try {
+    const node = document.createElement("div");
+    const action = fluxMarkdownString(node, { content: "a", streaming: true });
+    expect(setContentSpy.mock.calls[0]).toEqual(["a", { done: false }]);
+
+    action.update!({ content: "ab", streaming: true });
+    expect(setContentSpy.mock.calls[1]).toEqual(["ab", { done: false }]);
+
+    action.update!({ content: "abc", streaming: false });
+    expect(setContentSpy.mock.calls[2]).toEqual(["abc", { done: true }]);
+
+    expect(setContentSpy).toHaveBeenCalledTimes(3);
+
+    action.destroy!();
+  } finally {
+    setContentSpy.mockRestore();
+  }
+});
+
+test("string action: a mount-option change reuses the SAME client (baseline survives)", () => {
+  const origSet = FluxClient.prototype.setContent;
+  const seen = new Set<FluxClient>();
+  const setContentSpy = spyOn(FluxClient.prototype, "setContent").mockImplementation(function (
+    this: FluxClient,
+    content: string,
+    opts?: { done?: boolean },
+  ) {
+    seen.add(this);
+    return origSet.call(this, content, opts);
+  });
+  try {
+    const node = document.createElement("div");
+    const action = fluxMarkdownString(node, { content: "x", components: {} });
+    const firstRoot = node.firstChild;
+
+    // Change a mount-option identity (a fresh components object) → remount.
+    action.update!({ content: "x", components: {} });
+    const secondRoot = node.firstChild;
+
+    expect(secondRoot).not.toBe(firstRoot); // remounted
+    expect(node.querySelectorAll(".flux-md").length).toBe(1); // exactly one live mount
+
+    // The SAME client served both mounts — only one receiver ever.
+    expect(seen.size).toBe(1);
+
+    action.destroy!();
+  } finally {
+    setContentSpy.mockRestore();
+  }
+});
+
+test("string action: identical mount-option identities do NOT remount", () => {
+  const node = document.createElement("div");
+  const components = {};
+  const action = fluxMarkdownString(node, { content: "y", components });
+  const root = node.firstChild;
+
+  // Same components identity, only content changed → no remount, same root.
+  action.update!({ content: "yy", components });
+  expect(node.firstChild).toBe(root);
+
+  action.destroy!();
+});
+
+test("string action: destroy OWNS the client — tears down mount AND destroys client (inverse of fluxMarkdown)", () => {
+  const destroySpy = spyOn(FluxClient.prototype, "destroy");
+  try {
+    const node = document.createElement("div");
+    const action = fluxMarkdownString(node, { content: "z", streaming: false });
+    expect(node.querySelector(".flux-md")).not.toBeNull();
+
+    action.destroy!();
+
+    expect(node.querySelector(".flux-md")).toBeNull(); // mount torn down
+    // OWNS the client → MUST destroy it (inverse of the caller-owned action).
+    expect(destroySpy).toHaveBeenCalledTimes(1);
+  } finally {
+    destroySpy.mockRestore();
+  }
+});
+
+test("string action: empty content + streaming omitted touches no Worker (setContent no-ops)", () => {
+  const node = document.createElement("div");
+  // content "" === client.lastContent and streaming omitted → setContent body
+  // short-circuits (no append, no finalize) → no Worker is ever spawned.
+  const action = fluxMarkdownString(node, { content: "" });
+  expect(node.querySelector(".flux-md")).not.toBeNull();
+  expect(FakeDefaultWorker.instances.length).toBe(0);
+  action.destroy!();
 });

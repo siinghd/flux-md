@@ -16,9 +16,9 @@ flux-md ships as **source** (TypeScript + the compiled WASM). The worker and
 WASM asset are referenced with the **web-standard `new URL(asset,
 import.meta.url)`** pattern, so any bundler with asset-module support resolves
 them: **Vite** (the reference setup), **webpack 5**, **Rollup** (with asset
-modules), and **Parcel**. Next.js (webpack/turbopack) should work but is
-untested — file an issue if it doesn't. It is **browser-only** (it constructs
-Web Workers); it does not run under SSR/RSC. The framework packages — `react`,
+modules), **Parcel**, and **Next.js** (App Router — Turbopack *and* webpack;
+**verified on Next.js 16**, see the [Next.js callout](#nextjs) below). It is
+**browser-only** (it constructs Web Workers); it does not run under SSR/RSC. The framework packages — `react`,
 `vue`, `svelte`, `solid-js` — are all **optional** peer dependencies; you only
 need the one whose binding you import. The core (`flux-md`, `flux-md/client`,
 `flux-md/dom`, `flux-md/element`) needs none.
@@ -36,6 +36,54 @@ need the one whose binding you import. The core (`flux-md`, `flux-md/client`,
 > ```
 >
 > No other bundler needs this — it's specific to Vite's optimizer.
+
+<a id="nextjs"></a>
+
+> **Next.js (App Router) — two requirements.** Verified on **Next.js 16** with
+> **Turbopack** (the default for both `next dev` and `next build`). The same two
+> requirements apply under webpack. Because flux-md ships TypeScript source:
+>
+> 1. **Transpile the package.** Next does not compile `node_modules` TypeScript
+>    by default — without this, Turbopack errors with *"Unknown module type"* on
+>    `react.tsx`. Add flux-md to `transpilePackages`:
+>
+>    ```ts
+>    // next.config.ts
+>    import type { NextConfig } from "next";
+>    const nextConfig: NextConfig = { transpilePackages: ["flux-md"] };
+>    export default nextConfig;
+>    ```
+>
+> 2. **Use it from a Client Component.** `<FluxMarkdown>` uses React hooks (and
+>    spawns a Web Worker on mount), so it must carry `"use client"` — it can't be
+>    a Server Component. (It is still SSR-safe: on the server it renders an empty
+>    shell and only starts streaming after hydration, so there's no SSR crash —
+>    the constraint is hooks, not the worker.)
+>
+>    ```tsx
+>    "use client";
+>    import { FluxMarkdown } from "flux-md/react";
+>
+>    export default function Answer({ stream }: { stream: AsyncIterable<string> }) {
+>      return <FluxMarkdown stream={stream} />;
+>    }
+>    ```
+>
+>    **Create the `stream` in Client Component code, not in a Server Component.**
+>    A `Response` / `ReadableStream` / `AsyncIterable` isn't serializable, so it
+>    can't be passed as a prop from a Server Component (e.g. `page.tsx`) — that
+>    throws *"Only plain objects can be passed to Client Components."* Pass a
+>    serializable prop (a URL, the chat messages) from the server and open the
+>    stream on the client — e.g. `stream={await fetch("/api/chat")}` from a client
+>    effect, or the `useFluxStream` hook (see [Quick start](#quick-start)).
+>
+> That's it — Turbopack bundles the worker and emits the `.wasm` to
+> `_next/static/media` itself, so no extra asset/loader config is needed (and the
+> Vite `optimizeDeps` workaround above does **not** apply). Both `next dev` and
+> `next build && next start` are verified to spawn the worker, load the WASM, and
+> stream markdown. _Dev tip:_ open the app on `localhost` — Next dev blocks
+> cross-origin dev resources (HMR, chunks) from other hosts (e.g. `127.0.0.1`)
+> unless you add them to `allowedDevOrigins` in `next.config`.
 
 ## Quick start
 
@@ -78,6 +126,38 @@ export function ChatMessage({ stream }: { stream: AsyncIterable<string> }) {
   return <FluxMarkdown client={client} />;
 }
 ```
+
+### Already holding a growing string? — `useFluxMarkdownString`
+
+Many apps keep the streaming message as a **single growing string prop** (it
+re-renders with the full text-so-far each token), not as a stream. Feed that
+string straight in — `useFluxMarkdownString` diffs it for you and forwards only
+the delta, so you don't hand-roll an append/reset bridge:
+
+```tsx
+import { FluxMarkdown, useFluxMarkdownString } from "flux-md/react";
+
+export function ChatMessage({ text, streaming }: { text: string; streaming: boolean }) {
+  const client = useFluxMarkdownString(text, { streaming });
+  return <FluxMarkdown client={client} />;
+}
+```
+
+It handles the two shapes a controlled string takes: a **prefix-extension** (the
+common token-by-token growth) appends only the new suffix; a **divergence** (e.g.
+the finished text swapped for a re-processed final string — bolded numbers,
+wrapped tickers) resets and reparses. Pass `streaming: false` once the content is
+final so the last block commits (a finished code fence then highlights). The
+framework-neutral primitive is **`client.setContent(fullString, { done })`** —
+use it from any binding.
+
+> **Transforming streamed content?** If the enrichment runs **live per token**
+> (e.g. bold every number as it arrives), do it at **render time** via
+> [`components`](#custom-components--overrides) — keep the markdown source
+> append-only so parsing stays incremental. Re-transforming the *whole* string
+> each token (so earlier bytes change) forces `setContent` to reparse every tick
+> (O(n²)); that's what render-time overrides avoid. `setContent`'s reset path is
+> for the **once**-at-the-end reprocess swap, not per-token rewrites.
 
 <details>
 <summary>Full manual control (caller-owned client)</summary>
@@ -150,6 +230,12 @@ handle.destroy();
 client.destroy();
 ```
 
+**Already holding a growing string?** There's no framework reactivity to wrap,
+so just call **`client.setContent(fullString, { done })`** instead of the
+`append` loop — it diffs internally (prefix → delta; divergence → reparse) and
+finalizes on `done`. That's the same primitive the React/Vue/Svelte/Solid
+controlled-string helpers wrap; in vanilla you call it directly.
+
 `mountFluxMarkdown(client, container, options?)` returns `{ destroy(), refresh() }`.
 Options: `components`, `sanitize`, `virtualize`, `stickToBottom`, `highlightCode`
 (default true), `batch` (default true — one DOM write per `requestAnimationFrame`).
@@ -208,6 +294,13 @@ defineFluxMarkdown(); // once at bootstrap
 export class Answer { url = "/api/post.md"; }
 ```
 
+**Controlled growing string?** Assign a caller-owned client and drive it with
+`setContent` — `el.client = myClient; myClient.setContent(fullString, { done })`
+— the element subscribes and renders, you own the diffing. (The self-owned
+`markdown` attribute is **one-shot** — it re-parses the whole document on each
+change, so don't point it at a per-token-growing string; use a client +
+`setContent` for that.)
+
 ### Vue 3 — `flux-md/vue`
 
 ```vue
@@ -230,6 +323,20 @@ Props: `client` (required), `components`, `sanitize`, `virtualize`,
 `stickToBottom`. There's also a `useFluxMarkdown` composable returning a
 `container` ref if you'd rather mount into your own element.
 
+**Already holding a growing string?** `useFluxMarkdownString` owns a client and
+diffs the string for you (the Vue analogue of the React hook — see
+[Controlled strings](#already-holding-a-growing-string--usefluxmarkdownstring)):
+
+```vue
+<script setup lang="ts">
+import { FluxMarkdown, useFluxMarkdownString } from "flux-md/vue";
+const props = defineProps<{ text: string; streaming: boolean }>();
+// Pass getters so the composable tracks the live values; it owns + destroys the client.
+const client = useFluxMarkdownString(() => props.text, () => ({ streaming: props.streaming }));
+</script>
+<template><FluxMarkdown :client="client" /></template>
+```
+
 ### Svelte (4 & 5) — `flux-md/svelte`
 
 A Svelte action — works in both v4 and v5, no `.svelte` build step:
@@ -248,6 +355,20 @@ A Svelte action — works in both v4 and v5, no `.svelte` build step:
 <div use:fluxMarkdown={{ client, stickToBottom: true }} />
 ```
 
+**Growing string?** The `fluxMarkdownString` action owns a client and diffs the
+string — `use:fluxMarkdownString={{ content, streaming }}` (it destroys its
+client on `destroy`, so no manual cleanup):
+
+```svelte
+<script lang="ts">
+  import { fluxMarkdownString } from "flux-md/svelte";
+  export let content: string;     // the growing message
+  export let streaming: boolean;  // false once complete → finalizes
+</script>
+
+<div use:fluxMarkdownString={{ content, streaming, stickToBottom: true }} />
+```
+
 ### Solid — `flux-md/solid`
 
 ```tsx
@@ -260,6 +381,19 @@ const client = new FluxClient();
 onCleanup(() => client.destroy());
 
 <FluxMarkdown client={client} stickToBottom />;
+```
+
+**Growing string?** `createFluxMarkdownString` owns a client and diffs the string
+(the Solid analogue of the React hook), driving `setContent` from a
+`createEffect` and destroying the client on cleanup:
+
+```tsx
+import { FluxMarkdown, createFluxMarkdownString } from "flux-md/solid";
+
+function Message(props: { text: string; streaming: boolean }) {
+  const client = createFluxMarkdownString(() => props.text, () => ({ streaming: props.streaming }));
+  return <FluxMarkdown client={client} />;
+}
 ```
 
 The Solid binding's mount/teardown logic is tested, but its JSX component shell
@@ -324,6 +458,10 @@ class FluxClient {
     opts?: { signal?: AbortSignal },                // abort to supersede (no finalize)
   ): Promise<void>;
   finalize(): void;                                 // mark stream complete
+  setContent(                                       // drive from a controlled full string
+    full: string,                                   // diffs vs last: prefix → append delta; else reset+reparse
+    opts?: { done?: boolean },                      // done:true → finalize
+  ): void;
   reset(): void;                                    // wipe and reuse
   destroy(): void;                                  // free this stream's parser
   whenReady(): Promise<void>;                       // resolves once WASM loaded; rejects on init failure
@@ -502,11 +640,15 @@ Rules worth knowing:
   channel](#structured-block-data-setblockdata)** (`blockData: true`) and read
   `block.kind.data` (and the typed `props.table` / `heading` / `code` / `math` /
   `list` fields) directly — no HTML re-parsing.
-- **Open (streaming) blocks render via `innerHTML`** — their HTML is still
-  partial, so a tag-level override takes effect the moment the block commits.
+- **Overrides apply to the OPEN (streaming) block too**, not just settled ones —
+  so a design-system renderer (Tailwind classes on `p`/`ul`/`li`, inline
+  `<a>`/`<code>` overrides) stays styled mid-stream. The tail's HTML is always
+  well-formed (the parser speculatively closes it). If a `sanitize` is supplied
+  it runs first, on every block.
 - **No `components` prop ⇒ the original fast path** (`innerHTML`, byte-identical
-  output). The HTML→React conversion only runs for closed blocks when you
-  actually supply overrides, and is memoized per `(block id, html)`.
+  output). The HTML→React conversion runs only when you actually supply
+  overrides, and is memoized per `(block id, html)` so committed blocks don't
+  re-parse as the stream grows.
 - For **code blocks** the built-in highlighter is the default; it is bypassed
   (so your override wins) when you pass `components.CodeBlock`, `components.pre`,
   or `components.code`.
@@ -735,6 +877,16 @@ teardown? Construct your own `new FluxPool(factory, cap)` and pass it to
 `getDefaultPool()` is **browser-only** (it constructs `Worker`s) and is a
 **per-page singleton** — don't rely on it in SSR/RSC. For isolation between
 independent feature areas, give each its own `new FluxPool()`.
+
+**Warm the pool to hide WASM init.** The one-time WASM load happens on the first
+worker-bound op, which lands on the first-token critical path. Call
+`getDefaultPool().warm()` on app load / route entry to start it early — the warm
+worker is the one the first stream attaches to, so the init isn't wasted:
+
+```ts
+import { getDefaultPool } from "flux-md";
+useEffect(() => { getDefaultPool().warm(); }, []); // (or your framework's mount hook)
+```
 
 ### Long documents — `virtualize`
 

@@ -427,3 +427,40 @@ test("default constructor still joins a pool and streams (no behavior change)", 
   c.append("hello");
   expect(created[0].sent[0]).toMatchObject({ type: "append", chunk: "hello" });
 });
+
+test("warm() eagerly creates a worker and resolves once it is ready", async () => {
+  const { pool, created } = makePool(8);
+  let warmed = false;
+  const p = pool.warm().then(() => {
+    warmed = true;
+  });
+  expect(created.length).toBe(1); // worker built immediately → WASM init starts now
+  expect(warmed).toBe(false); // but warm() awaits readiness
+  created[0].fire({ type: "ready" });
+  await p;
+  expect(warmed).toBe(true);
+});
+
+test("warm() reuses a live worker instead of stacking new ones", () => {
+  const { pool, created } = makePool(8);
+  pool.warm();
+  pool.warm();
+  expect(created.length).toBe(1);
+});
+
+test("the first stream attaches to the warm worker (init is not wasted)", () => {
+  const { pool, created } = makePool(8);
+  pool.warm();
+  pool.acquire(() => {}); // first real stream
+  expect(created.length).toBe(1); // reused the warm worker, no new one
+  expect(pool.workerCount).toBe(1);
+});
+
+test("warm() on a pool whose only worker died fatally builds a fresh one", () => {
+  const { pool, created } = makePool(8);
+  const s = pool.acquire(() => {});
+  created[0].fire({ type: "error", streamId: -1, message: "dead", fatal: true });
+  expect(s.pw.failed).not.toBeNull();
+  pool.warm(); // must not hand back the dead worker
+  expect(created.length).toBe(2);
+});

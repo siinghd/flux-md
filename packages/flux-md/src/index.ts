@@ -16,7 +16,7 @@
  *     client.finalize();
  */
 export { FluxClient, FluxPool, getDefaultPool } from "./client";
-export { FluxMarkdown } from "./react";
+export { FluxMarkdown, useFluxStream, useFluxMarkdownString } from "./react";
 export { highlight, supportedLangs } from "./hi";
 export { htmlToReact, parseTrustedHtml } from "./html-to-react";
 export type {

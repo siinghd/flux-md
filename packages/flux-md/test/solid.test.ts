@@ -1,7 +1,12 @@
 import { test, expect, beforeAll, spyOn } from "bun:test";
 import { GlobalWindow } from "happy-dom";
 import { FluxClient, FluxPool } from "../src/client";
-import { mountSolid, type FluxMarkdownProps } from "../src/solid";
+import {
+  createFluxMarkdownString,
+  mountSolid,
+  setupFluxMarkdownString,
+  type FluxMarkdownProps,
+} from "../src/solid";
 import type { Block, FromWorker, ToWorker, WorkerLike } from "../src/types";
 
 // Register a DOM the same way test/dom.test.ts does (no GlobalRegistrator subpath
@@ -144,4 +149,130 @@ test("props are snapshotted once at mount (getProps read a single time)", () => 
   mountSolid(() => { reads++; return props; }, container, cleanups.register);
 
   expect(reads).toBe(1);
+});
+
+// --------------------------------------------------------------------------
+// createFluxMarkdownString — the controlled-string helper.
+//
+// We test the reactivity-free core `setupFluxMarkdownString` directly (the same
+// strategy as `mountSolid`): it takes injected effect/cleanup registrars so the
+// test drives them by hand — Solid's `createEffect` is a no-op under bun's
+// server build (no client runtime to pump it), so relying on the real one
+// firing would test nothing. A captured effect-runner lets us mutate
+// content/streaming between runs and observe the resulting setContent calls.
+// We spy on FluxClient.prototype.setContent with a NO-OP so nothing spawns a
+// real bun Worker; the setContent diff/finalize semantics are client.ts's job
+// and tested in setcontent.test.ts.
+// --------------------------------------------------------------------------
+
+// Captures the registered effect fn so the test can re-run it after changing
+// what the accessors return, plus the cleanup collector from above.
+function makeEffectRunner() {
+  let effect: (() => void) | null = null;
+  return {
+    register: (fn: () => void) => { effect = fn; },
+    run: () => effect?.(),
+  };
+}
+
+test("createFluxMarkdownString feeds content on first effect (done=false when streaming omitted)", () => {
+  const setContentSpy = spyOn(FluxClient.prototype, "setContent").mockImplementation(() => {});
+  const destroySpy = spyOn(FluxClient.prototype, "destroy").mockImplementation(() => {});
+
+  const effects = makeEffectRunner();
+  const cleanups = makeCleanups();
+  const client = setupFluxMarkdownString(() => "# hi", undefined, effects.register, cleanups.register);
+
+  expect(client).toBeInstanceOf(FluxClient);
+  // The body constructs but does not feed — setContent only runs inside the effect.
+  expect(setContentSpy).toHaveBeenCalledTimes(0);
+
+  effects.run();
+  expect(setContentSpy).toHaveBeenCalledTimes(1);
+  // streaming omitted → done:false (never inferred-done from an absent flag).
+  expect(setContentSpy).toHaveBeenLastCalledWith("# hi", { done: false });
+
+  setContentSpy.mockRestore();
+  destroySpy.mockRestore();
+});
+
+test("createFluxMarkdownString re-feeds on content growth and finalizes when streaming flips false", () => {
+  const setContentSpy = spyOn(FluxClient.prototype, "setContent").mockImplementation(() => {});
+  const destroySpy = spyOn(FluxClient.prototype, "destroy").mockImplementation(() => {});
+
+  let content = "# hi";
+  let streaming: boolean | undefined = true;
+  const effects = makeEffectRunner();
+  const cleanups = makeCleanups();
+  setupFluxMarkdownString(
+    () => content,
+    () => ({ streaming }),
+    effects.register,
+    cleanups.register,
+  );
+
+  // Initial feed: streaming:true → open.
+  effects.run();
+  expect(setContentSpy).toHaveBeenCalledTimes(1);
+  expect(setContentSpy).toHaveBeenLastCalledWith("# hi", { done: false });
+
+  // Content grows → effect re-runs → another feed, still open.
+  content = "# hi\nmore";
+  effects.run();
+  expect(setContentSpy).toHaveBeenCalledTimes(2);
+  expect(setContentSpy).toHaveBeenLastCalledWith("# hi\nmore", { done: false });
+
+  // streaming flips to false → finalize via done:true.
+  streaming = false;
+  effects.run();
+  expect(setContentSpy).toHaveBeenCalledTimes(3);
+  expect(setContentSpy).toHaveBeenLastCalledWith("# hi\nmore", { done: true });
+
+  setContentSpy.mockRestore();
+  destroySpy.mockRestore();
+});
+
+test("createFluxMarkdownString reads config ONCE in the body (immutable) and OWNS the client (cleanup destroys)", () => {
+  const setContentSpy = spyOn(FluxClient.prototype, "setContent").mockImplementation(() => {});
+  const destroySpy = spyOn(FluxClient.prototype, "destroy").mockImplementation(() => {});
+
+  let optionReads = 0;
+  const getOptions = () => {
+    optionReads++;
+    return { config: { gfmMath: true }, streaming: true };
+  };
+  const effects = makeEffectRunner();
+  const cleanups = makeCleanups();
+  setupFluxMarkdownString(() => "x", getOptions, effects.register, cleanups.register);
+
+  // Body read getOptions() exactly once (for config) before any effect ran.
+  expect(optionReads).toBe(1);
+
+  // The effect reads getOptions() again (for streaming) — so config is NOT a
+  // change trigger but streaming IS tracked reactively.
+  effects.run();
+  expect(optionReads).toBe(2);
+  expect(setContentSpy).toHaveBeenLastCalledWith("x", { done: false });
+
+  // Ownership: this helper constructs the client, so cleanup destroys it.
+  expect(destroySpy).not.toHaveBeenCalled();
+  cleanups.run();
+  expect(destroySpy).toHaveBeenCalledTimes(1);
+
+  setContentSpy.mockRestore();
+  destroySpy.mockRestore();
+});
+
+test("createFluxMarkdownString (public) wires Solid's createEffect/onCleanup", () => {
+  // The public entry forwards to the core with Solid's real registrars. Under
+  // bun's server build createEffect is a no-op, so we don't assert the feed
+  // here (that's the core test above) — we prove the public function constructs
+  // a client and returns it without throwing or touching a Worker. setContent is
+  // stubbed defensively in case a client runtime ever pumps the effect.
+  const setContentSpy = spyOn(FluxClient.prototype, "setContent").mockImplementation(() => {});
+  const client = createFluxMarkdownString(() => "# hi", () => ({ streaming: true }));
+  expect(client).toBeInstanceOf(FluxClient);
+  expect(client.getSnapshot()).toEqual([]); // no patches, no Worker
+  expect(client.ready).toBe(false); // never acquired a pool slot
+  setContentSpy.mockRestore();
 });

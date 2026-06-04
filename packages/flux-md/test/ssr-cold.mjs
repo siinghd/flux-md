@@ -78,6 +78,46 @@ try {
   ok("Svelte action module (server-safe, not auto-invoked)");
 } catch (e) { fail("Svelte SSR", e); }
 
+// 5) The controlled-string helpers (setContent bridges) must ALSO be SSR-safe:
+//    they construct a client in the body (fine) but must NOT call setContent on
+//    the server (setContent → append → spawns a Worker, which is deleted above,
+//    so a stray server-side feed would throw here). A clean render/call proves it.
+try {
+  const { createSSRApp, defineComponent, h } = await import("vue");
+  const { renderToString: renderVue } = await import("vue/server-renderer");
+  const { useFluxMarkdownString, FluxMarkdown: VueFlux } = await import("../src/vue.ts");
+  const StringComp = defineComponent({
+    setup() {
+      const client = useFluxMarkdownString(() => "# hi", () => ({ streaming: true }));
+      return () => h(VueFlux, { client });
+    },
+  });
+  const html = await renderVue(createSSRApp(StringComp));
+  if (typeof html !== "string" || !html.includes("<div")) throw new Error("vue string SSR markup unexpected: " + html);
+  ok("Vue useFluxMarkdownString (SSR render, no Worker)");
+} catch (e) { fail("Vue useFluxMarkdownString SSR", e); }
+
+try {
+  const { createRoot } = await import("solid-js");
+  const { createFluxMarkdownString } = await import("../src/solid.tsx");
+  // Server build: createEffect is a no-op, so setContent never runs → no Worker.
+  // createRoot gives the effect/cleanup an owner; dispose runs the cleanup.
+  createRoot((dispose) => {
+    const client = createFluxMarkdownString(() => "# hi", () => ({ streaming: true }));
+    if (!client || typeof client.getSnapshot !== "function") throw new Error("expected a FluxClient");
+    dispose();
+  });
+  ok("Solid createFluxMarkdownString (SSR, effect deferred, no Worker)");
+} catch (e) { fail("Solid createFluxMarkdownString SSR", e); }
+
+try {
+  const sv = await import("../src/svelte.ts");
+  // The action only runs in the browser (Svelte invokes it on mount), so as with
+  // fluxMarkdown the SSR proof is that the export exists and the module is cold-safe.
+  if (typeof sv.fluxMarkdownString !== "function") throw new Error("svelte string action export missing");
+  ok("Svelte fluxMarkdownString action (server-safe, not auto-invoked)");
+} catch (e) { fail("Svelte fluxMarkdownString SSR", e); }
+
 if (failures > 0) {
   console.error(`\nSSR cold-import tripwire: ${failures} failure(s)`);
   process.exit(1);

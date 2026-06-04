@@ -7,6 +7,7 @@ import {
   useState,
   useSyncExternalStore,
   type CSSProperties,
+  type ReactElement,
 } from "react";
 import type { Block, BlockComponentProps, Components, HeadingData, TableData } from "./types";
 import { FluxClient } from "./client";
@@ -209,6 +210,52 @@ export function useFluxStream(
   return client;
 }
 
+/**
+ * Own a {@link FluxClient} driven by a CONTROLLED full string — the bridge for
+ * UIs that hold a streaming message as a single growing string prop (the common
+ * React shape) rather than as a stream. Pass the whole document-so-far on each
+ * render and {@link FluxClient.setContent} diffs it: a prefix-extension appends
+ * only the delta; any divergence (e.g. the finished text swapped for a
+ * re-processed final string) resets and reparses. Returns the owned client —
+ * pass it to `<FluxMarkdown client={…} />` (and read `outline()` etc.).
+ *
+ * Pass `streaming: false` once the content is final to finalize the stream and
+ * commit its last block (only then does a finished code fence highlight + show
+ * its copy button). If `streaming` is omitted or `true` the stream is left OPEN
+ * — right for a still-growing string, but a *complete static* string rendered as
+ * `useFluxMarkdownString(md)` keeps its last block in the streaming state until
+ * you pass `{ streaming: false }`. (Inferring "done" from an absent flag is
+ * deliberately avoided: it would re-finalize on every token for callers that
+ * grow the string without the flag — an O(n²) reparse trap.) The client is
+ * created once and destroyed on unmount; StrictMode's dev double-mount is handled
+ * (reattach re-feeds the document). For a true stream source
+ * (`Response` / `ReadableStream` / SSE generator) use {@link useFluxStream}
+ * instead — it avoids buffering the whole document as a string.
+ */
+export function useFluxMarkdownString(
+  content: string,
+  options?: { config?: ParserConfig; streaming?: boolean },
+): FluxClient {
+  const [client] = useState(() => new FluxClient({ config: options?.config }));
+
+  // Own the client's pool attachment (StrictMode dev double-mount destroys on the
+  // simulated unmount then remounts the SAME instance; reattach re-registers and
+  // clears setContent's diff baseline so the document is re-fed). Destroy on the
+  // real unmount.
+  useEffect(() => {
+    client.reattach();
+    return () => client.destroy();
+  }, [client]);
+
+  // Reconcile the parser to the controlled string. setContent diffs internally,
+  // so this stays correct whether `content` grows by a token or is swapped wholesale.
+  useEffect(() => {
+    client.setContent(content, { done: options?.streaming === false });
+  }, [client, content, options?.streaming]);
+
+  return client;
+}
+
 // Stream mode: own a client via the hook, then render the normal client path.
 function FluxMarkdownFromStream(props: FluxMarkdownProps) {
   const client = useFluxStream(props.stream, {
@@ -336,7 +383,10 @@ function componentInnerHtml(html: string, tag: string): string {
 
 /** Convert a closed block's HTML to a React tree, memoized on html+components. */
 function SafeHtml({ html, components }: { html: string; components: Components }) {
-  return useMemo(() => htmlToReact(html, components), [html, components]) as JSX.Element;
+  // `ReactElement` (not the global `JSX.Element`) so the source type-checks under
+  // both @types/react 18 and 19 — React 19 removed the global `JSX` namespace,
+  // and a consumer's `next build` type-checks this shipped source.
+  return useMemo(() => htmlToReact(html, components), [html, components]) as ReactElement;
 }
 
 // Per-kind off-screen size estimate for `contain-intrinsic-size` — keeps the
@@ -419,12 +469,20 @@ function renderBlockContent({
     (block.open ? " flux-open" : "") +
     (block.speculative ? " flux-speculative" : "");
 
-  // Tag-level overrides only apply to a settled block (open/speculative blocks
-  // have partial HTML we must not feed to the parser).
-  if (components && !block.open && !block.speculative) {
+  // Tag-level / inline overrides apply to OPEN and speculative blocks too, not
+  // just settled ones: the streaming tail's HTML is always well-formed (the
+  // parser speculatively closes it), so a design-system renderer (Tailwind
+  // classes on p/ul/li, inline <a>/<code> overrides) stays styled mid-stream
+  // instead of only after a block commits. A supplied `sanitize` runs FIRST
+  // (same as the innerHTML path below), so overrides compose with sanitization on
+  // every block — closing the gap where a component-rendered block previously
+  // bypassed the user sanitizer. The no-`components` fast path is untouched
+  // (byte-identical innerHTML).
+  if (components) {
+    const safe = sanitize ? sanitize(block.html) : block.html;
     return (
       <div className={className}>
-        <SafeHtml html={block.html} components={components} />
+        <SafeHtml html={safe} components={components} />
       </div>
     );
   }

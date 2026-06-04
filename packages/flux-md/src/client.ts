@@ -151,6 +151,21 @@ export class FluxPool {
     return new Promise((resolve, reject) => pw.readyWaiters.push({ resolve, reject }));
   }
 
+  /**
+   * Eagerly spin up one worker so WASM init starts BEFORE the first stream —
+   * taking the one-time init off the first-token critical path (e.g. call
+   * `getDefaultPool().warm()` on app load / route entry). Reuses a live worker
+   * if one exists; the warm worker is the one the first stream attaches to (it
+   * has spare capacity), so the work is not wasted. Resolves when that worker has
+   * finished initializing WASM; rejects if init fails fatally. Browser-only (it
+   * constructs a `Worker`).
+   */
+  warm(): Promise<void> {
+    const live = this.workers.filter((w) => !w.failed);
+    const pw = live[0] ?? this.create();
+    return this.whenWorkerReady(pw);
+  }
+
   /** Terminate every worker (test teardown / full shutdown). */
   disposeAll(): void {
     for (const pw of this.workers) {
@@ -286,6 +301,11 @@ export class FluxClient {
   private onError?: (err: { message: string; fatal?: boolean }) => void;
   private onBlock?: (block: Block) => void;
   private attached = true;
+  // Diff baseline for setContent(): the full string fed in so far, and whether
+  // it has been finalized. Cleared by reset()/reattach() (the worker drops the
+  // parser there, so the baseline is stale and the document must be re-fed).
+  private lastContent = "";
+  private contentDone = false;
 
   // Perf
   private appendedBytes = 0;
@@ -446,6 +466,53 @@ export class FluxClient {
     }
   }
 
+  /**
+   * Drive the parser from a CONTROLLED full string instead of manual appends.
+   * Pass the whole document-so-far each time; setContent diffs it against the
+   * last value and does the minimal work:
+   *   - **prefix-extension** (the streaming-growth case) → append only the new
+   *     suffix, so committed blocks stay put and only the active tail re-parses;
+   *   - **any other change** (e.g. a finished stream swapped for a re-processed
+   *     final string) → `reset()` + reparse the whole new string.
+   *
+   * This is the first-class bridge for UIs that hold a streaming message as a
+   * single growing string prop (the common React shape) — no hand-rolled diff,
+   * no readiness gate (appends before WASM is ready are buffered). Pass
+   * `{ done: true }` once the content is final to `finalize()` (idempotent within
+   * a generation; a content change *after* done reopens the stream via a fresh
+   * reparse, since a finalized parser is terminal and can't be appended to).
+   * Drive a given client with `setContent` *or* manual `append()`/`finalize()`,
+   * not both — they share the internal diff baseline.
+   *
+   * v1 note: the non-prefix path is a full reparse, not a partial rewind —
+   * committed blocks are frozen, so there is no truncate-to-offset. For the
+   * common case (append-growth + one end-of-stream swap) that is optimal. A
+   * transform that rewrites *earlier* bytes on every update is an anti-pattern
+   * here (it forces a reparse each tick); do that enrichment at render time via
+   * `components` instead, keeping the source append-only.
+   */
+  setContent(content: string, opts?: { done?: boolean }) {
+    if (content !== this.lastContent) {
+      // Fast path appends the delta into the EXISTING parser — but a parser that
+      // was already finalized ({ done: true }) is terminal: the core drops any
+      // further append. So gate the fast path on !contentDone; reopening a
+      // finalized stream (or any divergence) falls through to reset()+reparse,
+      // which frees the dead parser and rebuilds a fresh one.
+      if (!this.contentDone && content.startsWith(this.lastContent)) {
+        this.append(content.slice(this.lastContent.length));
+      } else {
+        this.reset(); // diverged, or reopening a finalized stream — rebuild
+        this.append(content);
+      }
+      this.lastContent = content;
+      this.contentDone = false;
+    }
+    if (opts?.done && !this.contentDone) {
+      this.finalize();
+      this.contentDone = true;
+    }
+  }
+
   reset() {
     this.store = emptyBlockStore();
     this.appendedBytes = 0;
@@ -455,6 +522,8 @@ export class FluxClient {
     this.firstAppendMs = 0;
     this.retainedBytes = 0;
     this.wasmMemoryBytes = 0;
+    this.lastContent = ""; // setContent baseline: the worker drops the parser here
+    this.contentDone = false;
     // Same streamId + worker — the worker frees and lazily recreates the parser.
     const pw = this.ensureAcquired();
     this.pool.send(pw, { type: "reset", streamId: this.streamId });
@@ -481,6 +550,11 @@ export class FluxClient {
    */
   reattach() {
     if (this.attached) return;
+    // The prior destroy()→dispose dropped this stream's parser, so setContent's
+    // diff baseline is stale — clear it so the next setContent re-feeds the whole
+    // document (StrictMode dev double-mount on the SAME instance).
+    this.lastContent = "";
+    this.contentDone = false;
     if (!this.pw) {
       // Never acquired (e.g. constructed during SSR, first real mount on client).
       // No prior pool slot to re-register; just mark attached. The next

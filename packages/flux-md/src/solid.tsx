@@ -1,5 +1,6 @@
-import { onCleanup, onMount, type JSX } from "solid-js";
-import type { FluxClient } from "./client";
+import { createEffect, onCleanup, onMount, type JSX } from "solid-js";
+import { FluxClient } from "./client";
+import type { ParserConfig } from "./types-core";
 import { mountFluxMarkdown, type MountHandle, type MountOptions } from "./dom";
 
 /**
@@ -72,4 +73,73 @@ export function FluxMarkdown(props: FluxMarkdownProps): JSX.Element {
   // Snapshot props once on mount; the renderer drives itself from here on.
   onMount(() => mountSolid(() => props, container, onCleanup));
   return container;
+}
+
+/**
+ * Wire a controlled string to a freshly-constructed {@link FluxClient}, free of
+ * Solid's reactive runtime so it runs (and is tested) under any toolchain. The
+ * registrars are injected: the public {@link createFluxMarkdownString} passes
+ * Solid's real `createEffect` / `onCleanup`; tests pass hand-rolled stand-ins
+ * (mirroring how {@link mountSolid} takes `registerCleanup`).
+ *
+ * Ownership DIFFERS from {@link mountSolid}: this constructs the client and so
+ * `registerCleanup`s `client.destroy()` — it OWNS the worker/stream. `config` is
+ * read ONCE here (the constructor treats it as immutable); `getContent()` and
+ * `streaming` are read INSIDE the effect so the effect tracks them reactively.
+ */
+export function setupFluxMarkdownString(
+  getContent: () => string,
+  getOptions: (() => { config?: ParserConfig; streaming?: boolean }) | undefined,
+  registerEffect: (fn: () => void) => void,
+  registerCleanup: (fn: () => void) => void,
+): FluxClient {
+  // One client per helper instance. Constructor is worker-free → SSR-safe; the
+  // worker is spawned lazily by the first setContent → append, which only runs
+  // inside the effect below. config is read once and is immutable thereafter.
+  const client = new FluxClient({ config: getOptions?.()?.config });
+
+  // Reconcile the parser to the controlled string. setContent diffs internally,
+  // so this is correct whether `content` grows by a token or is swapped wholesale.
+  // `streaming === false` (never `!streaming`) → only an explicit false finalizes;
+  // an absent/true flag leaves the stream open (inferring "done" from an absent
+  // flag would re-finalize on every token — an O(n²) reparse trap).
+  registerEffect(() => {
+    client.setContent(getContent(), { done: getOptions?.()?.streaming === false });
+  });
+
+  // This helper OWNS the client (unlike the client-based bindings above), so it
+  // destroys it on cleanup — freeing its pool slot.
+  registerCleanup(() => client.destroy());
+
+  return client;
+}
+
+/**
+ * Own a {@link FluxClient} driven by a CONTROLLED full string — the Solid
+ * analogue of React's `useFluxMarkdownString`, for UIs that hold a streaming
+ * message as a single growing string (a signal/memo) rather than as a stream.
+ * Pass an accessor for the whole document-so-far; on every change
+ * {@link FluxClient.setContent} diffs it and does the minimal work (a
+ * prefix-extension appends only the delta; any divergence resets and reparses).
+ *
+ * Pass `streaming: false` (via `getOptions`) once the content is final to
+ * finalize the stream and commit its last block (only then does a finished code
+ * fence highlight + show its copy button). If `streaming` is omitted or `true`
+ * the stream is left OPEN. `config` is read once at construction and is
+ * immutable, so it is not a change trigger.
+ *
+ * **Returns the owned client** — pass it to `<FluxMarkdown client={client} />`
+ * (and read `outline()` / `getMetrics()` off it). The client is constructed in
+ * the body (constructor is worker-free → SSR-safe) and destroyed on cleanup.
+ *
+ * SSR-safety: `setContent` is what spawns a Worker (via `append`), so it runs
+ * ONLY inside a `createEffect` — Solid does not run user effects during
+ * `renderToString`, so nothing touches a Worker on the server render path (the
+ * body only constructs the worker-free client).
+ */
+export function createFluxMarkdownString(
+  getContent: () => string,
+  getOptions?: () => { config?: ParserConfig; streaming?: boolean },
+): FluxClient {
+  return setupFluxMarkdownString(getContent, getOptions, createEffect, onCleanup);
 }

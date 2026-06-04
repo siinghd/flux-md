@@ -175,3 +175,108 @@ test("unmount tears down the renderer and NEVER calls client.destroy()", () => {
 
   destroySpy.mockRestore();
 });
+
+// --------------------------------------------------------------------------
+// useFluxMarkdownString — the controlled-string composable.
+//
+// It OWNS an internally-constructed FluxClient on the process-wide default pool
+// (no pool injection), so the FakeWorker harness above can't drive it and a real
+// setContent would spawn a real bun Worker. We therefore prove the WIRING only —
+// the setContent diff/finalize semantics are client.ts's job and already tested.
+// We stub FluxClient.prototype.setContent with a NO-OP (so nothing touches a
+// Worker) and spy on destroy, then assert the composable calls them correctly.
+// A prototype spy intercepts the composable's instance because the test imports
+// FluxClient from the same module the composable imports.
+// --------------------------------------------------------------------------
+
+// Mount a wrapper that drives the composable through reactive refs, exposing them
+// so a test can mutate content/streaming and observe the resulting setContent
+// calls. Mirrors the "changing the components prop" wrapper pattern above.
+function mountStringComposable(initial: { content: string; streaming?: boolean }) {
+  const host = document.createElement("div");
+  const content = vue.ref(initial.content);
+  const streaming = vue.ref<boolean | undefined>(initial.streaming);
+  const wrapper = vue.defineComponent({
+    setup() {
+      adapter.useFluxMarkdownString(
+        () => content.value,
+        () => ({ streaming: streaming.value }),
+      );
+      return () => vue.h("div");
+    },
+  });
+  const app = vue.createApp(wrapper);
+  app.mount(host);
+  return { app, content, streaming };
+}
+
+test("useFluxMarkdownString feeds content on mount (done=false when streaming omitted)", () => {
+  const setContentSpy = spyOn(FluxClient.prototype, "setContent").mockImplementation(() => {});
+  const destroySpy = spyOn(FluxClient.prototype, "destroy");
+
+  const { app } = mountStringComposable({ content: "# hi" });
+
+  // onMounted ran → one feed, with the controlled string and done:false (streaming
+  // omitted must NOT finalize — that is the O(n²) reparse trap).
+  expect(setContentSpy).toHaveBeenCalledTimes(1);
+  expect(setContentSpy).toHaveBeenLastCalledWith("# hi", { done: false });
+
+  app.unmount();
+  // The composable OWNS its client (unlike useFluxMarkdown) → it destroys it.
+  expect(destroySpy).toHaveBeenCalledTimes(1);
+
+  setContentSpy.mockRestore();
+  destroySpy.mockRestore();
+});
+
+test("useFluxMarkdownString re-feeds on content growth and finalizes when streaming flips false", async () => {
+  const setContentSpy = spyOn(FluxClient.prototype, "setContent").mockImplementation(() => {});
+  const destroySpy = spyOn(FluxClient.prototype, "destroy");
+
+  const { app, content, streaming } = mountStringComposable({ content: "# hi", streaming: true });
+
+  expect(setContentSpy).toHaveBeenCalledTimes(1);
+  expect(setContentSpy).toHaveBeenLastCalledWith("# hi", { done: false });
+
+  // Content grows → non-immediate watch fires → another feed, still open.
+  content.value = "# hi\nmore";
+  await vue.nextTick();
+  expect(setContentSpy).toHaveBeenCalledTimes(2);
+  expect(setContentSpy).toHaveBeenLastCalledWith("# hi\nmore", { done: false });
+
+  // streaming flips to false → watch fires → finalize via done:true.
+  streaming.value = false;
+  await vue.nextTick();
+  expect(setContentSpy).toHaveBeenCalledTimes(3);
+  expect(setContentSpy).toHaveBeenLastCalledWith("# hi\nmore", { done: true });
+
+  app.unmount();
+  expect(destroySpy).toHaveBeenCalledTimes(1);
+
+  setContentSpy.mockRestore();
+  destroySpy.mockRestore();
+});
+
+test("useFluxMarkdownString does NOT feed during SSR (setContent untouched on the server)", async () => {
+  const setContentSpy = spyOn(FluxClient.prototype, "setContent").mockImplementation(() => {});
+  const { renderToString } = await import("vue/server-renderer");
+
+  const wrapper = vue.defineComponent({
+    setup() {
+      // setup() runs on the server: constructs the client (worker-free) but the
+      // non-immediate watch and onMounted never fire there, so setContent — the
+      // only worker-spawning call — must not be invoked.
+      adapter.useFluxMarkdownString(
+        () => "# server",
+        () => ({ streaming: false }),
+      );
+      return () => vue.h("div");
+    },
+  });
+
+  const html = await renderToString(vue.createSSRApp(wrapper));
+  expect(typeof html).toBe("string");
+  expect(setContentSpy).not.toHaveBeenCalled();
+
+  setContentSpy.mockRestore();
+});

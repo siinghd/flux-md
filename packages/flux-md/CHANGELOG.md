@@ -4,6 +4,58 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.13.0 — 2026-06-04
+
+### Added
+
+- **`FluxClient.setContent(content, { done })` + controlled-string helpers for
+  every binding** — a first-class bridge for UIs that hold a streaming message as
+  a single growing/controlled string prop (rather than a stream). setContent diffs
+  against the last value: a **prefix-extension** appends only the delta (committed
+  blocks stay put); any **divergence** (e.g. a finished message swapped for a
+  re-processed final string) resets and reparses. No hand-rolled diff, no
+  readiness gate. Pass `{ done: true }` / `streaming: false` to finalize. The
+  framework-neutral `setContent` is wrapped by an idiomatic, client-owning helper
+  per framework — React `useFluxMarkdownString`, Vue `useFluxMarkdownString`
+  (composable), Solid `createFluxMarkdownString`, Svelte `fluxMarkdownString`
+  (action) — each SSR-safe (feeds only in the client-only lifecycle hook). Vanilla
+  / `<flux-markdown>` use a caller-owned client + `setContent` directly.
+- **`FluxPool.warm()`** — eagerly initialize one worker (`getDefaultPool().warm()`
+  on app load) so the one-time WASM init is off the first-token critical path; the
+  warm worker is the one the first stream attaches to, so the work isn't wasted.
+- **Custom-component & `sanitize` overrides now apply to the OPEN (streaming)
+  block**, not just settled ones — a design-system renderer (Tailwind classes on
+  `p`/`ul`/`li`, inline `<a>`/`<code>` overrides) stays styled mid-stream instead
+  of only after a block commits. This also closes a gap where a supplied
+  `sanitize` previously bypassed component-rendered blocks; it now runs on every
+  block. The no-`components` path is unchanged (byte-identical `innerHTML`).
+
+### Fixed
+
+- **Worker no longer drops the first chunk(s) under a slow WASM load.** The
+  worker buffered appends but did not gate parser creation on WASM readiness, so
+  an append that arrived before `init()` resolved would call `new FluxParser()`
+  against an uninitialized module — throwing `fluxparser_new of undefined` and
+  silently losing that chunk. Appends now accumulate (and `finalize` defers)
+  until init completes, then drain in order. Surfaced on a fresh Next.js /
+  Turbopack production load, where the worker+WASM fetch is slow enough to lose
+  the race; the fix is bundler-agnostic. The worker's message/readiness state
+  machine was extracted to `worker-core.ts` (dependency-injected, like
+  `FluxPool`'s worker factory) and now has a unit test (`worker-core.test.ts`)
+  covering the gate — buffer-until-ready, drain order, finalize/reset before
+  ready — so the regression can't silently return.
+- **React 19 / Next.js type compatibility.** The shipped source used the global
+  `JSX.Element`, which React 19's `@types/react` removed — a consumer's
+  `next build` type-checks flux-md's source (it ships as `.tsx`) and failed with
+  *"Cannot find namespace 'JSX'"*. Now uses `ReactElement`, which type-checks
+  under `@types/react` 18 **and** 19.
+
+### Docs
+
+- **Next.js (App Router) is now documented and verified** (Turbopack + webpack,
+  Next.js 16, `next dev` and `next build`): add flux-md to `transpilePackages`
+  and use it from a `"use client"` component. See the README's Next.js callout.
+
 ## 0.12.0 — 2026-05-30
 
 ### Added

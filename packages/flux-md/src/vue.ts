@@ -1,6 +1,7 @@
 import { defineComponent, h, onMounted, onUnmounted, ref, watch } from "vue";
 import type { PropType, Ref } from "vue";
-import type { FluxClient } from "./client";
+import { FluxClient } from "./client";
+import type { ParserConfig } from "./types-core";
 import { mountFluxMarkdown, type DomComponents, type MountHandle, type MountOptions } from "./dom";
 
 /**
@@ -98,3 +99,59 @@ export const FluxMarkdown = defineComponent({
     return () => h("div", { ref: container });
   },
 });
+
+/**
+ * Own a {@link FluxClient} driven by a CONTROLLED full string — the Vue analogue
+ * of React's `useFluxMarkdownString`, for UIs that hold a streaming message as a
+ * single growing string (a `ref`/computed) rather than as a stream. Pass a getter
+ * for the whole document-so-far; on every change {@link FluxClient.setContent}
+ * diffs it and does the minimal work (prefix-extension appends only the delta;
+ * any divergence resets and reparses).
+ *
+ * Pass `streaming: false` (via `getOptions`) once the content is final to
+ * finalize the stream and commit its last block. If `streaming` is omitted or
+ * `true` the stream is left OPEN — inferring "done" from an absent flag is
+ * deliberately avoided (it would re-finalize on every token for callers that
+ * grow the string without the flag — an O(n²) reparse trap). `config` is read
+ * once at construction and is immutable thereafter, so it is not a change
+ * trigger.
+ *
+ * **Returns the owned client** — a deliberate divergence from {@link useFluxMarkdown}
+ * (which returns `{ container }`). Mirroring React's hook, this composes with the
+ * component as `<FluxMarkdown :client="client" />` (and lets you read
+ * `outline()` / `getMetrics()` off it). The client is created in the composable
+ * body (constructor is worker-free → SSR-safe) and destroyed on unmount.
+ *
+ * SSR-safety: `setContent` is what spawns a Worker (via `append`), so it is
+ * called ONLY in `onMounted` and a NON-immediate `watch` — never during the
+ * server render path (`setup` constructs the client but neither lifecycle hook
+ * nor the non-immediate watch fires on the server).
+ */
+export function useFluxMarkdownString(
+  getContent: () => string,
+  getOptions?: () => { config?: ParserConfig; streaming?: boolean },
+): FluxClient {
+  // One client per composable instance. Constructor is worker-free, so this is
+  // safe to run in setup() during SSR; config is read once and is immutable.
+  const client = new FluxClient({ config: getOptions?.()?.config });
+
+  // Reconcile the parser to the controlled string. setContent diffs internally,
+  // so this is correct whether `content` grows by a token or is swapped wholesale.
+  // `streaming === false` (never `!streaming`) → only an explicit false finalizes;
+  // an absent/true flag leaves the stream open.
+  const apply = (): void => {
+    client.setContent(getContent(), { done: getOptions?.()?.streaming === false });
+  };
+
+  // Initial feed + every change. NOT { immediate: true }: an immediate watch runs
+  // in setup() — i.e. during SSR — and would spawn a Worker on the server. The
+  // initial feed is onMounted (client-only); the watch covers later changes.
+  onMounted(apply);
+  watch([getContent, () => getOptions?.()?.streaming], apply);
+
+  // This composable OWNS the client (unlike useFluxMarkdown, which takes one), so
+  // it destroys it here. Vue auto-stops the watcher on unmount.
+  onUnmounted(() => client.destroy());
+
+  return client;
+}
