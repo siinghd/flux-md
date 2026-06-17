@@ -781,18 +781,126 @@ fn is_email_like(s: &str) -> bool {
 // Inline raw HTML
 // ---------------------------------------------------------------------
 
+/// Tags that are NEVER rendered in allow-all sanitize mode — script/exec/resource
+/// vectors and content-as-raw-text elements. (In restrict mode they're simply not
+/// in the allowlist, so they escape; this set is what "allow all" carves out.)
+const DANGEROUS_HTML_TAGS: &[&[u8]] = &[
+    b"script", b"style", b"iframe", b"object", b"embed", b"base", b"link", b"meta",
+    b"noscript", b"template", b"title", b"textarea", b"form", b"input", b"button",
+    b"select", b"option", b"frame", b"frameset", b"applet", b"svg", b"math",
+    b"audio", b"video", b"source", b"track", b"canvas",
+    // Raw-text / escapable-raw-text elements: a browser treats everything after
+    // them as unparsed text, so rendering one corrupts the rest of the DOM (and
+    // `<plaintext>` is unclosable). Drop them in allow-all mode.
+    b"xmp", b"plaintext", b"noembed", b"noframes", b"listing",
+];
+
 fn try_inline_html(bytes: &[u8], start: usize, opts: &RenderOpts, out: &mut String) -> Option<usize> {
     let consumed = match_inline_html(bytes, start)?;
+    let token = &bytes[start..start + consumed];
+
+    // HTML comments have no visible representation: drop them. The one exception
+    // is bare `unsafe_html` pass-through (no sanitizer engaged), which keeps them
+    // verbatim for CommonMark fidelity — a browser ignores them either way.
+    if token.starts_with(b"<!--") {
+        if opts.unsafe_html && !opts.html_sanitize {
+            out.push_str(std::str::from_utf8(token).ok()?);
+        }
+        return Some(start + consumed);
+    }
+
+    if opts.html_sanitize {
+        sanitize_inline_html(token, opts, out);
+        return Some(start + consumed);
+    }
+
     if opts.unsafe_html {
-        let raw = std::str::from_utf8(&bytes[start..start + consumed]).ok()?;
-        out.push_str(raw);
+        out.push_str(std::str::from_utf8(token).ok()?);
     } else {
         // Escape it.
-        for &b in &bytes[start..start + consumed] {
+        for &b in token {
             push_escaped(b, out);
         }
     }
     Some(start + consumed)
+}
+
+/// Extract a tag's name range from a matched inline-HTML token, plus whether
+/// it's a close tag. `None` for non-tag tokens (PI / CDATA / declaration /
+/// malformed). The range is over ASCII bytes, so it is a valid `&str` boundary.
+fn inline_tag_name(token: &[u8]) -> Option<(core::ops::Range<usize>, bool)> {
+    if token.first() != Some(&b'<') {
+        return None;
+    }
+    let is_close = token.get(1) == Some(&b'/');
+    let name_start = if is_close { 2 } else { 1 };
+    let mut i = name_start;
+    while i < token.len() && (token[i].is_ascii_alphanumeric() || matches!(token[i], b'-' | b':')) {
+        i += 1;
+    }
+    if i == name_start {
+        return None;
+    }
+    Some((name_start..i, is_close))
+}
+
+/// Render one inline raw-HTML token under the safe sanitizer (`html_sanitize`).
+/// Drop-list tags and (in allow-all mode) dangerous tags are removed; allowed
+/// tags render natively with sanitized attributes; everything else is escaped.
+fn sanitize_inline_html(token: &[u8], opts: &RenderOpts, out: &mut String) {
+    let Some((name_range, is_close)) = inline_tag_name(token) else {
+        return; // PI / CDATA / declaration / malformed: drop in sanitize mode
+    };
+    let name = &token[name_range.clone()];
+    // Explicit drop-list removes the tag entirely (markup gone; any text between
+    // an open/close pair stays as inert text).
+    if opts.html_drop.iter().any(|t| t.as_bytes().eq_ignore_ascii_case(name)) {
+        return;
+    }
+    // The dangerous set is NON-OVERRIDABLE: a script/iframe/svg/… is dropped in
+    // BOTH allow-all and restrict mode, even if explicitly allowlisted — a caller
+    // who truly wants raw script uses `unsafe_html`, not the sanitizer. Dropping
+    // (rather than escaping) leaves any open/close pair's body as inert text.
+    if DANGEROUS_HTML_TAGS.iter().any(|d| d.eq_ignore_ascii_case(name)) {
+        return;
+    }
+    // Allow-all renders every (non-dangerous) tag; restrict renders only the
+    // allowlisted ones and escapes the rest (visible as literal text, never
+    // executed).
+    if !opts.html_allowlist.is_empty()
+        && !opts.html_allowlist.iter().any(|t| t.as_bytes().eq_ignore_ascii_case(name))
+    {
+        for &b in token {
+            push_escaped(b, out);
+        }
+        return;
+    }
+    // Validate the whole token to UTF-8 once; the tag name is an ASCII sub-slice
+    // of it, so it can be sliced out without a second validation pass.
+    let token_str = std::str::from_utf8(token).unwrap_or("");
+    let name_str = token_str.get(name_range).unwrap_or("");
+    if is_close {
+        out.push_str("</");
+        out.push_str(name_str);
+        out.push('>');
+        return;
+    }
+    out.push('<');
+    out.push_str(name_str);
+    for (k, v) in sanitize_attrs(token_str) {
+        out.push(' ');
+        out.push_str(&k);
+        out.push_str("=\"");
+        escape_attr(&v, out);
+        out.push('"');
+    }
+    // Preserve an author's self-closing slash (harmless for void elements; keeps
+    // non-void self-closes balanced).
+    if token.ends_with(b"/>") {
+        out.push_str(" />");
+    } else {
+        out.push('>');
+    }
 }
 
 fn match_inline_html(bytes: &[u8], start: usize) -> Option<usize> {

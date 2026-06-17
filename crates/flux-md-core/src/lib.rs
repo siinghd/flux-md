@@ -165,6 +165,17 @@ impl FluxParser {
     pub fn set_inline_component_tags(&mut self, tags: Vec<String>) {
         self.inner.set_inline_component_tags(tags);
     }
+
+    /// Engage the safe raw-HTML sanitizer. When `on`, inline raw HTML renders
+    /// sanitized without full unsafe HTML: `allow` empty = allow all tags except
+    /// a built-in dangerous set (`script`, `style`, `iframe`, …); `allow`
+    /// non-empty = only those render (others escaped); `drop` tags are removed
+    /// entirely; HTML comments are dropped; every rendered tag's attributes are
+    /// sanitized. Off by default (raw-HTML handling unchanged).
+    #[wasm_bindgen(js_name = setHtmlSanitize)]
+    pub fn set_html_sanitize(&mut self, on: bool, allow: Vec<String>, drop: Vec<String>) {
+        self.inner.set_html_sanitize(on, allow, drop);
+    }
 }
 
 impl Default for FluxParser {

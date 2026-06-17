@@ -262,6 +262,26 @@ export interface ParserConfig {
    */
   inlineComponentTags?: string[];
   /**
+   * Opt-in **safe raw-HTML allowlist**. Setting this (even to `[]`) engages a
+   * sanitizer that renders a safe subset of *inline* raw HTML **without**
+   * `unsafeHtml`: an **empty** array means "allow all tags except a built-in
+   * dangerous set" (`script`, `style`, `iframe`, `object`, `embed`, `form`,
+   * `input`, `svg`, …); a **non-empty** array renders only those tags (e.g.
+   * `["br","sub","sup"]`) and escapes the rest. Every rendered tag's attributes
+   * are sanitized (event handlers dropped, dangerous URL schemes → `#`), and HTML
+   * comments are dropped. Block-level raw HTML stays escaped (sanitize is
+   * inline-scoped for now). Unset/omitted = off (raw HTML handling unchanged).
+   * Matching is case-insensitive. See also {@link dropHtmlTags}.
+   */
+  htmlAllowlist?: string[];
+  /**
+   * Tags removed entirely (markup dropped; any text between an open/close pair
+   * stays as inert text) — e.g. app marker tags, or belt-and-suspenders
+   * `["script","style"]`. Setting this (even to `[]`) also engages the safe
+   * raw-HTML sanitizer (see {@link htmlAllowlist}). Case-insensitive.
+   */
+  dropHtmlTags?: string[];
+  /**
    * Opt-in structured table data. When on, a `Table` block's `kind.data` is
    * populated with `{ headers, rows, aligns }` (each cell `{ text, html }`) so a
    * consumer can build a sort/filter/transpose/chart/CSV toolbar from DATA — no

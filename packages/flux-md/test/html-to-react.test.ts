@@ -483,6 +483,16 @@ test("self-closing / empty inline component yields nullish children (so `childre
   expect(out).toContain("<span>AAPL</span>");
 });
 
+test("safeStyle drops url()/position:fixed/expression but keeps safe declarations", () => {
+  // flux's own table-alignment style must survive.
+  expect(render(htmlToReact('<td style="text-align:left">x</td>', {}))).toContain("text-align:left");
+  // beacon + clickjack + legacy-exec vectors are stripped; safe decls remain.
+  const out = render(htmlToReact('<p style="background:url(https://evil/x);position:fixed;color:red">x</p>', {}));
+  expect(out).not.toContain("evil");
+  expect(out).not.toContain("fixed");
+  expect(out).toContain("color:red");
+});
+
 test("drops inline event-handler attributes", () => {
   const out = render(htmlToReact('<a href="/x" onclick="alert(1)" onmouseover="alert(2)">x</a>', {}));
   expect(out).not.toContain("onclick");

@@ -558,6 +558,8 @@ const client = new FluxClient({
     unsafeHtml: false,    // pass raw HTML through (default false — keep it false for untrusted input)
     componentTags: ["Thinking", "Callout"], // BLOCK custom tags w/ markdown inside (default none)
     inlineComponentTags: ["tik", "cite"],   // INLINE custom tags (chips/citations) w/ markdown inside (default none)
+    htmlAllowlist: ["br", "sub", "sup"],    // safe raw-HTML sanitizer: [] = allow all but dangerous; list = only those (default off)
+    dropHtmlTags: [],                        // tags removed entirely (comments always dropped when sanitizing; default off)
     blockData: true,      // opt-in structured kind.data per block (default false — see "Structured block data")
   },
 });
@@ -592,6 +594,9 @@ When to enable each flag:
 - `inlineComponentTags: ["tik", …]` — same idea for **inline** custom elements
   that sit inside a paragraph, heading, list item, or **table cell** (ticker
   chips, citations, `@mentions`). See [Inline component tags](#inline-component-tags).
+- `htmlAllowlist` / `dropHtmlTags` — render a **safe subset of raw HTML** (e.g.
+  `<br>`, `<sub>`, `<sup>`) natively without `unsafeHtml`, drop specific tags, and
+  drop HTML comments. See [Safe raw HTML](#safe-raw-html).
 
 **Footnotes** (`gfmFootnotes`) work in streaming with one honest caveat: a
 `[^1]` reference renders speculatively the moment it's seen (committed blocks
@@ -825,6 +830,37 @@ surrounding content.
 > override `a` to render a chip when the href scheme matches. It's XSS-safe and
 > renders inline-in-cells too — `inlineComponentTags` simply replaces that
 > workaround with first-class inline elements.
+
+### Safe raw HTML
+
+LLMs emit a little raw HTML — `<br>`, `<sub>`/`<sup>`, `<mark>`, and HTML comments
+as markers (`<!--mk:id-->`). `unsafeHtml` is all-or-nothing; instead opt into a
+**sanitizer** that renders a safe subset natively. Setting `htmlAllowlist` and/or
+`dropHtmlTags` (even to `[]`) engages it:
+
+```ts
+// Render only these inline tags; escape everything else:
+new FluxClient({ config: { htmlAllowlist: ["br", "sub", "sup", "mark"] } });
+
+// Or allow everything except a built-in dangerous set:
+new FluxClient({ config: { htmlAllowlist: [] } });
+```
+
+- **HTML comments are dropped** — no more `<!--mk:id-->` surfacing as escaped text
+  — in every mode except bare `unsafeHtml` pass-through.
+- **`htmlAllowlist: ["br", …]`** renders only those inline tags; everything else is
+  escaped. **`htmlAllowlist: []`** (empty) allows *all* tags **except a built-in
+  dangerous set** (`script`, `style`, `iframe`, `object`, `embed`, `form`, `svg`,
+  `xmp`, `plaintext`, … — **non-overridable**: allowlisting one still drops it).
+- **`dropHtmlTags: ["mk", …]`** removes those tags entirely (markup gone; inner
+  text stays as inert text).
+- Every rendered tag's **attributes are sanitized**: `on*` handlers and `style`
+  (a CSS beacon / clickjacking vector) are dropped, and dangerous URL schemes
+  (`javascript:`, …, including multi-encoded) become `#`.
+- **Scope:** *inline* raw HTML. Block-level raw HTML stays escaped for now (use
+  `unsafeHtml` **without** the sanitizer to render block HTML — when the sanitizer
+  is engaged, block HTML stays escaped even if `unsafeHtml` is also on). Tag
+  matching is case-insensitive.
 
 ### Types
 

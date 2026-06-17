@@ -85,6 +85,13 @@ pub struct RenderOpts {
     /// — markdown inner, sanitized attributes — for a JSX/DOM layer to dispatch
     /// via `components[tag]`. Empty (default) = off (inline output unchanged).
     pub inline_component_tags: Vec<Box<str>>,
+    /// Safe raw-HTML sanitizer (see `StreamParser::set_html_sanitize`). When
+    /// `html_sanitize` is on, inline raw HTML is rendered through the allow/drop
+    /// lists (dangerous tags + comments removed, attrs sanitized) instead of
+    /// escaped/passed-through. Off (default) = unchanged.
+    pub html_sanitize: bool,
+    pub html_allowlist: Vec<Box<str>>,
+    pub html_drop: Vec<Box<str>>,
 }
 
 impl RenderOpts {
@@ -1471,7 +1478,23 @@ pub(crate) fn strip_inline_html(html: &str) -> String {
 }
 
 fn render_html_block(slice: &str, opts: &RenderOpts, out: &mut String) {
-    if opts.unsafe_html {
+    // A comment-ONLY HTML block has no visible representation: drop it (renders
+    // to nothing), so `<!--marker-->` on its own line never surfaces as an
+    // escaped code block. Only drop when nothing but whitespace follows the
+    // comment's `-->` (otherwise trailing content would be lost — e.g.
+    // `<!-- x --> text`). The one exception is bare `unsafe_html` pass-through
+    // (no sanitizer engaged), which keeps it verbatim for CommonMark fidelity.
+    let ts = slice.trim_start();
+    let comment_only = ts.starts_with("<!--")
+        && ts.find("-->").is_some_and(|e| ts[e + 3..].trim().is_empty());
+    if comment_only && !(opts.unsafe_html && !opts.html_sanitize) {
+        return;
+    }
+    // The sanitizer takes precedence over `unsafe_html`: when it's engaged,
+    // block-level raw HTML is escaped (block sanitize is not yet implemented), so
+    // enabling the inline sanitizer can never let a block `<script>` render raw
+    // even if `unsafe_html` is also on.
+    if opts.unsafe_html && !opts.html_sanitize {
         let trimmed = slice.trim_end_matches(|c: char| c == '\n' || c == '\r');
         out.push_str(trimmed);
         // CommonMark output keeps a trailing newline after HTML blocks so

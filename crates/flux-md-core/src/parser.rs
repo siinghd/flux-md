@@ -136,6 +136,15 @@ pub struct StreamParser {
     /// real custom element (markdown inner, sanitized attrs) so a JSX/DOM layer
     /// dispatches it via `components[tag]`. Empty by default.
     inline_component_tags: Vec<Box<str>>,
+    /// Opt-in safe raw-HTML sanitizer. When `html_sanitize` is on (engaged via a
+    /// configured allow/drop list), inline raw HTML renders SAFELY without full
+    /// `unsafe_html`: `html_allowlist` empty = allow all tags except a built-in
+    /// dangerous set; non-empty = only those render (others escaped); `html_drop`
+    /// tags are removed entirely; comments dropped; every rendered tag's
+    /// attributes are sanitized. All off by default (output unchanged).
+    html_sanitize: bool,
+    html_allowlist: Vec<Box<str>>,
+    html_drop: Vec<Box<str>>,
     /// Fast path for a long open code/math fence at the tail (see [`FenceCache`]).
     fence_cache: Option<FenceCache>,
     /// Fast path for a long open paragraph at the tail (see [`ParagraphCache`]).
@@ -414,6 +423,9 @@ impl StreamParser {
             block_data: false,
             component_tags: Vec::new(),
             inline_component_tags: Vec::new(),
+            html_sanitize: false,
+            html_allowlist: Vec::new(),
+            html_drop: Vec::new(),
             fence_cache: None,
             para_cache: None,
             table_cache: None,
@@ -549,6 +561,21 @@ impl StreamParser {
         self.inline_component_tags = tags.into_iter().map(String::into_boxed_str).collect();
     }
 
+    /// Engage the safe raw-HTML sanitizer and set its allow/drop lists. When on,
+    /// inline raw HTML renders sanitized (no `unsafe_html` needed): `allow` empty
+    /// = allow all non-dangerous tags; non-empty = only those (others escaped);
+    /// `drop` tags are removed entirely; comments dropped; attributes sanitized.
+    pub fn set_html_sanitize(&mut self, on: bool, allow: Vec<String>, drop: Vec<String>) {
+        self.html_sanitize = on;
+        self.html_allowlist = allow.into_iter().map(String::into_boxed_str).collect();
+        self.html_drop = drop.into_iter().map(String::into_boxed_str).collect();
+    }
+
+    pub fn with_html_sanitize(mut self, on: bool, allow: Vec<String>, drop: Vec<String>) -> Self {
+        self.set_html_sanitize(on, allow, drop);
+        self
+    }
+
     pub fn set_unsafe_html(&mut self, on: bool) {
         self.unsafe_html = on;
     }
@@ -667,6 +694,9 @@ impl StreamParser {
             footnote_occ: std::cell::RefCell::new(self.committed_footnote_occurrences.clone()),
             component_tags: self.component_tags.clone(),
             inline_component_tags: self.inline_component_tags.clone(),
+            html_sanitize: self.html_sanitize,
+            html_allowlist: self.html_allowlist.clone(),
+            html_drop: self.html_drop.clone(),
         };
 
         let mut produced: Vec<Block> = Vec::with_capacity(renderable.len());
@@ -1114,6 +1144,9 @@ impl StreamParser {
             footnote_occ: std::cell::RefCell::new(self.committed_footnote_occurrences.clone()),
             component_tags: self.component_tags.clone(),
             inline_component_tags: self.inline_component_tags.clone(),
+            html_sanitize: self.html_sanitize,
+            html_allowlist: self.html_allowlist.clone(),
+            html_drop: self.html_drop.clone(),
         }
     }
 

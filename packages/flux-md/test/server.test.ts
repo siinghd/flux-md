@@ -69,3 +69,36 @@ test.skipIf(!haveWasm)("FluxMarkdownStatic: no components → byte-identical inn
   const out = renderToStaticMarkup(createElement(server.FluxMarkdownStatic, { content: "hi\n" }));
   expect(out).toBe('<div class="flux-md"><div class="flux-block flux-block-paragraph"><p>hi</p></div></div>');
 });
+
+// ----- safe raw-HTML sanitizer (end-to-end via real WASM) -----
+
+test.skipIf(!haveWasm)("HTML comments are dropped, not escaped to visible text", () => {
+  const html = server.renderToString("Cap <!--mk:marketcap--> here\n");
+  expect(html).not.toContain("mk:marketcap");
+  expect(html).not.toContain("&lt;!--");
+  expect(html).not.toContain("<pre>");
+});
+
+test.skipIf(!haveWasm)("htmlAllowlist renders listed inline tags, escapes the rest", () => {
+  const html = server.renderToString("H<sub>2</sub>O <div>x</div>\n", {
+    config: { htmlAllowlist: ["sub", "sup", "br"] },
+  });
+  expect(html).toContain("<sub>2</sub>");
+  expect(html).toContain("&lt;div&gt;");
+});
+
+test.skipIf(!haveWasm)("empty htmlAllowlist = allow all except dangerous", () => {
+  const html = server.renderToString("text <b>x</b> <script>alert(1)</script>\n", {
+    config: { htmlAllowlist: [] },
+  });
+  expect(html).toContain("<b>x</b>");
+  expect(html.toLowerCase()).not.toContain("<script");
+  expect(html).toContain("alert(1)"); // inert text, not executed
+});
+
+test.skipIf(!haveWasm)("dropHtmlTags removes a tag entirely (allow-all otherwise)", () => {
+  const html = server.renderToString("a <mk>x</mk> <b>y</b>\n", { config: { dropHtmlTags: ["mk"] } });
+  expect(html.toLowerCase()).not.toContain("<mk");
+  expect(html).toContain("<b>y</b>");
+  expect(html).toContain("x");
+});

@@ -87,6 +87,12 @@ function makeParser(config?: ParserConfig): FluxParser {
   p.setUnsafeHtml(config?.unsafeHtml ?? false);
   p.setComponentTags(config?.componentTags ?? []);
   p.setInlineComponentTags(config?.inlineComponentTags ?? []);
+  // Engage the safe raw-HTML sanitizer when either list is provided (even []).
+  p.setHtmlSanitize(
+    config?.htmlAllowlist !== undefined || config?.dropHtmlTags !== undefined,
+    config?.htmlAllowlist ?? [],
+    config?.dropHtmlTags ?? [],
+  );
   p.setBlockData(config?.blockData ?? false);
   return p;
 }

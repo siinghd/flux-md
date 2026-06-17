@@ -110,6 +110,27 @@ export function parseStyle(css: string): Record<string, string> {
   return out;
 }
 
+// CSS values that beacon/exfiltrate (`url(`), execute (legacy `expression(`,
+// `-moz-binding`, `behavior:`), or pull external resources (`@import`,
+// `image-set(`). Defense-in-depth: the core sanitizer already drops `style`, but
+// `htmlToReact` is exported and may be handed untrusted HTML directly.
+const DANGEROUS_CSS_VALUE = /url\(|expression\(|image-set\(|-moz-binding|@import|behavior\s*:/i;
+
+/** Strip CSS declarations that can beacon/exfiltrate, execute, or overlay the
+ *  viewport (`position: fixed/sticky` → clickjacking). Safe declarations
+ *  (`text-align`, `color`, …) — including flux's own table-alignment style —
+ *  pass through untouched. */
+function safeStyle(style: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k in style) {
+    const v = style[k];
+    if (DANGEROUS_CSS_VALUE.test(v)) continue;
+    if (k.toLowerCase() === "position" && /\b(?:fixed|sticky)\b/i.test(v)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 /** Parse one opening tag starting at `start` (the `<`). */
 function parseOpenTag(html: string, start: number) {
   let i = start + 1;
@@ -245,7 +266,7 @@ function attrsToProps(tag: string, attrs: Record<string, string | true>, key: st
     // future React behavior.
     if (lower.startsWith("on")) continue;
     if (lower === "style" && typeof value === "string") {
-      props.style = parseStyle(value);
+      props.style = safeStyle(parseStyle(value));
       continue;
     }
     // Neutralize dangerous-scheme URLs (javascript:, vbscript:, data:text/html).

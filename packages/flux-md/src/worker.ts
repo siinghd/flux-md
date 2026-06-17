@@ -31,6 +31,12 @@ const core = new WorkerCore({
     p.setUnsafeHtml(c?.unsafeHtml ?? false);
     p.setComponentTags(c?.componentTags ?? []);
     p.setInlineComponentTags(c?.inlineComponentTags ?? []);
+    // Engage the safe raw-HTML sanitizer when either list is provided (even []).
+    p.setHtmlSanitize(
+      c?.htmlAllowlist !== undefined || c?.dropHtmlTags !== undefined,
+      c?.htmlAllowlist ?? [],
+      c?.dropHtmlTags ?? [],
+    );
     p.setBlockData(c?.blockData ?? false);
     return p;
   },

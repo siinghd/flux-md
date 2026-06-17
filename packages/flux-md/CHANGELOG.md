@@ -4,6 +4,44 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.15.0 — 2026-06-17
+
+### Added
+
+- **Safe raw-HTML sanitizer (`htmlAllowlist` / `dropHtmlTags`)** — render a safe
+  subset of *inline* raw HTML (`<br>`, `<sub>`, `<sup>`, `<mark>`, …) **without**
+  `unsafeHtml`. Setting either list (even to `[]`) engages it: `htmlAllowlist`
+  non-empty renders only those tags (others escaped); **empty allows all tags
+  except a built-in, non-overridable dangerous set** (`script`, `style`,
+  `iframe`, `object`, `embed`, `form`, `svg`, `xmp`, `plaintext`, …);
+  `dropHtmlTags` removes tags entirely. Every rendered tag's attributes are
+  sanitized — `on*` handlers and `style` (a CSS beacon / clickjacking vector)
+  dropped, dangerous URL schemes (incl. multi-encoded) → `#`. Inline-scoped;
+  block-level raw HTML stays escaped. Matching is case-insensitive.
+
+### Fixed
+
+- **HTML comments are dropped instead of escaped to visible text.** `<!--mk:id-->`
+  (a common LLM marker) previously rendered as a literal `&lt;!--…--&gt;` run or a
+  `<pre><code>` block; it now has no visible representation, in every mode except
+  bare `unsafeHtml` pass-through (which keeps it verbatim for CommonMark fidelity —
+  the browser ignores it either way). A comment-led block with trailing content
+  keeps that content (only comment-*only* blocks are dropped).
+
+### Security
+
+- The dangerous-tag set is **non-overridable** (allowlisting `script`/`iframe`/`svg`
+  still drops them), `style` is stripped from every sanitized/component tag, and
+  raw-text elements (`xmp`/`plaintext`/`noembed`/`noframes`/`listing`) are blocked
+  in allow-all mode — closing CSS-exfiltration / clickjacking / DOM-corruption
+  vectors found in adversarial review. The React `htmlToReact` path mirrors the
+  `style` value-filter as defense-in-depth (safe declarations like `text-align`
+  still pass).
+
+Feature-off output is byte-identical except HTML comments now drop (the
+CommonMark/GFM suites run with `unsafeHtml` on, so the 652/GFM floors are
+unaffected).
+
 ## 0.14.0 — 2026-06-17
 
 ### Added

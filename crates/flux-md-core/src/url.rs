@@ -307,6 +307,14 @@ pub fn sanitize_attrs(open_tag: &str) -> Vec<(String, String)> {
         if lname.starts_with("on") {
             continue; // event handler — drop
         }
+        // `style` is dropped like an event handler: an inline style is a CSS
+        // injection vector with no script needed — `background:url(…)` fires an
+        // automatic GET (a beacon / CSS-selector exfiltration channel) and
+        // `position:fixed;inset:0` paints a full-viewport click-stealing overlay.
+        // Untrusted (LLM) markup must not carry one through the sanitizer.
+        if lname == "style" {
+            continue;
+        }
         let decoded = decode_text(raw_value);
         let value = if URL_ATTRS.contains(&lname.as_str()) && is_dangerous_scheme(&decoded) {
             "#".to_string()
@@ -341,8 +349,10 @@ mod attr_tests {
 
     #[test]
     fn drops_event_handlers() {
-        let a = sanitize_attrs("<Thinking onclick=\"steal()\" ONerror='x' onmouseover=y type=ok>");
+        let a = sanitize_attrs("<Thinking onclick=\"steal()\" ONerror='x' onmouseover=y style=\"position:fixed;inset:0\" type=ok>");
         assert!(!names(&a).iter().any(|n| n.to_ascii_lowercase().starts_with("on")), "got {:?}", names(&a));
+        // `style` is dropped too (CSS-injection vector: beacon / clickjack overlay).
+        assert!(!names(&a).iter().any(|n| n.eq_ignore_ascii_case("style")), "style dropped: {:?}", names(&a));
         assert_eq!(get(&a, "type"), Some("ok"));
     }
 
