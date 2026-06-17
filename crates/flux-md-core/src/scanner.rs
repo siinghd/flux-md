@@ -25,6 +25,11 @@ pub struct ScanCtx<'a> {
     /// `<Tag>…</Tag>` whose name is listed scans as a `ComponentBlock` whose body
     /// is markdown. Empty (the default) means the feature is off.
     pub component_tags: &'a [Box<str>],
+    /// Opt-in allowlist of INLINE component tag names. A bare `<tik>` line for
+    /// such a tag (when it is not also a block `component_tag`) must NOT be
+    /// captured as a type-7 HTML block (which would escape it) — it falls through
+    /// to a paragraph where the inline tokenizer dispatches it. Empty = off.
+    pub inline_component_tags: &'a [Box<str>],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,10 +120,16 @@ pub fn scan(input: &str, ctx: ScanCtx<'_>) -> Vec<RawBlock> {
                 continue;
             }
         }
-        if let Some(b) = scan_html_block(bytes, pos) {
-            pos = b.range.end;
-            blocks.push(b);
-            continue;
+        // A bare inline-component open-tag line (allowlisted INLINE-only tag)
+        // must not be captured as a type-7 HTML block (which `unsafe_html=false`
+        // would escape). Skip the HTML-block scan so it falls to a paragraph,
+        // where the inline tokenizer dispatches the component.
+        if !line_starts_inline_component(bytes, pos, ctx.inline_component_tags) {
+            if let Some(b) = scan_html_block(bytes, pos) {
+                pos = b.range.end;
+                blocks.push(b);
+                continue;
+            }
         }
         if let Some(b) = scan_link_ref_def(bytes, pos) {
             pos = b.range.end;
@@ -1049,6 +1060,18 @@ fn line_starts_component(bytes: &[u8], start: usize, tags: &[Box<str>]) -> bool 
     indent <= 3 && component_open_tag(body, tags).is_some()
 }
 
+/// True iff the line at `start` is a bare INLINE-component open tag (an
+/// allowlisted inline tag whose `<tag …>` is the whole line). Such a line skips
+/// type-7 HTML-block capture and falls to a paragraph for inline dispatch.
+fn line_starts_inline_component(bytes: &[u8], start: usize, tags: &[Box<str>]) -> bool {
+    if tags.is_empty() {
+        return false;
+    }
+    let line = line_slice(bytes, start);
+    let (indent, body) = strip_indent(line, 3);
+    indent <= 3 && component_open_tag(body, tags).is_some()
+}
+
 /// HTML blocks of types 1-6 can interrupt a paragraph; type 7 cannot.
 fn scan_html_block_interrupting(bytes: &[u8], start: usize) -> bool {
     if let Some((_, html_type)) = detect_html_block_open(bytes, start) {
@@ -1324,6 +1347,14 @@ fn component_open_tag<'a>(body: &'a [u8], tags: &[Box<str>]) -> Option<(&'a [u8]
         } else if c == b'"' || c == b'\'' {
             in_quote = c;
         } else if c == b'>' {
+            // A BLOCK component open tag must be the whole line (only trailing
+            // whitespace after `>`). Otherwise this is an INLINE occurrence
+            // (e.g. `<tik>AAPL</tik> is up.`) that must not open a block
+            // container and swallow the following blocks — the data-loss bug.
+            // Inline occurrences are handled by the inline tokenizer instead.
+            if !body[i + 1..].iter().all(|&b| matches!(b, b' ' | b'\t' | b'\n' | b'\r')) {
+                return None;
+            }
             // Self-closing iff the last non-space byte before `>` is `/`.
             let mut k = i;
             while k > name_start && matches!(body[k - 1], b' ' | b'\t') {

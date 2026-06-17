@@ -149,13 +149,26 @@ fn scheme_probe(s: &str) -> String {
         .to_string()
 }
 
-/// Whether the URL resolves to a dangerous scheme. **Checked on the DECODED
-/// form**: entities (`&#58;`) and backslash escapes (`\:`) are decoded before a
-/// browser ever parses the URL, so checking the raw text lets
-/// `javascript&#58;alert(1)` and `javascript\:alert(1)` past the filter. We
-/// decode first, strip the chars browsers ignore, then match.
+/// Whether the URL resolves to a dangerous scheme. **Checked on the fully
+/// DECODED form**: entities (`&#58;`) and backslash escapes (`\:`) are decoded
+/// before a browser ever parses the URL, so checking the raw text lets
+/// `javascript&#58;alert(1)` and `javascript\:alert(1)` past the filter. The
+/// decode is **stable** — we peel entity/backslash layers until the string stops
+/// changing — because a value can be decoded more than once on its way to the
+/// DOM (a downstream HTML layer re-decodes, then the browser decodes again), so a
+/// multiply-encoded scheme like `javascript&amp;#58;` (or `&amp;amp;#58;`) must
+/// collapse to its live form before the match. Then strip the chars browsers
+/// ignore and match.
 fn is_dangerous_scheme(decoded: &str) -> bool {
-    let probe = scheme_probe(decoded);
+    let mut s = decoded.to_string();
+    loop {
+        let next = decode_text(&s);
+        if next == s {
+            break;
+        }
+        s = next;
+    }
+    let probe = scheme_probe(&s);
     BAD_SCHEMES.iter().any(|b| probe.starts_with(b))
 }
 
@@ -343,6 +356,12 @@ mod attr_tests {
         assert_eq!(get(&sanitize_attrs("<X href=\"javascript&#58;alert(1)\">"), "href"), Some("#"));
         assert_eq!(get(&sanitize_attrs("<X href=\"javascript\\:alert(1)\">"), "href"), Some("#"));
         assert_eq!(get(&sanitize_attrs("<X href=\"java\tscript:alert(1)\">"), "href"), Some("#"));
+        // DOUBLE / TRIPLE entity-encoding must also be caught: the scheme check
+        // is decode-STABLE (peels layers to a fixpoint), since a downstream HTML
+        // layer and the browser each decode again. (Regression: `&amp;#58;`
+        // previously survived single-decode and reached the DOM as `javascript:`.)
+        assert_eq!(get(&sanitize_attrs("<X href=\"javascript&amp;#58;alert(1)\">"), "href"), Some("#"));
+        assert_eq!(get(&sanitize_attrs("<X href=\"javascript&amp;amp;#58;alert(1)\">"), "href"), Some("#"));
         // Safe URLs pass through (decoded).
         assert_eq!(get(&sanitize_attrs("<X href=\"https://e.com/p?a=1&amp;b=2\">"), "href"), Some("https://e.com/p?a=1&b=2"));
         assert_eq!(get(&sanitize_attrs("<X href=\"/local/path\">"), "href"), Some("/local/path"));

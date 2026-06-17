@@ -80,6 +80,11 @@ pub struct RenderOpts {
     /// Opt-in component-tag allowlist, carried so recursive sub-block scans
     /// (inside lists/quotes/components) recognize nested component tags too.
     pub component_tags: Vec<Box<str>>,
+    /// Opt-in INLINE component-tag allowlist. An allowlisted `<tik>…</tik>` (or
+    /// self-closing `<tik/>`) in inline content renders as a real custom element
+    /// — markdown inner, sanitized attributes — for a JSX/DOM layer to dispatch
+    /// via `components[tag]`. Empty (default) = off (inline output unchanged).
+    pub inline_component_tags: Vec<Box<str>>,
 }
 
 impl RenderOpts {
@@ -93,7 +98,11 @@ impl RenderOpts {
     /// (inside lists, block quotes, alerts, components) scan with the same
     /// feature set as the top level.
     pub(crate) fn scan_ctx(&self) -> ScanCtx<'_> {
-        ScanCtx { math: self.gfm_math, component_tags: &self.component_tags }
+        ScanCtx {
+            math: self.gfm_math,
+            component_tags: &self.component_tags,
+            inline_component_tags: &self.inline_component_tags,
+        }
     }
 
     /// The ` dir="auto"` attribute (with a leading space) when bidi is on, else

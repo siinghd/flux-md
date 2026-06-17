@@ -18,7 +18,10 @@ import.meta.url)`** pattern, so any bundler with asset-module support resolves
 them: **Vite** (the reference setup), **webpack 5**, **Rollup** (with asset
 modules), **Parcel**, and **Next.js** (App Router — Turbopack *and* webpack;
 **verified on Next.js 16**, see the [Next.js callout](#nextjs) below). It is
-**browser-only** (it constructs Web Workers); it does not run under SSR/RSC. The framework packages — `react`,
+The streaming client (`<FluxMarkdown>` / `FluxClient`) is **browser-only** (it
+constructs Web Workers). For **server-side / static rendering of finished
+content** — SSR, React Server Components, build steps — use the worker-free,
+synchronous [`flux-md/server`](#server-side-rendering) entry. The framework packages — `react`,
 `vue`, `svelte`, `solid-js` — are all **optional** peer dependencies; you only
 need the one whose binding you import. The core (`flux-md`, `flux-md/client`,
 `flux-md/dom`, `flux-md/element`) needs none.
@@ -403,6 +406,55 @@ issue if your Solid setup trips on it. The component is a thin `ref`'d `<div>`;
 if you hit a transform edge, `mountFluxMarkdown` from `flux-md/dom` inside
 `onMount`/`onCleanup` is the zero-surprise fallback.
 
+## Server-side rendering
+
+`<FluxMarkdown>` / `FluxClient` are browser-only (they spawn a Web Worker), but
+the Rust→WASM core is a plain **synchronous** parser. So `flux-md/server` renders
+**finished** markdown on the server with no worker and no async ceremony — Node
+SSR, React Server Components, or a build step:
+
+```ts
+import { initFlux, renderToString } from "flux-md/server";
+
+await initFlux();                                       // once at startup (loads the WASM)
+const html = renderToString("# Hello\n\n**world**");   // sync HTML string, no worker
+```
+
+For React server rendering (RSC, static generation, or SSR), use
+`<FluxMarkdownStatic>` — a hookless, RSC-safe component that renders finished
+content with the same `components` overrides (inline/block component tags
+dispatch on the server too):
+
+```tsx
+import { initFlux, FluxMarkdownStatic } from "flux-md/server";
+
+await initFlux();
+export default function Doc({ md }: { md: string }) {
+  return (
+    <FluxMarkdownStatic
+      content={md}
+      config={{ inlineComponentTags: ["tik"] }}
+      components={{ tik: ({ symbol }) => <span className="ticker">{symbol}</span> }}
+    />
+  );
+}
+```
+
+- **`initFlux()`** — async, idempotent. In Node it reads the package's `.wasm` off
+  disk (Node's `fetch` can't load `file://`); on the web it fetches the
+  bundler-resolved asset. On edge runtimes pass bytes yourself:
+  `initFluxSync(wasmBytes)`.
+- **`renderToString(md, { config })`** — synchronous HTML string, **zero React
+  dependency**.
+- **`parseToBlocks(md, { config })`** — the block array, for custom rendering.
+- **`<FluxMarkdownStatic content config components />`** — synchronous React tree
+  for **render-once** contexts; render it with your framework's server renderer
+  (`renderToStaticMarkup`, RSC, …). For live streaming, client-side code
+  highlighting, or Mermaid, render `<FluxMarkdown>` on the client instead — it's a
+  separate component. (If you SSR-then-hydrate, use the *same* component on both
+  sides; the dedicated client renderers in `<FluxMarkdown>` don't hydrate
+  `<FluxMarkdownStatic>`'s plainer markup.)
+
 ## What it does
 
 | Concern | flux-md | conventional main-thread renderer |
@@ -427,6 +479,11 @@ It gives good-looking output out of the box, **including the built-in syntax
 highlighter's colors** (without any CSS, `highlight()` renders uncolored). The
 theme is scoped to `.flux-md`, zero-runtime, and **does not change the rendered
 HTML** — skip the import and nothing is styled.
+
+> **Next.js Pages Router:** `flux-md/styles.css` is global CSS, which the Pages
+> Router only allows importing from `pages/_app`. Import it there (App Router and
+> other bundlers can import it from any component). Or skip it and bring your own
+> `.flux-md` styles.
 
 Re-theme by overriding a few CSS variables; it's light by default and switches to
 dark automatically via `prefers-color-scheme` (force a mode with
@@ -499,7 +556,8 @@ const client = new FluxClient({
     dirAuto: true,        // per-block dir="auto" for RTL/bidi text (default false)
     a11y: true,           // task-list <label> + <th scope="col"> a11y markup (default false)
     unsafeHtml: false,    // pass raw HTML through (default false — keep it false for untrusted input)
-    componentTags: ["Thinking", "Callout"], // custom tags with markdown inside (default none)
+    componentTags: ["Thinking", "Callout"], // BLOCK custom tags w/ markdown inside (default none)
+    inlineComponentTags: ["tik", "cite"],   // INLINE custom tags (chips/citations) w/ markdown inside (default none)
     blockData: true,      // opt-in structured kind.data per block (default false — see "Structured block data")
   },
 });
@@ -527,10 +585,13 @@ When to enable each flag:
 - `unsafeHtml: true` — only when rendering trusted HTML. For untrusted /
   LLM-produced HTML, pair this with `<FluxMarkdown sanitize={…} />` (DOMPurify or
   similar — see [Security](#security)).
-- `componentTags: ["Thinking", …]` — when your LLM emits custom tags like
-  `<Thinking>…</Thinking>` and you want their inner content parsed as markdown
-  and dispatched to a React component. Safe without `unsafeHtml` (attributes are
-  sanitized; allowlisted tags only).
+- `componentTags: ["Thinking", …]` — when your LLM emits **block** custom tags
+  like `<Thinking>…</Thinking>` (on their own line) and you want their inner
+  content parsed as markdown and dispatched to a React component. Safe without
+  `unsafeHtml` (attributes are sanitized; allowlisted tags only).
+- `inlineComponentTags: ["tik", …]` — same idea for **inline** custom elements
+  that sit inside a paragraph, heading, list item, or **table cell** (ticker
+  chips, citations, `@mentions`). See [Inline component tags](#inline-component-tags).
 
 **Footnotes** (`gfmFootnotes`) work in streaming with one honest caveat: a
 `[^1]` reference renders speculatively the moment it's seen (committed blocks
@@ -700,29 +761,70 @@ sanitized (event handlers dropped, dangerous URL schemes → `#`).
 
 Each renders as a `Component` block. Override it in React by tag name (or with
 the generic `Component` fallback). The override receives `tag`, the sanitized
-`attrs`, and `html` — the **inner** (already-rendered markdown) HTML, so you can
-wrap it in your own element:
+`attrs`, the inner content as ready-to-render **`children`** (the easy path), and
+also `html` (the inner already-rendered markdown string, for
+`dangerouslySetInnerHTML`):
 
 ```tsx
 <FluxMarkdown
   client={client}
   components={{
-    Thinking: ({ html }) => (
+    Thinking: ({ children }) => (
       <details className="thinking">
         <summary>Reasoning</summary>
-        <div dangerouslySetInnerHTML={{ __html: html }} />
+        {children}
       </details>
     ),
   }}
 />
 ```
 
-With no override, the component renders as `<thinking …>…</thinking>` HTML. The
-override's `html` is the inner content only; `attrs` keys are React-form
-(`class`→`className`, `for`→`htmlFor`) so `{...attrs}` spreads cleanly. While the
-component is still streaming, `html` is the partial inner content and re-renders
-as more arrives. Tag names match case-sensitively; the feature is off unless
-`componentTags` is set.
+> **`children` vs `html`.** A `Component` override that renders *neither* shows
+> **empty** (a common first-try gotcha). Prefer **`children`** — a parsed React
+> tree with nested overrides applied; reach for `dangerouslySetInnerHTML={{ __html:
+> html }}` only when you need the raw string. `attrs` keys are React-form
+> (`class`→`className`, `for`→`htmlFor`) so `{...attrs}` spreads cleanly. While
+> streaming, both reflect the partial inner content and re-render as more arrives.
+> With no override the block renders as `<thinking …>…</thinking>`. Tag names
+> match case-sensitively; off unless `componentTags` is set.
+
+<a id="inline-component-tags"></a>
+
+#### Inline component tags
+
+`componentTags` handles **block** containers (a `<Thinking>` on its own line). For
+**inline** custom elements — ticker chips, citations, `@mentions`, inline tooltips
+that sit *inside* a paragraph, heading, list item, or **table cell** — use
+`inlineComponentTags`:
+
+```tsx
+const client = new FluxClient({ config: { inlineComponentTags: ["tik"] } });
+
+<FluxMarkdown
+  client={client}
+  components={{
+    tik: ({ symbol, children }) => <span className="ticker">{children ?? symbol}</span>,
+  }}
+/>;
+```
+
+Now `Apple <tik symbol="AAPL">AAPL</tik> rose 2%` (or self-closing
+`<tik symbol="AAPL"/>`) dispatches the inline `<tik>` to `components.tik`: its
+inner is parsed as **inline markdown** (the `children`), its attributes become
+props, and it's **safe without `unsafeHtml`** (attributes sanitized, allowlisted
+tags only). It works everywhere inline content does — **including table cells**.
+Tag names match **case-sensitively** and dispatch verbatim to `components[tag]`
+(`<tik>`→`components.tik`, `<Cite>`→`components.Cite`). The
+two lists are independent: list a tag under `componentTags` for blocks,
+`inlineComponentTags` for inline, or both for both. An allowlisted tag used in an
+unsupported position degrades **inertly** (escaped) — it never consumes
+surrounding content.
+
+> **Link-bridge alternative.** Before `inlineComponentTags`, the way to get an
+> inline custom element was the link bridge: emit `[$AAPL](tik://AAPL)` and
+> override `a` to render a chip when the href scheme matches. It's XSS-safe and
+> renders inline-in-cells too — `inlineComponentTags` simply replaces that
+> workaround with first-class inline elements.
 
 ### Types
 

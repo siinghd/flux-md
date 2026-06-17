@@ -38,8 +38,17 @@ const URL_ATTRS = new Set(["href", "src", "xlink:href", "formaction", "action", 
  *  strip control chars (C0, DEL, C1 — matching Rust char::is_control),
  *  lowercase, then match. The strip affects only the probe, never output. */
 function safeUrl(value: string): string {
+  // Decode-STABLE probe: a value can be entity-decoded more than once before it
+  // reaches the DOM, so peel layers to a fixpoint before the scheme check —
+  // catches `javascript&#58;` and double-encoded `javascript&amp;#58;`. Only the
+  // probe is decoded; the returned value is untouched (safe URLs stay verbatim).
+  let decoded = value;
+  for (let prev = ""; decoded !== prev; ) {
+    prev = decoded;
+    decoded = decodeEntities(decoded);
+  }
   // eslint-disable-next-line no-control-regex
-  const probe = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").replace(/^\s+/, "").toLowerCase();
+  const probe = decoded.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").replace(/^\s+/, "").toLowerCase();
   if (
     probe.startsWith("javascript:") ||
     probe.startsWith("vbscript:") ||
@@ -106,7 +115,11 @@ function parseOpenTag(html: string, start: number) {
   let i = start + 1;
   let j = i;
   while (j < html.length && /[a-zA-Z0-9-]/.test(html[j])) j++;
-  const tag = html.slice(i, j).toLowerCase();
+  // Preserve the tag's ORIGINAL case so an inline custom-component element (e.g.
+  // `<Cite>`) dispatches to `components.Cite`. Standard elements the core emits
+  // are already lowercase; the semantic checks below (VOID, `input`, close-tag
+  // matching) lowercase as needed, so HTML behavior is unchanged.
+  const tag = html.slice(i, j);
   i = j;
   const attrs: Record<string, string | true> = {};
   while (i < html.length) {
@@ -193,9 +206,9 @@ export function parseTrustedHtml(html: string): HNode[] {
     }
     if (html[lt + 1] === "/") {
       const end = html.indexOf(">", lt);
-      const tag = html.slice(lt + 2, end === -1 ? html.length : end).trim().toLowerCase();
+      const closeLower = html.slice(lt + 2, end === -1 ? html.length : end).trim().toLowerCase();
       for (let s = stack.length - 1; s >= 0; s--) {
-        if (stack[s].tag === tag) {
+        if (stack[s].tag.toLowerCase() === closeLower) {
           stack.length = s;
           break;
         }
@@ -216,7 +229,7 @@ export function parseTrustedHtml(html: string): HNode[] {
     const { tag, attrs, selfClose, next } = parseOpenTag(html, lt);
     const el: Extract<HNode, { kind: "el" }> = { kind: "el", tag, attrs, children: [] };
     push(el);
-    if (!selfClose && !VOID.has(tag)) stack.push(el);
+    if (!selfClose && !VOID.has(tag.toLowerCase())) stack.push(el);
     i = next;
   }
   return root;
@@ -242,7 +255,7 @@ function attrsToProps(tag: string, attrs: Record<string, string | true>, key: st
     }
     // A static checkbox carries `checked` with no handler; render it
     // uncontrolled so React doesn't warn about a missing onChange.
-    if (tag === "input" && lower === "checked") {
+    if (tag.toLowerCase() === "input" && lower === "checked") {
       props.defaultChecked = value === true ? true : value;
       continue;
     }
@@ -262,13 +275,15 @@ function nodesToReact(nodes: HNode[], components: Components, keyPrefix: string)
     const key = keyPrefix + idx;
     const type = components[n.tag] ?? n.tag;
     const props = attrsToProps(n.tag, n.attrs, key);
-    if (VOID.has(n.tag)) {
+    if (VOID.has(n.tag.toLowerCase())) {
       out.push(createElement(type, props));
     } else {
       out.push(createElement(type, props, nodesToReact(n.children, components, key + ".")));
     }
   }
-  return out.length === 1 ? out[0] : out;
+  // `null` (not an empty array) for no children, so a self-closing / empty inline
+  // component's `children` is nullish and a `{children ?? fallback}` override fires.
+  return out.length === 0 ? null : out.length === 1 ? out[0] : out;
 }
 
 /**

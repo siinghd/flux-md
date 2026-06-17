@@ -130,6 +130,12 @@ pub struct StreamParser {
     /// whose inner content is markdown, and dispatched to a React component —
     /// safely, without `unsafe_html`. Empty by default (no component tags).
     component_tags: Vec<Box<str>>,
+    /// Opt-in allowlist of INLINE component tag names (e.g. `tik`, `cite`). An
+    /// allowlisted `<tik>…</tik>` (or self-closing `<tik/>`) anywhere in inline
+    /// content — paragraphs, headings, table cells, list items — renders as a
+    /// real custom element (markdown inner, sanitized attrs) so a JSX/DOM layer
+    /// dispatches it via `components[tag]`. Empty by default.
+    inline_component_tags: Vec<Box<str>>,
     /// Fast path for a long open code/math fence at the tail (see [`FenceCache`]).
     fence_cache: Option<FenceCache>,
     /// Fast path for a long open paragraph at the tail (see [`ParagraphCache`]).
@@ -407,6 +413,7 @@ impl StreamParser {
             a11y: false,
             block_data: false,
             component_tags: Vec::new(),
+            inline_component_tags: Vec::new(),
             fence_cache: None,
             para_cache: None,
             table_cache: None,
@@ -526,6 +533,22 @@ impl StreamParser {
         self.component_tags = tags.into_iter().map(String::into_boxed_str).collect();
     }
 
+    /// Set the opt-in INLINE component-tag allowlist (e.g. `["tik", "cite"]`).
+    /// An allowlisted `<tik>…</tik>` (or self-closing `<tik/>`) in inline content
+    /// renders as a custom element whose inner is markdown and whose attributes
+    /// are sanitized — XSS-safe without `unsafe_html`. Separate from
+    /// `component_tags` (block containers): list a tag here for inline chips
+    /// (tickers, citations, @mentions); put it in both lists to allow both
+    /// positions. Names are matched exactly (case-sensitively). Empty = off.
+    pub fn with_inline_component_tags(mut self, tags: Vec<String>) -> Self {
+        self.inline_component_tags = tags.into_iter().map(String::into_boxed_str).collect();
+        self
+    }
+
+    pub fn set_inline_component_tags(&mut self, tags: Vec<String>) {
+        self.inline_component_tags = tags.into_iter().map(String::into_boxed_str).collect();
+    }
+
     pub fn set_unsafe_html(&mut self, on: bool) {
         self.unsafe_html = on;
     }
@@ -589,7 +612,11 @@ impl StreamParser {
         let tail_start = self.committed_offset;
         let tail = &self.buffer[tail_start..];
 
-        let ctx = ScanCtx { math: self.gfm_math, component_tags: &self.component_tags };
+        let ctx = ScanCtx {
+            math: self.gfm_math,
+            component_tags: &self.component_tags,
+            inline_component_tags: &self.inline_component_tags,
+        };
         let raw_blocks = scan(tail, ctx);
 
         // Pre-pass: build the ref table for this render. The committed table is
@@ -639,6 +666,7 @@ impl StreamParser {
             // ref ids stay unique across the commit boundary.
             footnote_occ: std::cell::RefCell::new(self.committed_footnote_occurrences.clone()),
             component_tags: self.component_tags.clone(),
+            inline_component_tags: self.inline_component_tags.clone(),
         };
 
         let mut produced: Vec<Block> = Vec::with_capacity(renderable.len());
@@ -1085,6 +1113,7 @@ impl StreamParser {
             footnotes,
             footnote_occ: std::cell::RefCell::new(self.committed_footnote_occurrences.clone()),
             component_tags: self.component_tags.clone(),
+            inline_component_tags: self.inline_component_tags.clone(),
         }
     }
 
@@ -1094,7 +1123,11 @@ impl StreamParser {
     /// is no longer the sole tail block — the full reparse then handles it.
     fn try_incremental_paragraph(&mut self) -> Option<Patch> {
         let mut cache = self.para_cache.take()?;
-        let ctx = ScanCtx { math: self.gfm_math, component_tags: &self.component_tags };
+        let ctx = ScanCtx {
+            math: self.gfm_math,
+            component_tags: &self.component_tags,
+            inline_component_tags: &self.inline_component_tags,
+        };
         let bytes = self.buffer.as_bytes();
         let len = bytes.len();
         // The paragraph must still be the tail (only whitespace before it) and
@@ -1187,7 +1220,11 @@ impl StreamParser {
         {
             return None;
         }
-        let ctx = ScanCtx { math: self.gfm_math, component_tags: &self.component_tags };
+        let ctx = ScanCtx {
+            math: self.gfm_math,
+            component_tags: &self.component_tags,
+            inline_component_tags: &self.inline_component_tags,
+        };
         // Build inline opts once for the whole append: the same shared RenderOpts
         // backs cached-row rendering and the speculative partial-row render. Cells
         // never define link refs / footnote defs themselves, so the open table

@@ -65,6 +65,16 @@ impl FluxParser {
         self.inner.buffer().len()
     }
 
+    /// All blocks currently parsed (committed + active), in document order — the
+    /// whole rendered document as a JS array of `Block`. The one-shot /
+    /// server-side render primitive: feed the full markdown via `append`, call
+    /// `finalize`, then read `allBlocks()` (no worker, no patch accumulation).
+    #[wasm_bindgen(js_name = allBlocks)]
+    pub fn all_blocks(&self) -> Result<JsValue, JsValue> {
+        let blocks: Vec<&Block> = self.inner.all_blocks().collect();
+        serde_wasm_bindgen::to_value(&blocks).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
     /// Total bytes the parser is retaining: source buffer + all rendered
     /// HTML for committed and active blocks. Use to compare per-parser
     /// memory cost against alternatives.
@@ -144,6 +154,16 @@ impl FluxParser {
     #[wasm_bindgen(js_name = setComponentTags)]
     pub fn set_component_tags(&mut self, tags: Vec<String>) {
         self.inner.set_component_tags(tags);
+    }
+
+    /// Set the opt-in INLINE component-tag allowlist (e.g. `["tik", "cite"]`).
+    /// An allowlisted inline `<tik>…</tik>` (or self-closing `<tik/>`) renders as
+    /// a custom element (markdown inner, sanitized attributes) so a JSX/DOM layer
+    /// can dispatch it via `components[tag]` — in paragraphs, headings, table
+    /// cells, and list items. Empty by default (inline output unchanged).
+    #[wasm_bindgen(js_name = setInlineComponentTags)]
+    pub fn set_inline_component_tags(&mut self, tags: Vec<String>) {
+        self.inner.set_inline_component_tags(tags);
     }
 }
 

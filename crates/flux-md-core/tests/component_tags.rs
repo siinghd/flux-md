@@ -168,3 +168,29 @@ fn streaming_has_no_orphan_blocks() {
     let comp = p.all_blocks().find(|b| b.kind.tag() == "Component").unwrap();
     assert!(matches!(&comp.kind, BlockKind::Component { tag, .. } if tag == "Thinking"));
 }
+
+#[test]
+fn block_tag_used_inline_does_not_eat_following_blocks() {
+    // Regression (data-loss bug): with `tik` as a BLOCK component tag, an inline
+    // `<tik>AAPL</tik>` occurrence on a non-bare line must NOT open a block
+    // container that swallows the rest of the document. The open tag must be the
+    // whole line to start a block; otherwise it degrades inertly (escaped here,
+    // since `tik` is not in the inline allowlist) and the table survives.
+    let md = "<tik>AAPL</tik> is up today.\n\n| Stock | Price |\n| --- | --- |\n| MSFT | 100 |\n";
+    let out = render(md, &["tik"]);
+    assert!(out.contains("<table>"), "the following table must survive: {out}");
+    assert!(out.contains("MSFT") && out.contains("100"), "table cells survive: {out}");
+    assert!(out.contains("is up today."), "the paragraph text survives: {out}");
+    // No block <Component> wrapper was opened around the inline occurrence.
+    let kinds: Vec<_> = p_kinds(md, &["tik"]);
+    assert!(!kinds.iter().any(|k| k == "Component"), "no block component opened: {kinds:?}");
+}
+
+fn p_kinds(md: &str, tags: &[&str]) -> Vec<String> {
+    let mut p = StreamParser::new()
+        .with_gfm_autolinks(true)
+        .with_component_tags(tags.iter().map(|s| s.to_string()).collect());
+    p.append(md);
+    p.finalize();
+    p.all_blocks().map(|b| b.kind.tag().to_string()).collect()
+}

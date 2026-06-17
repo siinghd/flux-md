@@ -1,6 +1,6 @@
 {
   "name": "flux-md",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Zero-dep streaming markdown for the browser. Rust→WASM core, Web Worker per stream, incremental parse with speculative closure.",
   "type": "module",
   "sideEffects": ["./src/worker.ts", "./src/styles.css"],
@@ -10,6 +10,7 @@
     ".": "./src/index.ts",
     "./client": "./src/client.ts",
     "./react": "./src/react.tsx",
+    "./server": "./src/server.tsx",
     "./dom": "./src/dom.ts",
     "./element": "./src/element.ts",
     "./vue": "./src/vue.ts",

@@ -4,6 +4,57 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.14.0 — 2026-06-17
+
+### Added
+
+- **Inline custom component tags (`inlineComponentTags`)** — the headline gap for
+  rich apps. An allowlisted inline tag like `<tik symbol="AAPL">AAPL</tik>` (or
+  self-closing `<tik/>`) **anywhere inline** — paragraphs, headings, list items,
+  and **table cells** — renders as a real custom element with its inner parsed as
+  **inline markdown** and its attributes sanitized (event handlers dropped,
+  dangerous URL schemes → `#`). The React renderer dispatches it to
+  `components[tag]` with the inner markdown as `children` and the attributes as
+  props — **XSS-safe without `unsafeHtml`**. Independent of `componentTags`
+  (block containers): list a tag under either or both. Use lowercase tag names.
+- **`children` on `Component` block overrides** — a `Component` override now also
+  receives the inner content pre-parsed to a React tree (`children`), so you can
+  `return <Chip {...attrs}>{children}</Chip>` instead of
+  `dangerouslySetInnerHTML`-ing `html`. The html-vs-children contract is now loud
+  in the types and docs (an override that renders neither shows empty).
+- **`flux-md/server` — worker-free synchronous SSR / RSC rendering.** The Rust→
+  WASM core is a plain synchronous parser, so finished markdown renders on the
+  server with no worker: `initFlux()` (async, idempotent — reads the co-located
+  `.wasm` in Node, or `initFluxSync(bytes)` on edge), `renderToString(md, {
+  config })` (sync HTML string, zero React dep), `parseToBlocks(md, { config })`,
+  and `<FluxMarkdownStatic content config components />` — a hookless, RSC-safe
+  React component that emits the same `flux-md` tree a client `<FluxMarkdown>`
+  hydrates, with the same overrides (inline/block component tags dispatch on the
+  server too).
+- **`FluxParser.allBlocks()` (WASM)** — returns the whole parsed document as a
+  block array, the one-shot render primitive used by `flux-md/server`.
+
+### Fixed
+
+- **Data-loss: a block component tag used inline swallowed sibling blocks.** With
+  e.g. `componentTags: ["tik"]`, an inline occurrence such as
+  `<tik>AAPL</tik> is up.` on a line with following content opened a block
+  container that consumed the rest of the document (the paragraph and a following
+  table vanished). A block component open tag must now be the **whole line** (only
+  trailing whitespace after `>`); otherwise it's treated as inline and degrades
+  inertly — it never eats surrounding content.
+
+### Changed
+
+- The React HTML→tree converter (`htmlToReact` / `parseTrustedHtml`) now preserves
+  a tag's original **case** for component dispatch (so a capitalized inline tag
+  like `<Cite>` maps to `components.Cite`); HTML semantics (void elements, `input`,
+  close-tag matching) still compare case-insensitively, so standard output is
+  unchanged.
+
+Feature-off output is byte-identical (CommonMark 652 + GFM floors hold); both
+allowlists are empty by default.
+
 ## 0.13.0 — 2026-06-04
 
 ### Added

@@ -116,8 +116,25 @@ export interface Patch {
 export interface BlockComponentProps {
   /** The full parsed block, including `kind` (with `kind.data`) and offsets. */
   block: Block;
-  /** Rendered, XSS-safe HTML for this block. */
+  /**
+   * Rendered, XSS-safe HTML for this block. For `Component` blocks this is the
+   * **inner** rendered-markdown HTML (not the `<tag>…</tag>` wrapper). NOTE: a
+   * `Component` override that ignores both `html` and `children` renders empty —
+   * use {@link children} (the easy path) or `dangerouslySetInnerHTML={{__html:
+   * html}}`.
+   */
   html: string;
+  /**
+   * React only: this block's inner content already parsed to a React node tree
+   * (markdown rendered, nested tag/inline-component overrides applied). For a
+   * `Component` block it is the inner markdown — render it directly
+   * (`return <Chip {...attrs}>{children}</Chip>`) instead of dangerously setting
+   * `html`. Populated by `<FluxMarkdown>` / `<FluxMarkdownStatic>` when a
+   * `components` map is supplied; DOM and other bindings leave it `undefined`
+   * (they consume `html`). Typed `unknown` to keep this surface framework-neutral
+   * — cast to `ReactNode` in a React override.
+   */
+  children?: unknown;
   /** True while the block is still streaming (its HTML may still change). */
   open: boolean;
   /** True if the block was closed speculatively and may yet be revised. */
@@ -229,6 +246,21 @@ export interface ParserConfig {
    * off. Names match case-sensitively.
    */
   componentTags?: string[];
+  /**
+   * Opt-in allowlist of INLINE component tag names (e.g. `["tik", "cite"]`). An
+   * allowlisted `<tik>…</tik>` (or self-closing `<tik/>`) anywhere in inline
+   * content — paragraphs, headings, table cells, list items — renders as a real
+   * custom element with **markdown** inner content and sanitized attributes
+   * (event handlers dropped, dangerous URL schemes neutralized) — XSS-safe
+   * without `unsafeHtml`. The React renderer dispatches it via `components[tag]`,
+   * with the inner markdown as the component's `children` and the sanitized
+   * attributes as props. Separate from `componentTags` (block containers): list a
+   * tag here for inline chips (tickers, citations, @mentions), or in both lists
+   * to allow both positions. Names match **case-sensitively** and dispatch
+   * verbatim to `components[tag]` (e.g. `"Cite"` → `components.Cite`), same as
+   * `componentTags`. Empty/omitted = off.
+   */
+  inlineComponentTags?: string[];
   /**
    * Opt-in structured table data. When on, a `Table` block's `kind.data` is
    * populated with `{ headers, rows, aligns }` (each cell `{ text, html }`) so a

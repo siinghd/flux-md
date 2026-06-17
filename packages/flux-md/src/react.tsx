@@ -308,7 +308,7 @@ function decodeMathText(html: string): string {
   return decodeCodeText(html);
 }
 
-function blockKindProps(block: Block): BlockComponentProps {
+export function blockKindProps(block: Block, components?: Components): BlockComponentProps {
   const props: BlockComponentProps = {
     block,
     html: block.html,
@@ -343,6 +343,10 @@ function blockKindProps(block: Block): BlockComponentProps {
     // An override replaces the `<tag>` wrapper, so it gets the *inner* HTML
     // (markdown already rendered) rather than the full wrapped block.
     props.html = componentInnerHtml(block.html, props.tag);
+    // Convenience: the inner markdown pre-parsed to a React tree (with nested
+    // tag/inline-component overrides applied). Render `{children}` directly
+    // instead of dangerouslySetInnerHTML-ing `html` — the easy, correct path.
+    props.children = htmlToReact(props.html, components ?? {});
   } else if (block.kind.type === "Table") {
     // Pure structured data (present only when `blockData` is on) — unlike
     // `attrs` there is no React/DOM name-form divergence, so this is the same
@@ -440,12 +444,12 @@ function renderBlockContent({
       const tag = (block.kind.data as { tag?: string } | undefined)?.tag;
       const override = (tag && components[tag]) || components.Component;
       if (override) {
-        return createElement(override, blockKindProps(block));
+        return createElement(override, blockKindProps(block, components));
       }
     }
     const blockOverride = components[kind];
     if (blockOverride) {
-      return createElement(blockOverride, blockKindProps(block));
+      return createElement(blockOverride, blockKindProps(block, components));
     }
   }
 

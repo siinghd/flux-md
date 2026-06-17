@@ -157,3 +157,20 @@ test.skipIf(!haveWasm)("real WASM: WITHOUT setBlockData a Heading's kind.data is
   expect(h.kind.data).toBe(2);
   expect(Object.keys(h.kind)).toEqual(["type", "data"]);
 });
+
+test.skipIf(!haveWasm)("real WASM: setInlineComponentTags dispatches inline + allBlocks() returns the array", () => {
+  const p = new FluxParser();
+  p.setInlineComponentTags(["tik"]);
+  p.append('a <tik symbol="AAPL">**A**</tik> b\n');
+  p.finalize();
+  const blocks = p.allBlocks();
+  expect(Array.isArray(blocks)).toBe(true);
+  const para = blocks.find((b: { kind: { type: string } }) => b.kind.type === "Paragraph") as { html: string };
+  expect(para.html).toContain('<tik symbol="AAPL"><strong>A</strong></tik>');
+});
+
+test.skipIf(!haveWasm)("real WASM: a block component tag used inline does not eat the following table (P1)", () => {
+  const { blocks } = parseAll("<tik>AAPL</tik> is up.\n\n| s |\n| --- |\n| 1 |\n", (p) => p.setComponentTags(["tik"]));
+  expect(blocks.some((b) => b.kind.type === "Table")).toBe(true);
+  expect(blocks.some((b) => b.kind.type === "Component")).toBe(false);
+});

@@ -103,6 +103,32 @@ test("string-valued override swaps the tag name", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Inline custom components (the core emits a real <tik> element; the renderer
+// dispatches it via components[tag] with sanitized attrs + parsed children)
+// ---------------------------------------------------------------------------
+
+test("dispatches an inline custom-component element to components[tag] with attrs + children", () => {
+  const comps: Components = {
+    tik: (p: any) => createElement("span", { className: "chip", "data-sym": p.symbol }, p.children),
+  };
+  const out = render(htmlToReact('<p>Buy <tik symbol="AAPL"><strong>A</strong></tik> now</p>', comps));
+  expect(out).toContain('<span class="chip" data-sym="AAPL"><strong>A</strong></span>');
+  expect(out).toContain("Buy ");
+  expect(out).toContain(" now");
+});
+
+test("preserves tag case so a capitalized inline component dispatches", () => {
+  const comps: Components = { Cite: (p: any) => createElement("cite", null, p.children) };
+  expect(render(htmlToReact("<p>see <Cite>R1</Cite></p>", comps))).toContain("<cite>R1</cite>");
+});
+
+test("case preservation leaves standard elements (void / input) unchanged", () => {
+  expect(render(htmlToReact("<p>a<br>b</p>", {}))).toBe("<p>a<br/>b</p>");
+  expect(render(htmlToReact("<hr>", {}))).toBe("<hr/>");
+  expect(render(htmlToReact('<table><tr><td>1</td></tr></table>', { td: "td" }))).toContain("<td>1</td>");
+});
+
+// ---------------------------------------------------------------------------
 // FluxMarkdown dispatch (fake client, no worker)
 // ---------------------------------------------------------------------------
 
@@ -429,6 +455,32 @@ test("strips C1 control chars in the scheme (parity with the Rust filter)", () =
     expect(out).not.toContain("javascript:");
     expect(out).toContain('="#"');
   }
+});
+
+test("neutralizes double / triple entity-encoded dangerous schemes (decode-stable)", () => {
+  for (const html of [
+    '<a href="javascript&#58;alert(1)">x</a>', // single-encoded colon
+    '<a href="javascript&amp;#58;alert(1)">x</a>', // double-encoded
+    '<a href="javascript&amp;amp;#58;alert(1)">x</a>', // triple-encoded
+  ]) {
+    const out = render(htmlToReact(html, {}));
+    expect(out).not.toContain("javascript:");
+    expect(out).toContain('="#"');
+  }
+});
+
+test("self-closing / empty inline component yields nullish children (so `children ?? x` fires)", () => {
+  let received: unknown = "unset";
+  const comps: Components = {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tik: (p: any) => {
+      received = p.children;
+      return createElement("span", null, p.children ?? p.symbol);
+    },
+  };
+  const out = render(htmlToReact('<p><tik symbol="AAPL"></tik></p>', comps));
+  expect(received == null).toBe(true); // null, not an empty array
+  expect(out).toContain("<span>AAPL</span>");
 });
 
 test("drops inline event-handler attributes", () => {

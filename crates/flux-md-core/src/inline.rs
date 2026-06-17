@@ -17,7 +17,7 @@
 
 use crate::entities::decode_entity;
 use crate::render::RenderOpts;
-use crate::url::{escape_attr, escape_html, sanitize_image_url, sanitize_url};
+use crate::url::{escape_attr, escape_html, sanitize_attrs, sanitize_image_url, sanitize_url};
 
 const ESCAPABLE: &[u8] = b"!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 
@@ -172,15 +172,34 @@ fn render_inline_core(input: &str, opts: &RenderOpts, out: &mut String, track: b
             b'<' => {
                 if let Some(consumed) = try_autolink(bytes, pos, out) {
                     pos = consumed;
-                } else if let Some(consumed) = try_inline_html(bytes, pos, opts, out) {
-                    pos = consumed;
                 } else {
-                    // Unstable: a later `>` could form an autolink / inline HTML.
-                    if track && pos < unstable {
-                        unstable = pos;
+                    match try_inline_component(input, bytes, pos, opts, out) {
+                        InlineComp::Done(end) => pos = end,
+                        InlineComp::Incomplete => {
+                            // An allowlisted inline open tag with no matching
+                            // close yet: keep it inert (escape the `<`) and
+                            // re-tryable — a later `</tag>` can still form the
+                            // component, and if none ever arrives it degrades to
+                            // escaped text (never eats following content).
+                            if track && pos < unstable {
+                                unstable = pos;
+                            }
+                            out.push_str("&lt;");
+                            pos += 1;
+                        }
+                        InlineComp::NotComponent => {
+                            if let Some(consumed) = try_inline_html(bytes, pos, opts, out) {
+                                pos = consumed;
+                            } else {
+                                // Unstable: a later `>` could form an autolink / inline HTML.
+                                if track && pos < unstable {
+                                    unstable = pos;
+                                }
+                                out.push_str("&lt;");
+                                pos += 1;
+                            }
+                        }
                     }
-                    out.push_str("&lt;");
-                    pos += 1;
                 }
             }
             b'!' if pos + 1 < bytes.len() && bytes[pos + 1] == b'[' => {
@@ -891,6 +910,234 @@ fn match_inline_html(bytes: &[u8], start: usize) -> Option<usize> {
         return None;
     }
     Some(i + 1)
+}
+
+// ---------------------------------------------------------------------
+// Inline custom components (opt-in `inline_component_tags`)
+// ---------------------------------------------------------------------
+
+/// Result of probing for an inline component at a `<`.
+enum InlineComp {
+    /// Not an allowlisted inline-component open tag — try inline raw HTML next.
+    NotComponent,
+    /// An allowlisted inline open tag whose matching close has not arrived yet
+    /// (or whose open tag is still incomplete): keep the `<` inert + retryable.
+    Incomplete,
+    /// Rendered to `out`; resume scanning at this byte offset.
+    Done(usize),
+}
+
+/// Dispatch an allowlisted inline component (`<tik …>…</tik>` or self-closing
+/// `<tik …/>`) at `start`. Inner content is rendered as inline markdown;
+/// attributes are sanitized (event handlers dropped, dangerous URL schemes
+/// neutralized) so the emitted element is XSS-safe even with `unsafe_html` off,
+/// and a JSX/DOM layer dispatches it via `components[tag]`. Same-tag nesting and
+/// inline code spans are respected when locating the matching close.
+fn try_inline_component(
+    input: &str,
+    bytes: &[u8],
+    start: usize,
+    opts: &RenderOpts,
+    out: &mut String,
+) -> InlineComp {
+    let tags = &opts.inline_component_tags;
+    if tags.is_empty() {
+        return InlineComp::NotComponent;
+    }
+    let Some((name_end, attrs_end, self_closing)) = inline_open_tag(bytes, start, tags) else {
+        return InlineComp::NotComponent;
+    };
+    let name = &input[start + 1..name_end];
+    let attrs = sanitize_attrs(&input[start..attrs_end]);
+
+    if self_closing {
+        write_inline_component(name, &attrs, "", opts, out);
+        return InlineComp::Done(attrs_end);
+    }
+    match find_inline_close(bytes, attrs_end, name.as_bytes()) {
+        Some(close_start) => {
+            write_inline_component(name, &attrs, &input[attrs_end..close_start], opts, out);
+            // Advance past `</name>`.
+            InlineComp::Done(close_start + 2 + name.len() + 1)
+        }
+        None => InlineComp::Incomplete,
+    }
+}
+
+/// Emit `<name attrs>inner</name>`, with `inner` rendered as inline markdown.
+fn write_inline_component(
+    name: &str,
+    attrs: &[(String, String)],
+    inner: &str,
+    opts: &RenderOpts,
+    out: &mut String,
+) {
+    out.push('<');
+    out.push_str(name);
+    for (k, v) in attrs {
+        out.push(' ');
+        out.push_str(k);
+        out.push_str("=\"");
+        escape_attr(v, out);
+        out.push('"');
+    }
+    out.push('>');
+    if !inner.is_empty() {
+        render_inline_core(inner, opts, out, false);
+    }
+    out.push_str("</");
+    out.push_str(name);
+    out.push('>');
+}
+
+/// If an allowlisted inline-component OPEN tag starts at `start` (`bytes[start]`
+/// is `<`, not `</`), return `(name_end, attrs_end, self_closing)` — `name_end`
+/// just past the tag name, `attrs_end` just past the closing `>`. Tolerates
+/// quoted attribute values containing `>`. `None` if it isn't an allowlisted
+/// open tag, or the tag is not yet complete (no `>`), or it is malformed.
+fn inline_open_tag(bytes: &[u8], start: usize, tags: &[Box<str>]) -> Option<(usize, usize, bool)> {
+    if bytes.get(start) != Some(&b'<') {
+        return None;
+    }
+    let name_start = start + 1;
+    let mut i = name_start;
+    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'-') {
+        i += 1;
+    }
+    if i == name_start || !tags.iter().any(|t| t.as_bytes() == &bytes[name_start..i]) {
+        return None;
+    }
+    let name_end = i;
+    let mut in_quote = 0u8;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_quote != 0 {
+            if c == in_quote {
+                in_quote = 0;
+            }
+        } else if c == b'"' || c == b'\'' {
+            in_quote = c;
+        } else if c == b'<' {
+            return None; // a new `<` before this tag closed — malformed
+        } else if c == b'>' {
+            let mut k = i;
+            while k > name_end && matches!(bytes[k - 1], b' ' | b'\t') {
+                k -= 1;
+            }
+            let self_closing = bytes[k - 1] == b'/';
+            return Some((name_end, i + 1, self_closing));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Length of the backtick run starting at `i`.
+fn backtick_run_len(bytes: &[u8], i: usize) -> usize {
+    let mut n = 0;
+    while i + n < bytes.len() && bytes[i + n] == b'`' {
+        n += 1;
+    }
+    n
+}
+
+/// Find the close of a code span opened by a run of `run` backticks: the next
+/// run of EXACTLY `run` backticks. Returns the offset just past it, or `None`
+/// (an unclosed run — its backticks are literal).
+fn matching_backtick_close(bytes: &[u8], from: usize, run: usize) -> Option<usize> {
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let r = backtick_run_len(bytes, i);
+            if r == run {
+                return Some(i + r);
+            }
+            i += r;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Is `bytes[i..]` exactly `</name>`?
+fn is_inline_close_tag(bytes: &[u8], i: usize, name: &[u8]) -> bool {
+    bytes.get(i) == Some(&b'<')
+        && bytes.get(i + 1) == Some(&b'/')
+        && bytes.len() >= i + 2 + name.len() + 1
+        && &bytes[i + 2..i + 2 + name.len()] == name
+        && bytes[i + 2 + name.len()] == b'>'
+}
+
+/// Is `bytes[i..]` a same-`name` non-self-closing open tag `<name …>`? Returns
+/// the offset just past its `>` (so the close-finder can count nesting depth).
+fn inline_open_same(bytes: &[u8], i: usize, name: &[u8]) -> Option<usize> {
+    if bytes.get(i) != Some(&b'<') || bytes.get(i + 1) == Some(&b'/') {
+        return None;
+    }
+    let ns = i + 1;
+    if bytes.len() < ns + name.len() || &bytes[ns..ns + name.len()] != name {
+        return None;
+    }
+    // The name must end here (not be a prefix of a longer tag name).
+    if matches!(bytes.get(ns + name.len()), Some(c) if c.is_ascii_alphanumeric() || *c == b'-') {
+        return None;
+    }
+    let mut j = ns + name.len();
+    let mut in_quote = 0u8;
+    while j < bytes.len() {
+        let c = bytes[j];
+        if in_quote != 0 {
+            if c == in_quote {
+                in_quote = 0;
+            }
+        } else if c == b'"' || c == b'\'' {
+            in_quote = c;
+        } else if c == b'>' {
+            let mut k = j;
+            while k > ns + name.len() && matches!(bytes[k - 1], b' ' | b'\t') {
+                k -= 1;
+            }
+            // A self-closing `<name/>` opens no new nesting level.
+            return if bytes[k - 1] == b'/' { None } else { Some(j + 1) };
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Locate the matching `</name>` close for an inline component opened at the
+/// caller, scanning from `from`. Tracks same-tag nesting (`<name …>` opens) and
+/// skips inline code spans (a `</name>` inside backticks is content). Returns
+/// the byte offset of the `<` of the matching close, or `None` if it has not
+/// arrived yet (the component is then incomplete).
+fn find_inline_close(bytes: &[u8], from: usize, name: &[u8]) -> Option<usize> {
+    let mut i = from;
+    let mut depth = 1usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'`' => {
+                let run = backtick_run_len(bytes, i);
+                i = matching_backtick_close(bytes, i + run, run).unwrap_or(i + run);
+            }
+            b'<' => {
+                if is_inline_close_tag(bytes, i, name) {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                    i += 2 + name.len() + 1;
+                } else if let Some(open_end) = inline_open_same(bytes, i, name) {
+                    depth += 1;
+                    i = open_end;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------

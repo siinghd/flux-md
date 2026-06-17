@@ -30,6 +30,7 @@ const core = new WorkerCore({
     p.setA11y(c?.a11y ?? false);
     p.setUnsafeHtml(c?.unsafeHtml ?? false);
     p.setComponentTags(c?.componentTags ?? []);
+    p.setInlineComponentTags(c?.inlineComponentTags ?? []);
     p.setBlockData(c?.blockData ?? false);
     return p;
   },
