@@ -1,6 +1,6 @@
 import { test, expect, beforeAll } from "bun:test";
 import { GlobalWindow } from "happy-dom";
-import { FluxClient, FluxPool } from "../src/client";
+import { FluxClient, FluxPool, __resetDefaultPool } from "../src/client";
 import { defineFluxMarkdown } from "../src/element";
 import type { Block, FromWorker, ToWorker, WorkerLike } from "../src/types";
 
@@ -66,6 +66,9 @@ beforeAll(() => {
   // No requestAnimationFrame: mountFluxMarkdown falls to synchronous sync, so
   // patches render immediately in tests.
   g.Worker = CapturingWorker as unknown;
+  // Fresh default pool so this file's self-owned client uses this file's worker,
+  // independent of test-file order in bun's shared process (see element.test.ts).
+  __resetDefaultPool();
   defineFluxMarkdown();
 });
 

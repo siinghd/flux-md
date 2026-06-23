@@ -1,6 +1,6 @@
 import { test, expect, beforeAll, spyOn } from "bun:test";
 import { GlobalWindow } from "happy-dom";
-import { FluxClient, FluxPool } from "../src/client";
+import { FluxClient, FluxPool, __resetDefaultPool } from "../src/client";
 import { defineFluxMarkdown, parseTriBool } from "../src/element";
 import type { Block, FromWorker, ToWorker, WorkerLike } from "../src/types";
 
@@ -51,6 +51,12 @@ beforeAll(() => {
   // them. Deliberately NO requestAnimationFrame, so mountFluxMarkdown falls to
   // synchronous sync (dom.ts line 99) — patches render immediately in tests.
   g.Worker = CapturingWorker as unknown;
+  // Reset the process-wide default pool so this file's self-owned clients build
+  // FRESH workers via THIS file's CapturingWorker (tracked in defaultPoolWorkers).
+  // Without this, bun's shared test process may leave the pool warm with another
+  // file's worker, and recoverStream() can't find the stream — a flaky,
+  // file-order-dependent failure (the publish gate hit exactly this in CI).
+  __resetDefaultPool();
   // Register AFTER customElements exists on globalThis (module top-level would
   // hit the SSR guard, since beforeAll runs after the import is evaluated).
   defineFluxMarkdown();

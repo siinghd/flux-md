@@ -271,6 +271,15 @@ export function getDefaultPool(): FluxPool {
   return defaultPool;
 }
 
+/** TEST-ONLY: drop the process-wide default pool so the next {@link getDefaultPool}
+ *  rebuilds it (lazily, with the current global `Worker`). Lets a test file that
+ *  drives the default pool start from a clean, deterministic state regardless of
+ *  which other file warmed it first in bun's shared test process. Not part of the
+ *  public API and a no-op for normal runtime use. */
+export function __resetDefaultPool(): void {
+  defaultPool = null;
+}
+
 // --------------------------------------------------------------------------
 // Client
 // --------------------------------------------------------------------------
