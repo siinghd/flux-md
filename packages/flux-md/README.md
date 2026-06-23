@@ -995,6 +995,43 @@ genuinely hostile content where CSS-overlay/clickjacking matters, render inside
 a sandboxed `<iframe>` instead — sanitization stops injection, not every
 visual-overlay trick.
 
+### Supply-chain transparency
+
+flux-md is **zero runtime dependency** — no third-party packages are pulled in
+at runtime. The parsing core is Rust compiled to WebAssembly, reproducibly
+buildable from `crates/flux-md-core/` via `bun run build:wasm`.
+
+**Native code (WebAssembly).** The shipped `flux_md_core_bg.wasm` (~200 KB) is
+first-party, built from the Rust source in this repo, and runs inside a sandboxed
+Web Worker (browser) or Node worker thread. Supply-chain scanners such as
+[Socket.dev](https://socket.dev) will flag it as `nativeCode` — this is accurate
+and expected. The WASM is not a vendored third-party binary; it is reproducible
+from source.
+
+**Network access.** flux-md performs network I/O in exactly two scenarios, both
+caller-driven:
+
+- `<flux-markdown src="URL">` — the Web Component fetches the URL you supply and
+  streams the response. No URL is ever chosen by flux-md itself.
+- The wasm-bindgen glue (`wasm/flux_md_core.js`) loads the co-located `.wasm`
+  asset via `fetch(new URL("…_bg.wasm", import.meta.url))` — bundlers resolve
+  this to a local build artifact, not a remote endpoint.
+
+flux-md has no telemetry, no analytics, and no first-party remote endpoints.
+Socket will flag the `networkAccess` signal — it is accurate and expected. In
+privileged contexts (browser extensions, Electron, environments where the
+same-origin policy may not apply), treat the `src` attribute value as you would
+any external URL and allowlist it in your CSP / security policy.
+
+**Filesystem access (Node/SSR only).** `flux-md/server` reads the package's
+own `.wasm` file off disk on Node.js (Node's `fetch` cannot load `file://`
+URLs). This is a Node-only path; it reads only the package-internal asset and
+never touches caller-supplied paths. Socket will flag `filesystemAccess` — also
+accurate and expected.
+
+The `socket.yml` at the repository root documents these signals with their
+justifications for Socket's GitHub app.
+
 ## Scaling
 
 `FluxClient`s share a **worker pool** (`getDefaultPool()`), so concurrency

@@ -100,6 +100,10 @@ interface FluxMarkdownProps {
    * `unsafeHtml` on. flux-md stays zero-dep — you bring the sanitizer. The
    * built-in code/math renderers operate on already-escaped content and are not
    * run through it. When omitted, rendering is byte-identical and zero-cost.
+   *
+   * **Memoize / hoist this** (same trap as `components`): a fresh closure each
+   * render busts the per-block memo, so every block re-sanitizes and re-parses
+   * on every patch instead of only the streaming tail.
    */
   sanitize?: (html: string) => string;
   /** Appended to the root's `className` (the `flux-md` class is always present). */
@@ -362,14 +366,40 @@ export function blockKindProps(block: Block, components?: Components): BlockComp
   return props;
 }
 
-const REACT_ATTR_NAME: Record<string, string> = { class: "className", for: "htmlFor" };
+// Prototype-free so a key like `constructor`/`hasOwnProperty` returns undefined
+// (and the `?? k` fallback fires) instead of an inherited Object.prototype member.
+const REACT_ATTR_NAME: Record<string, string> = Object.assign(Object.create(null), {
+  class: "className",
+  for: "htmlFor",
+});
+
+// React-meaningful prop names that must never survive into a user override's
+// attrs object (dangerouslySetInnerHTML crashes the render tree; ref/key/etc.
+// inject internals). Mirrors html-to-react's PROP_DENY.
+const ATTR_DENY = new Set([
+  "dangerouslysetinnerhtml", "ref", "key", "defaultvalue", "defaultchecked",
+  "suppresshydrationwarning", "suppresscontenteditablewarning",
+]);
+
+// Forward only plain HTML attribute identifiers (the REACT_ATTR_NAME renames
+// pass too), so weird casings / `__proto__` / `constructor` never reach a prop.
+const SAFE_ATTR_NAME = /^[a-z][a-z0-9-]*$/i;
 
 /** Convert sanitized HTML attribute pairs into a React-spreadable object,
  *  renaming the two names React requires (`class`→`className`, `for`→`htmlFor`).
- *  Other names (including `data-*` / `aria-*`) pass through unchanged. */
+ *  Other names (including `data-*` / `aria-*`) pass through unchanged. Drops
+ *  inline event handlers and React-meaningful/unsafe names as defense-in-depth
+ *  (the Rust `sanitize_attrs` is the primary gate; this keeps the React layer
+ *  safe on its own when attrs are handed to user override components). */
 function reactAttrs(pairs: [string, string][]): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const [k, v] of pairs) out[REACT_ATTR_NAME[k] ?? k] = v;
+  for (const [k, v] of pairs) {
+    const lower = k.toLowerCase();
+    if (lower.startsWith("on")) continue;
+    if (ATTR_DENY.has(lower)) continue;
+    if (!(lower in REACT_ATTR_NAME) && !SAFE_ATTR_NAME.test(k)) continue;
+    out[REACT_ATTR_NAME[lower] ?? k] = v;
+  }
   return out;
 }
 

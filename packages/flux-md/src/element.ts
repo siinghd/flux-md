@@ -90,6 +90,7 @@ export function defineFluxMarkdown(tag = "flux-markdown"): void {
       return this.#components;
     }
     set components(value: DomComponents | undefined) {
+      if (value === this.#components) return; // no-op re-assign: don't remount
       this.#components = value;
       if (this.#connected) this.#remount();
     }
@@ -98,6 +99,7 @@ export function defineFluxMarkdown(tag = "flux-markdown"): void {
       return this.#sanitize;
     }
     set sanitize(value: ((html: string) => string) | undefined) {
+      if (value === this.#sanitize) return; // no-op re-assign: don't remount
       this.#sanitize = value;
       if (this.#connected) this.#remount();
     }
@@ -155,10 +157,16 @@ export function defineFluxMarkdown(tag = "flux-markdown"): void {
       }
     }
 
-    attributeChangedCallback(name: string, _old: string | null, _new: string | null): void {
+    attributeChangedCallback(name: string, oldValue: string | null, newValue: string | null): void {
       // attributeChangedCallback fires before connectedCallback for attributes
       // present at upgrade; ignore until connected so config reads happen once.
       if (!this.#connected) return;
+      // setAttribute fires this on EVERY set, including setting an attribute to
+      // its current value (common when a host framework re-applies the same
+      // attrs on re-render). A no-op value change must not tear down the client
+      // and reparse the whole document — only a genuine change proceeds.
+      // (Attribute removal yields null, distinct from an empty string.)
+      if (oldValue === newValue) return;
 
       if (name === "markdown" || name === "src") {
         // One-shot content source change — only for a self-owned client. A

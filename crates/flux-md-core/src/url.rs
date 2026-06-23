@@ -135,7 +135,12 @@ fn is_url_safe(c: char) -> bool {
     )
 }
 
-const BAD_SCHEMES: &[&str] = &["javascript:", "vbscript:", "data:text/html", "data:text/javascript"];
+// `file:` is blocked alongside the script-execution schemes: it has no
+// legitimate use in rendered untrusted/LLM markdown, and in privileged contexts
+// (Electron, browser extensions, `file://` origins) a live `file:` href is a
+// local-resource-disclosure / phishing vector. Plain web origins already refuse
+// to navigate to it, so blocking it costs nothing there.
+const BAD_SCHEMES: &[&str] = &["javascript:", "vbscript:", "file:", "data:text/html", "data:text/javascript"];
 
 /// Lowercased, control-character-stripped view of a URL for scheme detection.
 /// Browsers ignore tab/newline/CR (and other C0 controls) when parsing a
@@ -159,9 +164,12 @@ fn scheme_probe(s: &str) -> String {
 /// multiply-encoded scheme like `javascript&amp;#58;` (or `&amp;amp;#58;`) must
 /// collapse to its live form before the match. Then strip the chars browsers
 /// ignore and match.
-fn is_dangerous_scheme(decoded: &str) -> bool {
+pub(crate) fn is_dangerous_scheme(decoded: &str) -> bool {
     let mut s = decoded.to_string();
-    loop {
+    // Bound the decode-to-fixpoint walk: a real value collapses in ≤3 passes
+    // (e.g. triple-encoded `javascript&amp;amp;#58;`); the cap keeps a crafted
+    // `javascript` + `&amp;`×N input from being O(n²).
+    for _ in 0..8 {
         let next = decode_text(&s);
         if next == s {
             break;
@@ -222,6 +230,23 @@ pub fn sanitize_image_url(url: &str, out: &mut String) {
 const URL_ATTRS: &[&str] = &[
     "href", "src", "xlink:href", "action", "formaction", "poster", "data", "cite",
     "background", "longdesc", "ping", "srcset",
+];
+
+/// Attribute names that are React-meaningful or otherwise unsafe to surface to a
+/// component override (matched case-insensitively). `dangerouslySetInnerHTML`
+/// would let untrusted markup inject raw HTML; `ref`/`key` perturb React's
+/// reconciliation; `defaultValue`/`defaultChecked` seed form state from
+/// untrusted content; the `suppress*` flags silence hydration-mismatch warnings
+/// that would otherwise flag tampering. `data-*`/`aria-*`/`xlink:href` are NOT
+/// here and stay allowed.
+const REACT_UNSAFE_ATTRS: &[&str] = &[
+    "dangerouslysetinnerhtml",
+    "ref",
+    "key",
+    "defaultvalue",
+    "defaultchecked",
+    "suppresshydrationwarning",
+    "suppresscontenteditablewarning",
 ];
 
 /// Parse and sanitize the attributes of a component's opening tag, returning
@@ -315,6 +340,12 @@ pub fn sanitize_attrs(open_tag: &str) -> Vec<(String, String)> {
         if lname == "style" {
             continue;
         }
+        // React-meaningful / unsafe-to-surface names are dropped (defense in
+        // depth for component overrides). `data-*`/`aria-*`/`xlink:href` are
+        // intentionally not in this list and pass through.
+        if REACT_UNSAFE_ATTRS.contains(&lname.as_str()) {
+            continue;
+        }
         let decoded = decode_text(raw_value);
         let value = if URL_ATTRS.contains(&lname.as_str()) && is_dangerous_scheme(&decoded) {
             "#".to_string()
@@ -375,6 +406,46 @@ mod attr_tests {
         // Safe URLs pass through (decoded).
         assert_eq!(get(&sanitize_attrs("<X href=\"https://e.com/p?a=1&amp;b=2\">"), "href"), Some("https://e.com/p?a=1&b=2"));
         assert_eq!(get(&sanitize_attrs("<X href=\"/local/path\">"), "href"), Some("/local/path"));
+    }
+
+    #[test]
+    fn drops_react_meaningful_attrs() {
+        // React-meaningful / unsafe-to-surface names are dropped (case-insensitive).
+        let a = sanitize_attrs(
+            "<Card dangerouslySetInnerHTML=\"{x}\" REF='r' Key=k defaultValue=v \
+             DEFAULTCHECKED=c suppressHydrationWarning suppressContentEditableWarning type=ok>",
+        );
+        for dropped in [
+            "dangerouslySetInnerHTML",
+            "ref",
+            "key",
+            "defaultValue",
+            "defaultChecked",
+            "suppressHydrationWarning",
+            "suppressContentEditableWarning",
+        ] {
+            assert!(
+                !names(&a).iter().any(|n| n.eq_ignore_ascii_case(dropped)),
+                "{dropped} should be dropped: {:?}",
+                names(&a)
+            );
+        }
+        assert_eq!(get(&a, "type"), Some("ok"));
+    }
+
+    #[test]
+    fn keeps_data_aria_xlink_attrs() {
+        // data-*/aria-*/xlink:href must be KEPT (they are not React-unsafe).
+        let a = sanitize_attrs(
+            "<Card data-id=\"7\" aria-label='hi' xlink:href=\"https://e.com\" type=ok>",
+        );
+        assert_eq!(get(&a, "data-id"), Some("7"));
+        assert_eq!(get(&a, "aria-label"), Some("hi"));
+        assert_eq!(get(&a, "xlink:href"), Some("https://e.com"));
+        assert_eq!(get(&a, "type"), Some("ok"));
+        // A dangerous xlink:href is still neutralized (it's a URL attr).
+        let b = sanitize_attrs("<Card xlink:href=\"javascript:alert(1)\">");
+        assert_eq!(get(&b, "xlink:href"), Some("#"));
     }
 
     #[test]

@@ -83,6 +83,39 @@ fn legitimate_urls_still_render() {
     assert!(render("![x](data:image/png;base64,iVBOR)\n").contains("src=\"data:image/png;base64,iVBOR\""));
 }
 
+/// CommonMark URI autolinks (`<scheme:…>`) must route through the same
+/// dangerous-scheme filter as regular links: a `javascript:`/`vbscript:`
+/// autolink emits href="#", while a safe `https:` autolink still links.
+#[test]
+fn dangerous_autolink_schemes_are_neutralized() {
+    for a in ["<javascript:alert(1)>", "<vbscript:msgbox(1)>", "<JaVaScRiPt:alert(1)>", "<file:///etc/passwd>"] {
+        let out = render(&format!("{a}\n"));
+        assert!(
+            !out.contains("href=\"javascript:") && !out.contains("href=\"vbscript:"),
+            "live dangerous autolink scheme leaked for {a:?}: {out}"
+        );
+        assert!(
+            out.contains("href=\"#\""),
+            "expected blocked href=# for autolink {a:?}: {out}"
+        );
+    }
+}
+
+/// A safe URI autolink still produces a working href (the fix must not over-block).
+#[test]
+fn safe_autolink_still_works() {
+    let out = render("<https://example.com>\n");
+    assert!(
+        out.contains("href=\"https://example.com\""),
+        "safe https autolink should still link: {out}"
+    );
+    // An email autolink is unaffected (separate code path).
+    assert!(
+        render("<a@b.com>\n").contains("href=\"mailto:a@b.com\""),
+        "email autolink should still link"
+    );
+}
+
 /// Raw HTML is escaped by default (unsafe_html off) — no tag injection.
 #[test]
 fn raw_html_is_escaped_by_default() {

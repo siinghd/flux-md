@@ -1,0 +1,89 @@
+# Socket.dev configuration for flux-md
+#
+# flux-md triggers several Socket supply-chain alerts that are INHERENT to the
+# package's design and cannot be removed without eliminating core features.
+# This file documents each alert with its justification so that Socket's GitHub
+# app can surface the explanation alongside the signal rather than blocking PRs.
+#
+# Schema reference: https://docs.socket.dev/docs/socket-yml
+
+version: 2
+
+# ---------------------------------------------------------------------------
+# Issue rules — document the three inherent signals that Socket will flag.
+# Each rule is left ENABLED (`true`, the default) so the signal stays visible in
+# connected-repo checks; the justification lives in the comments below and in the
+# README "Security" section. Flip any to `false` to suppress it in PR checks if
+# your workflow prefers that. (Values are booleans per the v2 schema.)
+# ---------------------------------------------------------------------------
+issueRules:
+  # -------------------------------------------------------------------------
+  # nativeCode
+  #
+  # flux-md ships a precompiled WebAssembly binary:
+  #   packages/flux-md/src/wasm/flux_md_core_bg.wasm  (~200 KB)
+  #
+  # This is the Rust→WASM parser core — the entire markdown parsing pipeline
+  # runs inside this module. It is:
+  #   • Reproducibly buildable from source:
+  #     crates/flux-md-core/ (Rust) → `bun run build:wasm`
+  #   • Loaded exclusively via the wasm-bindgen glue file
+  #     (packages/flux-md/src/wasm/flux_md_core.js) using a co-located
+  #     `new URL("flux_md_core_bg.wasm", import.meta.url)` reference.
+  #   • Executed inside a sandboxed Web Worker (browser) or a Node.js
+  #     worker_threads context — never on the main thread.
+  #   • Not fetched from any remote endpoint at runtime; bundlers resolve
+  #     the asset at build time.
+  #
+  # There is no way to ship a WASM-core parser without a compiled binary.
+  # The alert is expected and correct; the binary is first-party, auditable,
+  # and not a vendored third-party native add-on.
+  # -------------------------------------------------------------------------
+  nativeCode: true
+
+  # -------------------------------------------------------------------------
+  # networkAccess
+  #
+  # flux-md performs network I/O in exactly two caller-driven scenarios:
+  #
+  #   1. <flux-markdown src="URL"> (Web Component, element.ts)
+  #      The element fetches the caller-supplied URL and streams the response
+  #      through a FluxClient. This is intentional — it is the element's
+  #      primary "load from URL" API.  The URL is provided by the application
+  #      developer, not determined by flux-md itself.
+  #
+  #   2. wasm-bindgen glue (wasm/flux_md_core.js) on first WASM load
+  #      The glue calls fetch() to load the co-located .wasm asset using the
+  #      `import.meta.url`-relative path that the bundler resolves at build
+  #      time to a local asset (e.g. /_next/static/media/flux_md_core_bg.wasm).
+  #      This is standard wasm-bindgen practice; it is not a first-party
+  #      telemetry or analytics endpoint.
+  #
+  # flux-md has NO telemetry, NO analytics, NO first-party remote endpoints,
+  # and NO automatic outbound requests of its own.  All network calls are
+  # 100% caller-driven (src attribute) or bundler-resolved local assets
+  # (WASM glue).
+  #
+  # In privileged contexts (browser extensions, Electron, environments where
+  # the same-origin policy does not apply), callers should allowlist the `src`
+  # URLs they pass to <flux-markdown> — see the Security section of the README.
+  # -------------------------------------------------------------------------
+  networkAccess: true
+
+  # -------------------------------------------------------------------------
+  # filesystemAccess
+  #
+  # server.tsx (the flux-md/server SSR entry) reads the WASM binary from the
+  # local filesystem on Node.js using an `import.meta.url`-relative path:
+  #
+  #   new URL("./wasm/flux_md_core_bg.wasm", import.meta.url)
+  #
+  # Node's fetch() cannot load file:// URLs, so the server entry falls back
+  # to fs.readFile for the package's own co-located .wasm file. This is a
+  # Node-only branch; it is not present in the browser build and reads ONLY
+  # the package-internal asset, not any caller-supplied path.
+  #
+  # This is the standard pattern for Node.js WASM loading with wasm-bindgen
+  # and is not used to access arbitrary filesystem paths.
+  # -------------------------------------------------------------------------
+  filesystemAccess: true

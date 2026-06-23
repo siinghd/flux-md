@@ -58,11 +58,11 @@ export function initFlux(opts?: { wasm?: BufferSource | WebAssembly.Module }): P
     initPromise = (async () => {
       const wasmUrl = new URL("./wasm/flux_md_core_bg.wasm", import.meta.url);
       if (wasmUrl.protocol === "file:") {
-        // Node: read the bytes (Node's fetch can't load file://). A non-literal
-        // specifier keeps `node:fs` out of web bundles and off tsc's module graph
-        // (no @types/node needed to compile this source).
-        const nodeFs = "node:fs/promises";
-        const { readFile } = await import(nodeFs);
+        // Node: read the bytes (Node's fetch can't load file://). The literal
+        // `node:` specifier is externalized by bundlers, so node:fs never reaches
+        // a web bundle (this branch is also file:-only, never true in browsers).
+        // @ts-ignore — no @types/node in this package; node:fs/promises is a builtin.
+        const { readFile } = await import("node:fs/promises");
         initFluxSync(await readFile(wasmUrl));
       } else {
         await initWasmAsync({ module_or_path: wasmUrl });

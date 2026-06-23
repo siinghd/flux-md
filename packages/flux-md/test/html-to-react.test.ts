@@ -501,6 +501,26 @@ test("drops inline event-handler attributes", () => {
   expect(out).toContain('href="/x"'); // legit attr preserved
 });
 
+test("drops React-meaningful / unsafe attribute names (dangerouslySetInnerHTML, __proto__)", () => {
+  // `dangerouslySetInnerHTML` as a forwarded prop would crash the whole render
+  // tree (it must be an object, not a string) — dropping it keeps render safe.
+  expect(() =>
+    render(htmlToReact('<div dangerouslySetInnerHTML="<script>alert(1)</script>">x</div>', {})),
+  ).not.toThrow();
+  const out = render(htmlToReact('<div dangerouslySetInnerHTML="boom" ref="r" key="k">x</div>', {}));
+  expect(out).not.toContain("dangerouslySetInnerHTML");
+  expect(out).not.toContain("boom");
+  expect(out).toBe("<div>x</div>");
+  // `__proto__` (and other non-identifier names) never become props.
+  const out2 = render(htmlToReact('<div __proto__="p" defaultValue="d">x</div>', {}));
+  expect(out2).toBe("<div>x</div>");
+  // But data-*/aria-* and ordinary lowercase attrs still pass through.
+  const out3 = render(htmlToReact('<div data-x="1" aria-label="hi" class="c">x</div>', {}));
+  expect(out3).toContain('data-x="1"');
+  expect(out3).toContain('aria-label="hi"');
+  expect(out3).toContain('class="c"');
+});
+
 test("preserves legitimate URLs", () => {
   expect(render(htmlToReact('<a href="https://example.com/a?b=1">x</a>', {})))
     .toContain('href="https://example.com/a?b=1"');

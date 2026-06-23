@@ -4,6 +4,71 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.15.1 — 2026-06-22
+
+### Security
+
+- **XSS — dangerous-scheme autolinks are neutralized.** A CommonMark URI autolink
+  (`<javascript:alert(1)>`, `<vbscript:…>`, `<file:…>`) previously emitted a live
+  `href`, because autolinks bypassed the scheme allowlist that regular links go
+  through. They now route through the same decode-stable dangerous-scheme filter:
+  the `href` becomes `#` while the visible link text is unchanged. `file:` is now
+  blocked everywhere (links, autolinks, URL attributes) — it has no legitimate use
+  in rendered untrusted markdown and is a local-resource / phishing vector in
+  privileged contexts (Electron, extensions, `file://` origins).
+- **Component-tag / `htmlToReact` attribute hardening.** Sanitized attributes now
+  also drop React-meaningful names (`dangerouslySetInnerHTML`, `ref`, `key`,
+  `defaultValue`, `defaultChecked`, `suppressHydrationWarning`, …) so a hostile
+  attribute can't crash the render tree or smuggle in a prop. Attribute→prop
+  lookup maps are prototype-free (`Object.create(null)`), and only HTML / `data-`
+  / `aria-` attribute names are forwarded to React.
+
+### Fixed
+
+- **ReDoS / quadratic blow-ups on untrusted input.**
+  - Highlighter (`hi.ts`): the JS/TS regex-literal and bash double-quoted-string
+    patterns could backtrack quadratically on crafted code blocks; both rewritten
+    to linear forms, plus a 50 KB per-block size guard.
+  - URL scheme check: the decode-to-fixpoint loop (Rust `is_dangerous_scheme` and
+    JS `safeUrl`) is capped at 8 passes — still catches multi-encoded
+    `javascript&amp;amp;#58;` payloads, no longer O(n²) on `&amp;`-spam.
+  - Inline parser: nested / unbalanced link-bracket scanning is bounded
+    (depth + length caps); GFM extended-autolink trailing-paren trimming is now
+    linear instead of recounting the span each iteration.
+
+### Changed
+
+- **`flux-md/server` uses a literal `import("node:fs/promises")`** instead of a
+  variable specifier, resolving the `dynamicRequire` supply-chain signal. Behavior
+  is unchanged — still a Node-only, `file:`-guarded branch.
+- Added a **`## Security`** / supply-chain-transparency section to the README and a
+  documented **`socket.yml`** covering the inherent `nativeCode` / `networkAccess`
+  / `filesystemAccess` signals (the WebAssembly core and the opt-in
+  `<flux-markdown src>` fetch).
+
+### Performance
+
+- **No redundant re-renders / rebuilds on no-op updates.**
+  - `<flux-markdown>` ignores a `setAttribute` whose value didn't change (a host
+    framework re-applying identical attributes no longer tears down the self-owned
+    client and reparses the whole document), and the `components` / `sanitize`
+    property setters skip the remount when assigned the same identity.
+  - `FluxClient.reset()` no longer notifies subscribers when the store was already
+    empty — skips a wasted, output-identical render pass.
+  - Documented that `sanitize` (like `components`) should be memoized/hoisted in
+    React, so a fresh closure each render doesn't bust the per-block memo.
+- Added render-count / node-reuse / no-remount regression tests across the React,
+  DOM, store, custom-element, and Vue bindings, locking in that committed blocks
+  never re-render or rebuild as the stream grows (only the streaming tail does).
+
+### Known limitations
+
+- Streaming a single very large **unclosed** block (a multi-megabyte indented code
+  block, open HTML block, or footnote-disarmed list delivered across many chunks)
+  is still O(n²) in the uncommitted-tail length. A bounded incremental cache for
+  these resumable containers is tracked as follow-up; finalized / closed blocks and
+  all other inputs are unaffected.
+
 ## 0.15.0 — 2026-06-17
 
 ### Added

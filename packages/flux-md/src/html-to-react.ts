@@ -10,7 +10,10 @@ const VOID = new Set([
 // Attribute name → React prop name, for the handful that differ. Anything not
 // listed passes through verbatim (React forwards data-*/aria-* and lowercase
 // attributes unchanged).
-const ATTR_MAP: Record<string, string> = {
+// Prototype-free map so an attribute named `constructor`/`hasOwnProperty`/etc.
+// returns undefined (and the `?? name` fallback fires) rather than resolving to
+// an inherited Object.prototype member.
+const ATTR_MAP: Record<string, string> = Object.assign(Object.create(null), {
   class: "className",
   for: "htmlFor",
   colspan: "colSpan",
@@ -26,13 +29,26 @@ const ATTR_MAP: Record<string, string> = {
   crossorigin: "crossOrigin",
   enterkeyhint: "enterKeyHint",
   inputmode: "inputMode",
-};
+});
 
 // URL-bearing attributes whose value must be scheme-checked. `htmlToReact` is
 // exported and may be handed untrusted HTML directly; React happily renders a
 // `javascript:` href (it only warns), so we neutralize it here as
 // defense-in-depth — the core's own output is already sanitized.
 const URL_ATTRS = new Set(["href", "src", "xlink:href", "formaction", "action", "poster", "data"]);
+
+// React-meaningful prop names that must never be forwarded from (possibly
+// untrusted) HTML attributes: `dangerouslySetInnerHTML` as a prop crashes the
+// whole render tree (DoS), and ref/key/defaultValue/etc. are injectable.
+const PROP_DENY = new Set([
+  "dangerouslysetinnerhtml", "ref", "key", "defaultvalue", "defaultchecked",
+  "suppresshydrationwarning", "suppresscontenteditablewarning",
+]);
+
+// Only forward attribute names that are a plain HTML attribute identifier
+// (so camelCase / `__proto__` / `constructor` never reach React props). The
+// explicit ATTR_MAP renames and `xlink:href` are allowed past this gate.
+const SAFE_ATTR_NAME = /^[a-z][a-z0-9-]*$/i;
 
 /** Replace a dangerous-scheme URL with "#". Mirrors the Rust `is_dangerous_scheme`:
  *  strip control chars (C0, DEL, C1 — matching Rust char::is_control),
@@ -42,8 +58,10 @@ function safeUrl(value: string): string {
   // reaches the DOM, so peel layers to a fixpoint before the scheme check —
   // catches `javascript&#58;` and double-encoded `javascript&amp;#58;`. Only the
   // probe is decoded; the returned value is untouched (safe URLs stay verbatim).
+  // Cap at 8 iterations: far beyond any legit URL (browsers entity-decode an
+  // href once), and bounds the loop so a hostile value can't make it quadratic.
   let decoded = value;
-  for (let prev = ""; decoded !== prev; ) {
+  for (let i = 0, prev = ""; i < 8 && decoded !== prev; i++) {
     prev = decoded;
     decoded = decodeEntities(decoded);
   }
@@ -265,6 +283,9 @@ function attrsToProps(tag: string, attrs: Record<string, string | true>, key: st
     // React drops most lowercase `on*` attrs — this also covers casings and
     // future React behavior.
     if (lower.startsWith("on")) continue;
+    // Reject React-meaningful names that would crash the render tree or inject
+    // internals (dangerouslySetInnerHTML, ref, key, defaultValue, …).
+    if (PROP_DENY.has(lower)) continue;
     if (lower === "style" && typeof value === "string") {
       props.style = safeStyle(parseStyle(value));
       continue;
@@ -280,6 +301,10 @@ function attrsToProps(tag: string, attrs: Record<string, string | true>, key: st
       props.defaultChecked = value === true ? true : value;
       continue;
     }
+    // Restrict forwarded ORIGINAL names to a plain HTML attribute identifier
+    // (plus the ATTR_MAP renames and xlink:href handled above) so weird casings
+    // / `__proto__` / `constructor` can never become a React prop.
+    if (!(lower in ATTR_MAP) && !SAFE_ATTR_NAME.test(name)) continue;
     props[ATTR_MAP[lower] ?? name] = value;
   }
   return props;

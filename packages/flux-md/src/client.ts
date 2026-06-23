@@ -514,6 +514,11 @@ export class FluxClient {
   }
 
   reset() {
+    // Only notify subscribers if there was content to clear: resetting an
+    // already-empty store leaves the view empty either way, so skip the no-op
+    // emit (which would otherwise drive every subscriber through a wasted,
+    // output-identical render pass).
+    const hadContent = this.store.snapshot.length > 0;
     this.store = emptyBlockStore();
     this.appendedBytes = 0;
     this.patchCount = 0;
@@ -527,7 +532,7 @@ export class FluxClient {
     // Same streamId + worker — the worker frees and lazily recreates the parser.
     const pw = this.ensureAcquired();
     this.pool.send(pw, { type: "reset", streamId: this.streamId });
-    this.emit();
+    if (hadContent) this.emit();
   }
 
   destroy() {

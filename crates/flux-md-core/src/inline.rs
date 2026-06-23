@@ -346,21 +346,26 @@ fn try_ext_autolink(bytes: &[u8], start: usize, out: &mut String) -> Option<usiz
         end += 1;
     }
 
-    // Trailing-punctuation trimming (applied repeatedly).
+    // Trailing-punctuation trimming (applied repeatedly). Count parens ONCE
+    // up front and keep the running counts in sync as we trim, instead of
+    // recounting the whole span every iteration (which is O(n²)).
+    let mut opens = bytes[start..end].iter().filter(|&&b| b == b'(').count();
+    let mut closes = bytes[start..end].iter().filter(|&&b| b == b')').count();
     loop {
         if end <= start {
             return None;
         }
         let last = bytes[end - 1];
         if matches!(last, b'?' | b'!' | b'.' | b',' | b':' | b'*' | b'_' | b'~') {
+            // These never affect the paren counts.
             end -= 1;
             continue;
         }
         if last == b')' {
-            let opens = bytes[start..end].iter().filter(|&&b| b == b'(').count();
-            let closes = bytes[start..end].iter().filter(|&&b| b == b')').count();
+            // Trim an unbalanced trailing `)` and decrement the cached count.
             if closes > opens {
                 end -= 1;
+                closes -= 1;
                 continue;
             }
         }
@@ -372,6 +377,11 @@ fn try_ext_autolink(bytes: &[u8], start: usize, out: &mut String) -> Option<usiz
                     && bytes[amp + 1..end - 1].iter().all(|b| b.is_ascii_alphanumeric())
                 {
                     end = amp;
+                    // The jumped-over span `[amp, prev end)` was all alnum + `&`
+                    // + `;` — no parens — but recompute once to stay exact and
+                    // robust to future edits (this branch is non-looping).
+                    opens = bytes[start..end].iter().filter(|&&b| b == b'(').count();
+                    closes = bytes[start..end].iter().filter(|&&b| b == b')').count();
                     continue;
                 }
             }
@@ -696,11 +706,20 @@ fn try_autolink(bytes: &[u8], start: usize, out: &mut String) -> Option<usize> {
         // Email autolinks: just escape the chars, no percent-encoding for ASCII.
         crate::url::escape_attr(s, out);
     } else {
-        // URI autolinks bypass our scheme allowlist (CommonMark allows any
-        // valid scheme) but still get percent-encoded for unsafe chars.
-        // Backslash escapes are NOT processed in autolinks.
-        let normalized = autolink_normalize(s);
-        crate::url::escape_attr(&normalized, out);
+        // URI autolinks allow any valid scheme per CommonMark, but a dangerous
+        // one (`javascript:`, `vbscript:`, `data:text/html`, …) is XSS when the
+        // output is injected via innerHTML — route it through the same
+        // dangerous-scheme filter as regular links so the href becomes `#`. The
+        // visible link TEXT below is unaffected (still HTML-escaped verbatim).
+        let decoded = crate::url::decode_text(s);
+        if crate::url::is_dangerous_scheme(&decoded) {
+            out.push('#');
+        } else {
+            // Backslash escapes are NOT processed in autolinks; percent-encode
+            // only unsafe chars.
+            let normalized = autolink_normalize(s);
+            crate::url::escape_attr(&normalized, out);
+        }
     }
     out.push_str("\" target=\"_blank\" rel=\"noopener noreferrer nofollow\">");
     for c in s.chars() {
@@ -1349,8 +1368,13 @@ fn text_has_nested_link(
     range: core::ops::Range<usize>,
     opts: &RenderOpts,
 ) -> bool {
+    // Cap the span probed for a nested link: each `[` re-runs the (recursive)
+    // link parse, so an unbounded range over many `[` is cubic. Past the cap we
+    // stop probing — a real link label is far shorter than this, so output is
+    // unchanged for realistic input.
+    let probe_end = range.end.min(range.start + MAX_BRACKET_TEXT_LEN);
     let mut i = range.start;
-    while i < range.end {
+    while i < probe_end {
         match bytes[i] {
             b'\\' if i + 1 < bytes.len() => i += 2,
             b'`' => i = skip_code_span(bytes, i).unwrap_or(i + 1),
@@ -1487,6 +1511,16 @@ fn extract_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
+/// Max bracket nesting depth probed by `read_balanced_brackets`. CommonMark
+/// link labels are at most a few deep in any realistic document; a deeper run of
+/// `[` is an attacker trying to make the recursive nested-link probe blow up, so
+/// we bail (the `[` then renders literally — output-equivalent for real input).
+const MAX_BRACKET_DEPTH: usize = 32;
+/// Max bracket-text length probed by `read_balanced_brackets`. A link label is
+/// capped at 999 chars by CommonMark; this bound is comfortably above any real
+/// label and keeps the per-`[` scan from going quadratic on unbalanced input.
+const MAX_BRACKET_TEXT_LEN: usize = 8 * 1024;
+
 fn read_balanced_brackets(bytes: &[u8], start: usize) -> Option<(core::ops::Range<usize>, usize)> {
     if bytes.get(start) != Some(&b'[') {
         return None;
@@ -1494,6 +1528,9 @@ fn read_balanced_brackets(bytes: &[u8], start: usize) -> Option<(core::ops::Rang
     let mut depth = 1;
     let mut i = start + 1;
     while i < bytes.len() {
+        if depth > MAX_BRACKET_DEPTH || i - start > MAX_BRACKET_TEXT_LEN {
+            return None;
+        }
         match bytes[i] {
             b'\\' if i + 1 < bytes.len() => i += 2,
             b'`' => {

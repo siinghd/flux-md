@@ -55,7 +55,7 @@ const jsPats: Pat[] = [
   ["str", /"(?:\\.|[^"\\\n])*"/y],
   ["str", /'(?:\\.|[^'\\\n])*'/y],
   ["str", /`(?:\\.|[^`\\])*`/y],
-  ["rx", /\/(?:\\.|\[(?:\\.|[^\]\\])*\]|[^/\\\n])+\/[gimsuy]*/y],
+  ["rx", /\/(?![*/])(?:\\.|[^/\\\n])+\/[gimsuy]*/y],
   ["num", /\b(?:0x[\da-fA-F_]+|0b[01_]+|0o[0-7_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?)\b/y],
   ["ident", /[A-Za-z_$][\w$]*/y],
   ["pun", /[+\-*/=<>!&|^~?:;,.[\](){}]/y],
@@ -103,7 +103,7 @@ const goPats: Pat[] = [
 
 const bashPats: Pat[] = [
   ["com", /#[^\n]*/y],
-  ["str", /"(?:\\.|\$\([^)]*\)|[^"\\])*"/y],
+  ["str", /"(?:\\.|[^"\\])*"/y],
   ["str", /'[^']*'/y],
   ["var", /\$\{[^}]+\}|\$\w+|\$[*@#?!$0-9]/y],
   ["num", /\b\d+\b/y],
@@ -187,6 +187,9 @@ function escapeHtml(s: string): string {
 }
 
 export function highlight(code: string, lang: string): string {
+  // Defense-in-depth: never tokenize a pathologically huge block on the main
+  // thread — fall back to plain escaped text.
+  if (code.length > 50_000) return escapeHtml(code);
   const conf = LANGS[lang.toLowerCase()];
   if (!conf) return escapeHtml(code);
 
