@@ -9,7 +9,7 @@ import {
   type CSSProperties,
   type ReactElement,
 } from "react";
-import type { Block, BlockComponentProps, Components, HeadingData, ListData, ListItemData, NestedBlock, TableData } from "./types";
+import type { Align, Block, BlockComponentProps, Components, HeadingData, ListData, ListItemData, NestedBlock, TableData } from "./types";
 import { FluxClient } from "./client";
 import type { ParserConfig, RenderMetricsHook } from "./types-core";
 import { CodeBlock } from "./renderers/CodeBlock";
@@ -588,6 +588,113 @@ function alertTitleHtml(html: string): string {
   return m ? m[0] : "";
 }
 
+// A stable empty components map so the keyed-table cell path can call the
+// memoized htmlToReact even when the caller passes no overrides (the table
+// itself is still routed through the components-aware tokenizer — never raw
+// innerHTML — so the 0.15.0 security hardening always applies).
+const NO_COMPONENTS: Components = Object.freeze(Object.create(null));
+
+// One table cell. `memo` + `useMemo` keep its parsed React tree stable across
+// patches when its `html`/`components` are unchanged — so a committed row's
+// cells never re-tokenize. Only the OPEN trailing row (whose cell html grows
+// each tick) re-parses. Cells are routed through `htmlToReact` (NOT raw
+// innerHTML) to preserve component overrides + the security hardening, and
+// through `sanitize` first when supplied (parity with the innerHTML path).
+const TableCellView = memo(function TableCellView({
+  tag,
+  html,
+  align,
+  scope,
+  components,
+  sanitize,
+}: {
+  tag: "th" | "td";
+  html: string;
+  align: Align;
+  scope: boolean;
+  components: Components;
+  sanitize?: (html: string) => string;
+}) {
+  const tree = useMemo(
+    () => htmlToReact(sanitize ? sanitize(html) : html, components),
+    [html, components, sanitize],
+  );
+  return createElement(
+    tag,
+    {
+      scope: tag === "th" && scope ? "col" : undefined,
+      style: align ? { textAlign: align } : undefined,
+    },
+    tree,
+  );
+});
+
+/**
+ * Keyed table renderer for an OPEN table when `blockData` is on. Rows are keyed
+ * by index, so React reconciles only the growing trailing row each patch — a
+ * committed row keeps its identity (its `cell.html` is byte-stable) and its
+ * cells skip re-tokenizing. Closed tables stay on the memo/fingerprint full-HTML
+ * path (committed blocks are already free); this only buys the streaming tail.
+ * Alignment comes from `data.aligns`; `dir="auto"` / `scope="col"` are recovered
+ * from the block HTML so the streamed markup stays faithful to the closed form.
+ */
+function KeyedTable({
+  data,
+  html,
+  components,
+  sanitize,
+}: {
+  data: TableData;
+  html: string;
+  components?: Components;
+  sanitize?: (html: string) => string;
+}) {
+  const comps = components ?? NO_COMPONENTS;
+  // Faithful wrapper attrs not carried in the data channel, sniffed from the
+  // (trusted, core-emitted) HTML prefix so the open form matches the closed one.
+  const dir = html.startsWith("<table dir=\"auto\"") ? "auto" : undefined;
+  const scope = html.includes("<th scope=\"col\"");
+  const aligns = data.aligns;
+  return (
+    <table dir={dir as "auto" | undefined}>
+      <thead>
+        <tr>
+          {data.headers.map((c, j) => (
+            <TableCellView
+              key={j}
+              tag="th"
+              html={c.html}
+              align={aligns[j] ?? null}
+              scope={scope}
+              components={comps}
+              sanitize={sanitize}
+            />
+          ))}
+        </tr>
+      </thead>
+      {data.rows.length > 0 && (
+        <tbody>
+          {data.rows.map((row, i) => (
+            <tr key={i}>
+              {row.map((c, j) => (
+                <TableCellView
+                  key={j}
+                  tag="td"
+                  html={c.html}
+                  align={aligns[j] ?? null}
+                  scope={scope}
+                  components={comps}
+                  sanitize={sanitize}
+                />
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      )}
+    </table>
+  );
+}
+
 // Per-kind off-screen size estimate for `contain-intrinsic-size` — keeps the
 // scrollbar stable while a block is layout-skipped. Wrong by 2× is fine; the
 // `auto` keyword makes the browser remember the real size once rendered.
@@ -695,6 +802,23 @@ function renderBlockContent({
     kind.toLowerCase() +
     (block.open ? " flux-open" : "") +
     (block.speculative ? " flux-speculative" : "");
+
+  // Keyed table for the streaming tail: when `blockData` is on and a Table block
+  // is OPEN, render keyed rows so React reconciles only the growing trailing row
+  // — a committed row's `cell.html` is byte-stable, so its memoized cells skip
+  // re-tokenizing instead of the whole table re-parsing every patch. Closed
+  // tables stay on the memo/full-HTML path below (committed blocks are already
+  // free). Falls through when the data channel is absent (blockData off).
+  if (kind === "Table" && block.open) {
+    const data = block.kind.data as TableData | undefined;
+    if (data && Array.isArray(data.rows)) {
+      return (
+        <div className={className}>
+          <KeyedTable data={data} html={block.html} components={components} sanitize={sanitize} />
+        </div>
+      );
+    }
+  }
 
   // Keyed list renderer (opt-in: only fires when `blockData` is on, so
   // `kind.data.items` carries the per-item inner HTML). While a list is OPEN it

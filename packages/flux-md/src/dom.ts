@@ -1,6 +1,6 @@
 import type { FluxClient } from "./client";
 import { highlight } from "./hi";
-import type { Block, BlockComponentProps, BlockKindTag, ListData, RenderMetricsHook } from "./types-core";
+import type { Align, Block, BlockComponentProps, BlockKindTag, ListData, RenderMetricsHook, TableData } from "./types-core";
 import { blockProps, extractLang } from "./block-props";
 
 /**
@@ -106,6 +106,25 @@ interface MountedBlock {
   // wired; otherwise these stay at their initial values and are never read).
   renderCount: number;
   toggleCount: number;
+  // Set only for an OPEN table rendered via the keyed-tbody path (blockData on).
+  // Lets a later patch update just the growing trailing row in place instead of
+  // rebuilding the whole node.
+  table?: KeyedTable;
+}
+
+// Incremental keyed-tbody state for one OPEN table. `<tr>` nodes for committed
+// rows are appended once and never rebuilt; only the last (open) row's cells are
+// re-set each patch — never a whole-`<tbody>` rebuild.
+interface KeyedTable {
+  table: HTMLTableElement;
+  tbody: HTMLTableSectionElement | null;
+  scope: boolean;
+  // Number of LEADING rows whose `<tr>` is frozen in the DOM (built once and
+  // never touched again). The last data row is OPEN — re-rendered each patch —
+  // so after every update `committed === rows.length - 1`.
+  committed: number;
+  // The current open trailing `<tr>` (re-rendered each patch); replaced in place.
+  lastRow: HTMLTableRowElement | null;
 }
 
 export function mountFluxMarkdown(
@@ -161,11 +180,12 @@ export function mountFluxMarkdown(
       const existing = mounted.get(b.id);
       if (!existing) {
         const t0 = onRenderMetrics && hasPerf ? performance.now() : 0;
-        const node = renderBlock(b);
         const mb: MountedBlock = {
-          id: b.id, node, html: b.html, open: b.open, speculative: b.speculative,
-          kind: b.kind.type, renderCount: 0, toggleCount: 0,
+          id: b.id, node: undefined as unknown as HTMLElement,
+          html: b.html, open: b.open, speculative: b.speculative, kind: b.kind.type,
+          renderCount: 0, toggleCount: 0,
         };
+        mb.node = renderBlock(b, mb);
         mounted.set(b.id, mb);
         if (onRenderMetrics) noteRender(mb, b, t0);
         continue;
@@ -176,9 +196,31 @@ export function mountFluxMarkdown(
       if (existing.html === b.html && existing.open === b.open && existing.speculative === b.speculative) {
         continue;
       }
-      // Changed → rebuild and swap in place.
       const t0 = onRenderMetrics && hasPerf ? performance.now() : 0;
-      const node = renderBlock(b);
+      // Keyed-table fast path: an OPEN table that already mounted via the keyed
+      // tbody updates only its growing trailing row in place — committed `<tr>`
+      // nodes are never rebuilt. Reuses the same block node (no replaceWith).
+      // This is still a render of the node, so it feeds the render-churn probe.
+      if (existing.table && b.open && b.kind.type === "Table") {
+        const data = tableData(b);
+        if (data) {
+          syncTbody(existing.table, data);
+          if (onRenderMetrics) noteRender(existing, b, t0);
+          // Keep the wrapper's speculative class in sync (parity with the
+          // full-rebuild path) without recreating the node.
+          if (existing.speculative !== b.speculative) {
+            existing.node.classList.toggle("flux-speculative", b.speculative);
+          }
+          existing.html = b.html;
+          existing.open = b.open;
+          existing.speculative = b.speculative;
+          continue;
+        }
+      }
+      // Changed → rebuild and swap in place. A table that just closed (or whose
+      // data vanished) drops its keyed manager and re-renders the full HTML once.
+      existing.table = undefined;
+      const node = renderBlock(b, existing);
       existing.node.replaceWith(node);
       existing.node = node;
       if (onRenderMetrics) noteRender(existing, b, t0);
@@ -241,8 +283,8 @@ export function mountFluxMarkdown(
     }
   }
 
-  function renderBlock(b: Block): HTMLElement {
-    const content = renderBlockContent(b);
+  function renderBlock(b: Block, mb: MountedBlock): HTMLElement {
+    const content = renderBlockContent(b, mb);
     // Virtualize only *closed* blocks. Unlike the JSX renderer (which wraps in
     // an extra div) the DOM renderer sets the properties on the block node
     // directly — one of the documented byte-faithfulness divergences.
@@ -254,7 +296,7 @@ export function mountFluxMarkdown(
     return content;
   }
 
-  function renderBlockContent(b: Block): HTMLElement {
+  function renderBlockContent(b: Block, mb: MountedBlock): HTMLElement {
     const kind = b.kind.type;
 
     // 1. Block-kind override (a Component block dispatches on its tag first).
@@ -279,7 +321,17 @@ export function mountFluxMarkdown(
         return renderMermaid(b);
     }
 
-    // 2b. Keyed list renderer (opt-in: only when `blockData` is on, so
+    // 2b. Keyed-table path for the streaming tail: an OPEN table with `blockData`
+    // renders a real `<table>` whose committed `<tr>` nodes are appended once and
+    // frozen, so a later patch updates only the growing trailing row. Closed
+    // tables (and blockData-off tables) take the generic full-HTML path below
+    // (closed nodes are frozen by the fingerprint check, already free).
+    if (kind === "Table" && b.open) {
+      const data = tableData(b);
+      if (data) return buildKeyedTable(b, data, mb);
+    }
+
+    // 2c. Keyed list renderer (opt-in: only when `blockData` is on, so
     // `kind.data.items` carries per-item inner HTML). For an OPEN list, stamp one
     // `<li>` per item — each item's inner HTML routed through the SAME sanitize
     // path the generic innerHTML branch uses — so the rebuilt list tracks the
@@ -370,6 +422,87 @@ export function mountFluxMarkdown(
       wrapper.appendChild(inner ?? child);
     }
     return wrapper;
+  }
+
+  // Build the initial keyed table node + manager. The `<thead>` and all-but-last
+  // `<tr>` are emitted once; the manager remembers the committed row count so a
+  // later patch (via syncTbody) only re-renders the open trailing row.
+  function buildKeyedTable(b: Block, data: TableData, mb: MountedBlock): HTMLElement {
+    const node = document.createElement("div");
+    node.className = "flux-block flux-block-table flux-open" + (b.speculative ? " flux-speculative" : "");
+    const table = document.createElement("table");
+    if (b.html.startsWith('<table dir="auto"')) table.setAttribute("dir", "auto");
+    const scope = b.html.includes('<th scope="col"');
+
+    const thead = document.createElement("thead");
+    const htr = document.createElement("tr");
+    for (let j = 0; j < data.headers.length; j++) {
+      htr.appendChild(makeCell("th", data.headers[j].html, data.aligns[j] ?? null, scope));
+    }
+    thead.appendChild(htr);
+    table.appendChild(thead);
+
+    const km: KeyedTable = { table, tbody: null, scope, committed: 0, lastRow: null };
+    mb.table = km;
+    node.appendChild(table);
+    syncTbody(km, data);
+    return node;
+  }
+
+  // Append any newly-committed rows once, then (re)render only the open trailing
+  // row. Shared by build (committed===0) and update. The whole `<tbody>` is never
+  // rebuilt — committed `<tr>` nodes keep their identity across patches.
+  function syncTbody(km: KeyedTable, data: TableData): void {
+    const n = data.rows.length;
+    if (n === 0) {
+      // No body rows yet (header-only streamed table). Tear down any stale tbody.
+      if (km.tbody) {
+        km.tbody.remove();
+        km.tbody = null;
+      }
+      km.committed = 0;
+      km.lastRow = null;
+      return;
+    }
+    if (!km.tbody) {
+      km.tbody = document.createElement("tbody");
+      km.table.appendChild(km.tbody);
+    }
+    const tbody = km.tbody;
+    // The prior open trailing row is now superseded — drop it before freezing the
+    // rows that have since committed and rendering the new trailing row.
+    if (km.lastRow) {
+      km.lastRow.remove();
+      km.lastRow = null;
+    }
+    // Freeze every row from the first uncommitted up to (but not including) the
+    // last: append its `<tr>` once and never touch it again (committed cell html
+    // is byte-stable).
+    for (let i = km.committed; i < n - 1; i++) {
+      tbody.appendChild(makeRow(data.rows[i], data.aligns));
+    }
+    km.committed = n - 1;
+    // Render the still-OPEN last row and remember it so the next patch replaces it.
+    const last = makeRow(data.rows[n - 1], data.aligns);
+    tbody.appendChild(last);
+    km.lastRow = last;
+  }
+
+  function makeRow(cells: TableData["rows"][number], aligns: Align[]): HTMLTableRowElement {
+    const tr = document.createElement("tr");
+    for (let j = 0; j < cells.length; j++) {
+      tr.appendChild(makeCell("td", cells[j].html, aligns[j] ?? null, false));
+    }
+    return tr;
+  }
+
+  function makeCell(tag: "th" | "td", html: string, align: Align, scope: boolean): HTMLElement {
+    const cell = document.createElement(tag);
+    if (tag === "th" && scope) cell.setAttribute("scope", "col");
+    if (align) cell.style.textAlign = align;
+    // Route cell html through the same sanitize path the generic block uses.
+    cell.innerHTML = sanitize ? sanitize(html) : html;
+    return cell;
   }
 
   // An override may return an element (used directly) or an HTML string (wrapped
@@ -549,6 +682,14 @@ export function mountFluxMarkdown(
       sync();
     },
   };
+}
+
+// The structured `TableData` (opt-in `blockData`) on a Table block, or
+// `undefined` when the flag is off (the keyed path then falls back to full HTML).
+function tableData(b: Block): TableData | undefined {
+  if (b.kind.type !== "Table") return undefined;
+  const data = b.kind.data as TableData | undefined;
+  return data && Array.isArray(data.rows) ? data : undefined;
 }
 
 // Local copy of the canonical code-text decoder (kept here so dom.ts depends
