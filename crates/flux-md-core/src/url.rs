@@ -146,12 +146,25 @@ const BAD_SCHEMES: &[&str] = &["javascript:", "vbscript:", "file:", "data:text/h
 /// Browsers ignore tab/newline/CR (and other C0 controls) when parsing a
 /// scheme, so we must too — otherwise `java&#9;script:` slips through.
 fn scheme_probe(s: &str) -> String {
-    s.chars()
-        .filter(|c| !c.is_control())
-        .flat_map(|c| c.to_lowercase())
-        .collect::<String>()
-        .trim_start()
-        .to_string()
+    // Single pass: drop C0 controls, trim the leading whitespace run, lowercase
+    // the rest. Equivalent to the old filter→lowercase→collect→trim_start chain
+    // but with one allocation instead of two. `to_lowercase` (not ASCII) is
+    // deliberate — it preserves the Unicode case fold the matcher relies on.
+    let mut out = String::new();
+    let mut seen_nonspace = false;
+    for c in s.chars() {
+        if c.is_control() {
+            continue;
+        }
+        if !seen_nonspace && c.is_whitespace() {
+            continue;
+        }
+        seen_nonspace = true;
+        for lc in c.to_lowercase() {
+            out.push(lc);
+        }
+    }
+    out
 }
 
 /// Whether the URL resolves to a dangerous scheme. **Checked on the fully

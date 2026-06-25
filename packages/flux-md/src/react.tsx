@@ -736,8 +736,19 @@ function KeyedTable({
   const comps = components ?? NO_COMPONENTS;
   // Faithful wrapper attrs not carried in the data channel, sniffed from the
   // (trusted, core-emitted) HTML prefix so the open form matches the closed one.
-  const dir = html.startsWith("<table dir=\"auto\"") ? "auto" : undefined;
-  const scope = html.includes("<th scope=\"col\"");
+  // Scope the sniffs to the stable header prefix: while a table streams, `html`
+  // grows every patch, but everything up to </thead> is byte-stable once the
+  // header commits — so these memos skip on every row-append tick instead of
+  // re-scanning the whole growing table.
+  const headerPrefix = useMemo(() => {
+    const i = html.indexOf("</thead>");
+    return i === -1 ? html : html.slice(0, i);
+  }, [html]);
+  const dir = useMemo(
+    () => (headerPrefix.startsWith("<table dir=\"auto\"") ? "auto" : undefined),
+    [headerPrefix],
+  );
+  const scope = useMemo(() => headerPrefix.includes("<th scope=\"col\""), [headerPrefix]);
   const aligns = data.aligns;
   return (
     <table dir={dir as "auto" | undefined}>
