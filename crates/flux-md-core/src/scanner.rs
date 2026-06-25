@@ -1107,7 +1107,7 @@ fn eq_ascii_ci(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| ascii_lower(*x) == ascii_lower(*y))
 }
 
-fn detect_html_block_open(bytes: &[u8], start: usize) -> Option<(usize, u8)> {
+pub(crate) fn detect_html_block_open(bytes: &[u8], start: usize) -> Option<(usize, u8)> {
     let line = line_slice(bytes, start);
     let (indent, body) = strip_indent(line, 3);
     if indent > 3 || body.len() < 2 || body[0] != b'<' {
@@ -1275,6 +1275,22 @@ fn is_complete_html_tag_line(body: &[u8]) -> bool {
     true
 }
 
+/// True iff `line` (a full source line, terminator included) satisfies the
+/// type-specific *closing* condition for an HTML block of the given `html_type`
+/// (1–5). Types 6/7 have no per-line closer — they end on a blank line — so this
+/// returns `false` for them. Extracted so the incremental cache in `parser.rs`
+/// can detect the close with byte-for-byte the same predicate as `scan_html_block`.
+pub(crate) fn html_block_line_closes(line: &[u8], html_type: u8) -> bool {
+    match html_type {
+        1 => line_contains_type1_close(line),
+        2 => line.windows(3).any(|w| w == b"-->"),
+        3 => line.windows(2).any(|w| w == b"?>"),
+        4 => line.contains(&b'>'),
+        5 => line.windows(3).any(|w| w == b"]]>"),
+        _ => false,
+    }
+}
+
 fn scan_html_block(bytes: &[u8], start: usize) -> Option<RawBlock> {
     let (_, html_type) = detect_html_block_open(bytes, start)?;
     let mut pos = start;
@@ -1284,15 +1300,7 @@ fn scan_html_block(bytes: &[u8], start: usize) -> Option<RawBlock> {
     let mut closed = false;
     loop {
         let line = line_slice(bytes, pos);
-        let end_here = match html_type {
-            1 => line_contains_type1_close(line),
-            2 => line.windows(3).any(|w| w == b"-->"),
-            3 => line.windows(2).any(|w| w == b"?>"),
-            4 => line.contains(&b'>'),
-            5 => line.windows(3).any(|w| w == b"]]>"),
-            6 | 7 => false,
-            _ => false,
-        };
+        let end_here = html_block_line_closes(line, html_type);
         let next = line_end(bytes, pos);
         if end_here {
             pos = next;
