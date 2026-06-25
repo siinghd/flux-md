@@ -1,6 +1,6 @@
 import type { FluxClient } from "./client";
 import { highlight } from "./hi";
-import type { Block, BlockComponentProps, BlockKindTag } from "./types-core";
+import type { Block, BlockComponentProps, BlockKindTag, RenderMetricsHook } from "./types-core";
 import { blockProps, extractLang } from "./block-props";
 
 /**
@@ -74,6 +74,15 @@ export interface MountOptions {
   ariaLive?: "off" | "polite" | "assertive";
   /** Live-region atomicity; pair with `ariaLive`. Off by default. */
   ariaAtomic?: boolean;
+  /**
+   * Optional render-churn probe. Fires once per ACTUAL node build/rebuild of a
+   * block — never for a committed block whose node is reused untouched on a
+   * tail-only patch. The callback gets the block id and a {@link RenderMetrics}
+   * sample (per-block `renderCount`/rebuild count, `speculativeToggleCount`,
+   * `lastRenderMs`, `kind`). Zero overhead when omitted, and advances
+   * `client.getMetrics().rebuildCount`.
+   */
+  onRenderMetrics?: RenderMetricsHook;
 }
 
 // Per-kind off-screen size estimate for `contain-intrinsic-size`. Duplicated
@@ -93,6 +102,10 @@ interface MountedBlock {
   open: boolean;
   speculative: boolean;
   kind: BlockKindTag;
+  // Render-churn probe state (only maintained when an onRenderMetrics hook is
+  // wired; otherwise these stay at their initial values and are never read).
+  renderCount: number;
+  toggleCount: number;
 }
 
 export function mountFluxMarkdown(
@@ -107,7 +120,8 @@ export function mountFluxMarkdown(
   // Normalize "no overrides" to undefined so the fast path doesn't churn.
   const components =
     options.components && Object.keys(options.components).length > 0 ? options.components : undefined;
-  const { sanitize, virtualize, stickToBottom } = options;
+  const { sanitize, virtualize, stickToBottom, onRenderMetrics } = options;
+  const hasPerf = typeof performance !== "undefined";
   const highlightCode = options.highlightCode !== false && !components?.CodeBlock;
   const batch = options.batch !== false && typeof requestAnimationFrame === "function";
 
@@ -146,10 +160,14 @@ export function mountFluxMarkdown(
       seen.add(b.id);
       const existing = mounted.get(b.id);
       if (!existing) {
+        const t0 = onRenderMetrics && hasPerf ? performance.now() : 0;
         const node = renderBlock(b);
-        mounted.set(b.id, {
-          id: b.id, node, html: b.html, open: b.open, speculative: b.speculative, kind: b.kind.type,
-        });
+        const mb: MountedBlock = {
+          id: b.id, node, html: b.html, open: b.open, speculative: b.speculative,
+          kind: b.kind.type, renderCount: 0, toggleCount: 0,
+        };
+        mounted.set(b.id, mb);
+        if (onRenderMetrics) noteRender(mb, b, t0);
         continue;
       }
       // Unchanged fingerprint → reuse the node untouched. Committed blocks land
@@ -159,9 +177,11 @@ export function mountFluxMarkdown(
         continue;
       }
       // Changed → rebuild and swap in place.
+      const t0 = onRenderMetrics && hasPerf ? performance.now() : 0;
       const node = renderBlock(b);
       existing.node.replaceWith(node);
       existing.node = node;
+      if (onRenderMetrics) noteRender(existing, b, t0);
       existing.html = b.html;
       existing.open = b.open;
       existing.speculative = b.speculative;
@@ -181,6 +201,22 @@ export function mountFluxMarkdown(
 
     order = nextOrder;
     reconcileChildren();
+  }
+
+  // Fire the render-churn probe for one actual node build/rebuild. `mb` carries
+  // the PRE-update fingerprint (its `speculative` is the prior value) so the
+  // toggle count is correct; the caller updates the fingerprint afterward. Only
+  // called when an onRenderMetrics hook is wired, so it stays zero-cost off.
+  function noteRender(mb: MountedBlock, b: Block, t0: number): void {
+    mb.renderCount++;
+    if (mb.speculative !== b.speculative) mb.toggleCount++;
+    client.__noteRebuild();
+    onRenderMetrics!(b.id, {
+      renderCount: mb.renderCount,
+      speculativeToggleCount: mb.toggleCount,
+      lastRenderMs: hasPerf ? performance.now() - t0 : 0,
+      kind: b.kind.type,
+    });
   }
 
   // Keyed reconcile with a single forward cursor (O(n), not O(n²)): walk the

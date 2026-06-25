@@ -11,7 +11,7 @@ import {
 } from "react";
 import type { Block, BlockComponentProps, Components, HeadingData, TableData } from "./types";
 import { FluxClient } from "./client";
-import type { ParserConfig } from "./types-core";
+import type { ParserConfig, RenderMetricsHook } from "./types-core";
 import { CodeBlock } from "./renderers/CodeBlock";
 import { MathBlock } from "./renderers/Math";
 import { Mermaid } from "./renderers/Mermaid";
@@ -120,6 +120,16 @@ interface FluxMarkdownProps {
   "aria-live"?: "off" | "polite" | "assertive";
   /** Live-region atomicity; pair with `aria-live`. Off by default. */
   "aria-atomic"?: boolean;
+  /**
+   * Optional render-churn probe. Fires once per ACTUAL render of a block —
+   * never for a committed block that memo-skips on a tail-only patch. The
+   * callback gets the block id and a {@link RenderMetrics} sample (per-block
+   * `renderCount`, `speculativeToggleCount`, `lastRenderMs`, `kind`). Zero
+   * overhead when omitted. **Memoize / hoist this** (same trap as `components`):
+   * a fresh closure each render busts the per-block memo, forcing every block to
+   * re-render on every patch.
+   */
+  onRenderMetrics?: RenderMetricsHook;
 }
 
 // The original render path: subscribe to a (required, caller- or hook-owned)
@@ -135,11 +145,26 @@ function FluxMarkdownFromClient({
   role,
   "aria-live": ariaLive,
   "aria-atomic": ariaAtomic,
+  onRenderMetrics,
 }: FluxMarkdownProps & { client: FluxClient }) {
   const blocks = useSyncExternalStore(client.subscribe, client.getSnapshot, client.getSnapshot);
   // Normalize "no overrides" to a stable `undefined` so memo comparisons and
   // the fast path don't churn on an empty object identity.
   const comps = components && Object.keys(components).length > 0 ? components : undefined;
+  // Wrap the user hook so each fire also advances the client's aggregate
+  // renderCount. Memoized on (client, hook) so its identity stays stable across
+  // tail patches — a fresh closure would bust every block's memo. When no hook
+  // is supplied this stays `undefined` and the whole probe path is skipped.
+  const onMetrics = useMemo<RenderMetricsHook | undefined>(
+    () =>
+      onRenderMetrics
+        ? (id, m) => {
+            client.__noteRender();
+            onRenderMetrics(id, m);
+          }
+        : undefined,
+    [client, onRenderMetrics],
+  );
   return (
     <div
       className={className ? `flux-md ${className}` : "flux-md"}
@@ -149,7 +174,14 @@ function FluxMarkdownFromClient({
       aria-atomic={ariaAtomic}
     >
       {blocks.map((b) => (
-        <BlockView key={b.id} block={b} components={comps} virtualize={virtualize} sanitize={sanitize} />
+        <BlockView
+          key={b.id}
+          block={b}
+          components={comps}
+          virtualize={virtualize}
+          sanitize={sanitize}
+          onRenderMetrics={onMetrics}
+        />
       ))}
       {stickToBottom && <div aria-hidden="true" style={{ scrollSnapAlign: "end" }} className="flux-bottom-anchor" />}
     </div>
@@ -437,9 +469,37 @@ function BlockViewImpl(props: {
   components?: Components;
   virtualize?: boolean;
   sanitize?: (html: string) => string;
+  onRenderMetrics?: RenderMetricsHook;
 }) {
-  const { block, virtualize } = props;
+  const { block, virtualize, onRenderMetrics } = props;
+  // Render-churn probe (only when a hook is wired — refs are cheap, but the
+  // measurement + hook call below are guarded so the no-hook path is untouched).
+  // Reaching this body at all means React did NOT memo-skip, so a committed
+  // block fires exactly once and the streaming tail fires per patch — by design.
+  const metricsRef = useRef<{ renderCount: number; toggle: number; speculative: boolean } | null>(
+    onRenderMetrics ? { renderCount: 0, toggle: 0, speculative: block.speculative } : null,
+  );
+  const hasPerf = typeof performance !== "undefined";
+  const t0 = onRenderMetrics && hasPerf ? performance.now() : 0;
+
   const content = renderBlockContent(props);
+
+  if (onRenderMetrics) {
+    // Lazily init if the hook was added after mount (initial useRef value only
+    // applies on first render).
+    const m = (metricsRef.current ??= { renderCount: 0, toggle: 0, speculative: block.speculative });
+    m.renderCount++;
+    if (m.speculative !== block.speculative) {
+      m.toggle++;
+      m.speculative = block.speculative;
+    }
+    onRenderMetrics(block.id, {
+      renderCount: m.renderCount,
+      speculativeToggleCount: m.toggle,
+      lastRenderMs: hasPerf ? performance.now() - t0 : 0,
+      kind: block.kind.type,
+    });
+  }
   // Virtualize only *closed* blocks: the streaming tail (open/speculative) is
   // where the user looks and where heights change fastest — deferring it there
   // causes flicker. A uniform wrapper covers every kind, including dedicated
@@ -534,8 +594,8 @@ function renderBlockContent({
 // is what stops a committed block from re-rendering (and thus re-parsing) on
 // every streaming patch.
 export function blocksEqual(
-  prev: { block: Block; components?: Components; virtualize?: boolean; sanitize?: (html: string) => string },
-  next: { block: Block; components?: Components; virtualize?: boolean; sanitize?: (html: string) => string },
+  prev: { block: Block; components?: Components; virtualize?: boolean; sanitize?: (html: string) => string; onRenderMetrics?: RenderMetricsHook },
+  next: { block: Block; components?: Components; virtualize?: boolean; sanitize?: (html: string) => string; onRenderMetrics?: RenderMetricsHook },
 ): boolean {
   return (
     prev.block.id === next.block.id &&
@@ -544,7 +604,8 @@ export function blocksEqual(
     prev.block.speculative === next.block.speculative &&
     prev.components === next.components &&
     prev.virtualize === next.virtualize &&
-    prev.sanitize === next.sanitize
+    prev.sanitize === next.sanitize &&
+    prev.onRenderMetrics === next.onRenderMetrics
   );
 }
 

@@ -214,3 +214,111 @@ test("react-7: same stream + new onError does not re-pipe or abort, and the late
     pipeSpy.mockRestore();
   }
 });
+
+// react-render-probe: the onRenderMetrics hook fires once per ACTUAL render —
+// a committed block fires exactly once across tail-only patches; the open tail
+// fires per patch. Mirrors the render-once memo proof, observed via the probe.
+test("react-render-probe: committed block fires onRenderMetrics once; open tail fires per patch", async () => {
+  const w = new FakeWorker();
+  const pool = new FluxPool(() => w, 1);
+  const client = new FluxClient({ pool });
+  client.append("");
+  const sid = (w.sent[0] as { streamId: number }).streamId;
+
+  // Per-id samples: every fire of the probe is logged with its block id and the
+  // sample object, so we can assert per-block counts AND the carried fields.
+  const samples: { id: number; renderCount: number; toggles: number; kind: string; ms: number }[] = [];
+  const onRenderMetrics = (id: number, m: { renderCount: number; speculativeToggleCount: number; lastRenderMs: number; kind: string }) =>
+    samples.push({ id, renderCount: m.renderCount, toggles: m.speculativeToggleCount, kind: m.kind, ms: m.lastRenderMs });
+
+  await mount(createElement(FluxMarkdown, { client, onRenderMetrics }));
+
+  // Patch 1: COMMIT block id=1, open tail id=2.
+  await act(async () => {
+    w.fire({
+      type: "patch",
+      streamId: sid,
+      patch: { newly_committed: [para(1, "<p>one</p>", false)], active: [para(2, "<p>tw</p>", true)] },
+      ...PATCH_META,
+    });
+  });
+
+  // Patches 2..4: id=1 stays committed; only id=2 grows.
+  for (const html of ["<p>two</p>", "<p>two t</p>", "<p>two thr</p>"]) {
+    await act(async () => {
+      w.fire({
+        type: "patch",
+        streamId: sid,
+        patch: { newly_committed: [], active: [para(2, html, true)] },
+        ...PATCH_META,
+      });
+    });
+  }
+
+  const forId = (id: number) => samples.filter((s) => s.id === id);
+  // Committed block (id=1) fired EXACTLY once across all tail patches.
+  expect(forId(1).length).toBe(1);
+  expect(forId(1)[0].renderCount).toBe(1);
+  expect(forId(1)[0].kind).toBe("Paragraph");
+  // The open tail (id=2) fired once per distinct patch it changed in (>1).
+  expect(forId(2).length).toBeGreaterThan(1);
+  // Per-block renderCount is monotonic 1,2,3,… for the churning tail.
+  expect(forId(2).map((s) => s.renderCount)).toEqual(
+    forId(2).map((_, i) => i + 1),
+  );
+  // lastRenderMs is a finite number (0 if performance is unavailable).
+  expect(Number.isFinite(forId(1)[0].ms)).toBe(true);
+
+  // Aggregate counter advanced once per actual render (committed once + tail).
+  expect(client.getMetrics().renderCount).toBe(samples.length);
+});
+
+// react-render-probe-zero: with NO hook, the aggregate renderCount stays 0
+// (the probe path is never entered — zero overhead by design).
+test("react-render-probe-zero: renderCount stays 0 when no onRenderMetrics hook is supplied", async () => {
+  const w = new FakeWorker();
+  const pool = new FluxPool(() => w, 1);
+  const client = new FluxClient({ pool });
+  client.append("");
+  const sid = (w.sent[0] as { streamId: number }).streamId;
+
+  await mount(createElement(FluxMarkdown, { client }));
+  await act(async () => {
+    w.fire({
+      type: "patch",
+      streamId: sid,
+      patch: { newly_committed: [para(1, "<p>one</p>", false)], active: [para(2, "<p>tw</p>", true)] },
+      ...PATCH_META,
+    });
+  });
+  expect(client.getMetrics().renderCount).toBe(0);
+});
+
+// react-render-probe-toggle: speculativeToggleCount increments when a block's
+// speculative flag flips between renders of the same block id.
+test("react-render-probe-toggle: speculativeToggleCount counts speculative flips", async () => {
+  const w = new FakeWorker();
+  const pool = new FluxPool(() => w, 1);
+  const client = new FluxClient({ pool });
+  client.append("");
+  const sid = (w.sent[0] as { streamId: number }).streamId;
+
+  let last = 0;
+  const onRenderMetrics = (id: number, m: { speculativeToggleCount: number }) => {
+    if (id === 1) last = m.speculativeToggleCount;
+  };
+  await mount(createElement(FluxMarkdown, { client, onRenderMetrics }));
+
+  const spec = (html: string, speculative: boolean): Block => ({
+    id: 1, kind: { type: "Paragraph" }, start: 0, end: 0, html, open: true, speculative,
+  });
+
+  // Render 1: speculative=false (baseline). Render 2: flips to true (+1).
+  // Render 3: flips back to false (+1). Render 4: stays false (+0).
+  for (const b of [spec("<p>a</p>", false), spec("<p>b</p>", true), spec("<p>c</p>", false), spec("<p>d</p>", false)]) {
+    await act(async () => {
+      w.fire({ type: "patch", streamId: sid, patch: { newly_committed: [], active: [b] }, ...PATCH_META });
+    });
+  }
+  expect(last).toBe(2);
+});

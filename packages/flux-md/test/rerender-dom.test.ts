@@ -279,3 +279,57 @@ test("RAF-BATCH-COALESCE: 3 patches schedule one frame and the drain reflects th
     else g.cancelAnimationFrame = prevCaf;
   }
 });
+
+// --------------------------------------------------------------------------
+// RENDER-PROBE (onRenderMetrics)
+// --------------------------------------------------------------------------
+
+test("RENDER-PROBE: committed block fires onRenderMetrics once; the rebuilt tail fires per patch", () => {
+  const { client, worker } = makeClient();
+  client.append("");
+  const container = document.createElement("div");
+
+  const samples: { id: number; renderCount: number; toggles: number; kind: string; ms: number }[] = [];
+  const handle = mountFluxMarkdown(client, container, {
+    batch: false,
+    onRenderMetrics: (id, m) =>
+      samples.push({ id, renderCount: m.renderCount, toggles: m.speculativeToggleCount, kind: m.kind, ms: m.lastRenderMs }),
+  });
+
+  // Commit block 1; open block 2 as the active tail (both build → fire once each).
+  drive(client, worker, patch([para(1, "<p>committed</p>")], [para(2, "<p>t", true)]));
+
+  // Grow the active tail several patches. Block 1 is never re-sent, so its node
+  // is reused untouched → it must NEVER fire again. The tail rebuilds each patch.
+  for (const tail of ["<p>ta", "<p>tai", "<p>tail</p>"]) {
+    drive(client, worker, patch([], [para(2, tail, true)]));
+  }
+
+  const forId = (id: number) => samples.filter((s) => s.id === id);
+  // Committed block fired EXACTLY once (initial build), never on a tail patch.
+  expect(forId(1).length).toBe(1);
+  expect(forId(1)[0].renderCount).toBe(1);
+  expect(forId(1)[0].kind).toBe("Paragraph");
+  // The tail fired on initial build + each rebuild (monotonic renderCount).
+  expect(forId(2).map((s) => s.renderCount)).toEqual(forId(2).map((_, i) => i + 1));
+  expect(forId(2).length).toBeGreaterThan(1);
+  expect(Number.isFinite(forId(1)[0].ms)).toBe(true);
+
+  // Aggregate rebuildCount advanced once per actual build/rebuild.
+  expect(client.getMetrics().rebuildCount).toBe(samples.length);
+  handle.destroy();
+});
+
+test("RENDER-PROBE: rebuildCount stays 0 with no hook (zero overhead)", () => {
+  const { client, worker } = makeClient();
+  client.append("");
+  const container = document.createElement("div");
+  const handle = mountFluxMarkdown(client, container, { batch: false });
+
+  drive(client, worker, patch([para(1, "<p>committed</p>")], [para(2, "<p>t", true)]));
+  for (const tail of ["<p>ta", "<p>tail</p>"]) {
+    drive(client, worker, patch([], [para(2, tail, true)]));
+  }
+  expect(client.getMetrics().rebuildCount).toBe(0);
+  handle.destroy();
+});

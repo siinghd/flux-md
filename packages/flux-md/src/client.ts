@@ -324,6 +324,11 @@ export class FluxClient {
   private firstAppendMs = 0;
   private retainedBytes = 0;
   private wasmMemoryBytes = 0;
+  // Render-path observability (advanced ONLY when an onRenderMetrics hook is
+  // wired into a renderer; zero-cost otherwise). renderCount = React BlockView
+  // body renders; rebuildCount = DOM node rebuilds.
+  private renderCount = 0;
+  private rebuildCount = 0;
 
   /**
    * @param options.pool   worker pool to join (defaults to the shared
@@ -592,6 +597,25 @@ export class FluxClient {
 
   getSnapshot = (): Block[] => this.store.snapshot;
 
+  /**
+   * Internal: a renderer with an `onRenderMetrics` hook calls this once per
+   * actual React block render so `getMetrics().renderCount` aggregates churn.
+   * No-op cost when no hook is wired (it is simply never called). Not part of
+   * the public API surface — the underscore marks it renderer-internal.
+   */
+  __noteRender(): void {
+    this.renderCount++;
+  }
+
+  /**
+   * Internal: the DOM renderer calls this once per actual node rebuild (the
+   * changed-block branch) when an `onRenderMetrics` hook is wired, so
+   * `getMetrics().rebuildCount` aggregates churn. Never called without a hook.
+   */
+  __noteRebuild(): void {
+    this.rebuildCount++;
+  }
+
   getMetrics() {
     const elapsed = this.firstAppendMs ? Math.max(1, performance.now() - this.firstAppendMs) : 1;
     return {
@@ -608,6 +632,11 @@ export class FluxClient {
       // clients on the same worker report the same number. Use Math.max (not
       // sum) when aggregating across clients; summing double-counts.
       wasmMemoryBytes: this.wasmMemoryBytes,
+      // Render-path churn (0 unless an onRenderMetrics hook is wired into a
+      // renderer): renderCount = React block-body renders, rebuildCount = DOM
+      // node rebuilds. Committed blocks memo-skip, so they contribute once.
+      renderCount: this.renderCount,
+      rebuildCount: this.rebuildCount,
     };
   }
 

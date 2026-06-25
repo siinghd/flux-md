@@ -112,6 +112,31 @@ export interface Patch {
   active: Block[];
 }
 
+/**
+ * Per-block render-churn sample passed to an {@link RenderMetricsHook}. Lets you
+ * measure how often each block actually re-renders / rebuilds (committed blocks
+ * memo-skip, so they fire exactly once; the streaming tail fires per patch).
+ */
+export interface RenderMetrics {
+  /** How many times THIS block has actually rendered/rebuilt so far (≥ 1). */
+  renderCount: number;
+  /** How many times this block's `speculative` flag flipped between renders. */
+  speculativeToggleCount: number;
+  /** Wall-clock duration of this render's body in ms (0 if `performance` absent). */
+  lastRenderMs: number;
+  /** The block's kind (`"Paragraph"`, `"CodeBlock"`, …). */
+  kind: string;
+}
+
+/**
+ * Optional observability probe. When supplied to the React renderer (the
+ * `onRenderMetrics` prop) or the DOM renderer ({@link MountOptions.onRenderMetrics}),
+ * it fires once per ACTUAL render/rebuild of a block — never for a committed
+ * block that memo-skips. Zero overhead when absent (no counters advance, the hook
+ * path is never entered).
+ */
+export type RenderMetricsHook = (blockId: number, m: RenderMetrics) => void;
+
 /** Props passed to a block-kind override (e.g. `components.CodeBlock`). */
 export interface BlockComponentProps {
   /** The full parsed block, including `kind` (with `kind.data`) and offsets. */
