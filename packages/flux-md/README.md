@@ -241,7 +241,11 @@ controlled-string helpers wrap; in vanilla you call it directly.
 
 `mountFluxMarkdown(client, container, options?)` returns `{ destroy(), refresh() }`.
 Options: `components`, `sanitize`, `virtualize`, `stickToBottom`, `highlightCode`
-(default true), `batch` (default true — one DOM write per `requestAnimationFrame`).
+(default true), `batch` (default true — one DOM write per `requestAnimationFrame`),
+`morphOpenBlocks` (default false — morph a growing generic open block's subtree in
+place instead of rebuilding it via `innerHTML`, so only the changed parts repaint
+and focus/selection in the streaming tail survive; the rendered result is
+equivalent to the default rebuild path).
 Block-kind overrides use `components` keyed by block-kind (`CodeBlock`, `Table`,
 `Alert`, `Component`, …) with values `(props) => HTMLElement | string`. Tag-level
 (lowercase `a`/`table`/`code`) overrides are **React-only** — there's no virtual
