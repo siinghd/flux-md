@@ -4,6 +4,24 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.16.1 — 2026-06-25
+
+### Fixed
+
+- **Streaming flash for incomplete inline links, code, and math.** While an
+  inline construct is still streaming in (no closing delimiter yet), it no
+  longer flashes its raw markdown source. A half-typed link renders just its
+  label as an inert (non-navigable) `<a>` with the destination hidden until the
+  closing `)` lands (then only `href` is added — the element is reused, not
+  remounted); inline code shows `<code>…</code>` with the backtick hidden;
+  inline math (`$…$`, `\(…\)`, `\[…\]`) shows the rendered `<span class="math
+  …">` with the `$`/`\(` hidden. Previously these showed `[label](https://… `,
+  `` `code… ``, and `$x^2 +…` as raw text until the closer arrived.
+  Final output is unchanged, and an inline construct that never closes still
+  finalizes to literal text, byte-identical to a one-shot parse (pinned by
+  truncate-at-every-offset streaming-parity fuzz). Images, emphasis/strong, and
+  reference links intentionally still render literally while open.
+
 ## 0.16.0 — 2026-06-25
 
 ### Added
