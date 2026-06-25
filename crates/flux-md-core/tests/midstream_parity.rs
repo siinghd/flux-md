@@ -508,3 +508,19 @@ fn speculative_inline_latex_math_golden() {
     let fin = finalized_m("\\(a+b");
     assert!(!fin.contains("class=\"math"), "finalized unclosed \\(…) must be literal: {fin}");
 }
+
+#[test]
+fn test_backslash_artifact_in_paren_math() {
+    // The known artifact: \(a + b\ renders with a trailing backslash in the
+    // math content (the first byte of the 2-byte closer \)).
+    let md = "\\(a + b\\";
+    let html = streamed_open_m(md);
+    println!("HTML for '{}': {}", md, html);
+    
+    // Check if content contains the trailing backslash
+    if html.contains("b\\</span>") {
+        println!("ARTIFACT CONFIRMED: trailing backslash in <span class=\"math\">a + b\\</span>");
+    } else {
+        println!("No trailing backslash artifact detected");
+    }
+}

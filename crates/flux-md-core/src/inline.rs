@@ -706,6 +706,22 @@ fn try_math_delim(
         if content.is_empty() {
             return None;
         }
+        // The `\)`/`\]` closer starts with `\`. If the partial body ends with a
+        // lone (unescaped) `\`, that byte is the first byte of the still-unstreamed
+        // closer, not real math — trimming it stops a one-keystroke KaTeX error on
+        // `\(a+b\`. Guard against trimming an escaped `\\` (LaTeX line break) and a
+        // closer that doesn't start with `\` (it always does here).
+        let trim_tail = close.first() == Some(&b'\\')
+            && content.last() == Some(&b'\\')
+            && (content.len() < 2 || content[content.len() - 2] != b'\\');
+        let content = if trim_tail {
+            &content[..content.len() - 1]
+        } else {
+            content
+        };
+        if content.is_empty() {
+            return None;
+        }
         emit_inline_math(content, display, out);
         return Some(bytes.len());
     }
