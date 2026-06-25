@@ -316,6 +316,20 @@ export class FluxClient {
   private lastContent = "";
   private contentDone = false;
 
+  // Opt-in rAF coalescing (see constructor `coalesce`). When on AND
+  // requestAnimationFrame exists, intra-frame emit()s collapse into ONE
+  // rAF-scheduled flush to listeners — the React useSyncExternalStore path then
+  // renders once per frame instead of once per patch (the DOM renderer already
+  // batches to 1/frame independently). Lossless: committed blocks are
+  // reference-stable, so a dropped intermediate notify only skips a tail-only
+  // render that the next flush supersedes. The finalize/done patch is exempt and
+  // flushes synchronously, never deferred to the next frame.
+  private coalesce = false;
+  private rafHandle: number | null = null;
+  // Set by finalize(); the next patch's emit flushes synchronously (a 'done'
+  // notification must not be deferred a frame) and clears it.
+  private finalizePending = false;
+
   // Perf
   private appendedBytes = 0;
   private patchCount = 0;
@@ -337,6 +351,14 @@ export class FluxClient {
    *   order, after the store updates) — for side effects like lazily
    *   highlighting a finished code block or analytics. A committed block never
    *   re-fires; the streaming tail does not (subscribe for live tail updates).
+   * @param options.coalesce opt-in (default `false`): collapse multiple
+   *   intra-frame patch notifications into ONE `requestAnimationFrame`-scheduled
+   *   flush to subscribers, so a React `useSyncExternalStore` consumer renders at
+   *   most once per frame instead of once per patch. Lossless — committed blocks
+   *   are reference-stable, so only superseded tail-only renders are skipped. The
+   *   stream-completion (finalize) patch always flushes synchronously, and a
+   *   pending frame is cancelled on `reset()`/`destroy()`. No effect when
+   *   `requestAnimationFrame` is unavailable (e.g. SSR) — emits stay synchronous.
    */
   constructor(
     options: {
@@ -344,12 +366,14 @@ export class FluxClient {
       config?: ParserConfig;
       onError?: (err: { message: string; fatal?: boolean }) => void;
       onBlock?: (block: Block) => void;
+      coalesce?: boolean;
     } = {},
   ) {
     this.pool = options.pool ?? getDefaultPool();
     this.config = options.config;
     this.onError = options.onError;
     this.onBlock = options.onBlock;
+    this.coalesce = options.coalesce ?? false;
   }
 
   /**
@@ -401,6 +425,9 @@ export class FluxClient {
 
   finalize() {
     const pw = this.ensureAcquired();
+    // The terminal patch this triggers must reach subscribers synchronously, not
+    // a frame late — mark it so the next emit flushes now even under coalescing.
+    this.finalizePending = true;
     this.pool.send(pw, { type: "finalize", streamId: this.streamId, config: this.firstConfig() });
   }
 
@@ -538,10 +565,14 @@ export class FluxClient {
     this.wasmMemoryBytes = 0;
     this.lastContent = ""; // setContent baseline: the worker drops the parser here
     this.contentDone = false;
+    // A frame coalesced from the just-cleared stream is now stale — cancel it so
+    // it can't fire a notify referencing content reset() just dropped.
+    this.cancelFrame();
+    this.finalizePending = false;
     // Same streamId + worker — the worker frees and lazily recreates the parser.
     const pw = this.ensureAcquired();
     this.pool.send(pw, { type: "reset", streamId: this.streamId });
-    if (hadContent) this.emit();
+    if (hadContent) this.emit(true); // clear-the-view notify is synchronous
   }
 
   destroy() {
@@ -552,6 +583,9 @@ export class FluxClient {
     // We deliberately do NOT null this.pw here: StrictMode's destroy()→reattach()
     // on the SAME instance needs the same pw/streamId to re-register.
     if (this.pw) this.pool.release(this.streamId, this.pw);
+    // Drop any pending coalesced frame so it can't fire into cleared listeners.
+    this.cancelFrame();
+    this.finalizePending = false;
     this.listeners.clear();
     this.attached = false;
   }
@@ -658,7 +692,11 @@ export class FluxClient {
         this.wasmMemoryBytes = msg.wasmMemoryBytes;
         this.patchCount += 1;
         this.lastPatchMs = performance.now();
-        this.emit();
+        // The post-finalize (done) patch must notify synchronously — never defer
+        // stream completion to the next frame. One-shot: cleared after use.
+        const sync = this.finalizePending;
+        this.finalizePending = false;
+        this.emit(sync);
         // After subscribers see the new snapshot, fire the per-block hook for
         // anything that just committed (document order). A throw here is
         // isolated by the pool's dispatch boundary and won't skip emit().
@@ -677,7 +715,38 @@ export class FluxClient {
     }
   }
 
-  private emit() {
+  /**
+   * Notify subscribers of a new snapshot.
+   *
+   * With `coalesce` off (default) this is fully synchronous, exactly as before.
+   * With it on and `requestAnimationFrame` available, a normal emit only
+   * *schedules* a single per-frame flush — repeated intra-frame emits collapse
+   * into one notify. `sync` forces an immediate flush (stream completion / reset)
+   * and cancels any frame already pending so the snapshot is delivered once.
+   */
+  private emit(sync = false) {
+    if (this.coalesce && !sync && typeof requestAnimationFrame === "function") {
+      if (this.rafHandle !== null) return; // a flush is already scheduled this frame
+      this.rafHandle = requestAnimationFrame(() => {
+        this.rafHandle = null;
+        this.flushNow();
+      });
+      return;
+    }
+    // Synchronous path: drop any pending frame so its notify can't double-fire
+    // after this one, then flush immediately.
+    this.cancelFrame();
+    this.flushNow();
+  }
+
+  private flushNow() {
     for (const fn of this.listeners) fn();
+  }
+
+  private cancelFrame() {
+    if (this.rafHandle !== null) {
+      if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(this.rafHandle);
+      this.rafHandle = null;
+    }
   }
 }
