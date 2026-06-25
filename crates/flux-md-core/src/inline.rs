@@ -219,6 +219,20 @@ fn render_inline_core(input: &str, opts: &RenderOpts, out: &mut String, track: b
                     };
                     if let Some(consumed) = fnref {
                         pos = consumed;
+                    } else if opts.open_tail
+                        && !opts.in_link
+                        && speculative_link_tail(bytes, pos, opts, out).is_some()
+                    {
+                        // Speculative open-tail link: `[label](` whose destination
+                        // is still streaming to EOF rendered an INERT `<a>` (no
+                        // href). Unstable — a later `)` (the real link) or any
+                        // hard terminator can change it. `speculative_link_tail`
+                        // only returns Some when it ran to bytes.len(), so this is
+                        // always the final construct in the slice.
+                        if track && pos < unstable {
+                            unstable = pos;
+                        }
+                        pos = bytes.len();
                     } else if let Some(consumed) = try_link(bytes, pos, opts, out) {
                         // Settled: an inline `[text](url)` or a reference resolved
                         // via `opts.refs`. (Safe to treat resolved refs as settled
@@ -1448,6 +1462,168 @@ fn write_link(
     render_inline(text, &inner_opts, out);
     out.push_str("</a>");
     end_pos
+}
+
+/// Speculative open-tail link render (streaming only — gated by `opts.open_tail`
+/// at the call site). When a `[label](` has streamed and its destination is
+/// still being typed (runs to EOF with no closing `)` and no hard terminator),
+/// emit an INERT `<a target=… rel=…>label</a>` with NO `href` (a half-typed /
+/// empty URL must not be navigable) and return `Some(bytes.len())`. The target +
+/// rel byte-for-byte match a real complete link so that when `)` finally lands,
+/// the only difference the DOM differ sees is the added `href` (node reuse — no
+/// inert→real teardown). Returns `None` (writing nothing) when this is NOT a
+/// still-streaming destination: no `]`, the next char after `]` isn't `(`, the
+/// label contains a complete nested link (§6.6), or the destination has already
+/// terminated (a `)`, whitespace, control char, or closed `<…>`) — those fall
+/// through to the real `try_link` (complete link or literal).
+fn speculative_link_tail(
+    bytes: &[u8],
+    start: usize,
+    opts: &RenderOpts,
+    out: &mut String,
+) -> Option<usize> {
+    // Image marker guard: `![label](url…` is IMAGE syntax, never a link. When the
+    // image is incomplete, `try_image` fails, emits a literal `!`, and the `[` arm
+    // re-processes `[label](url…` — which must NOT speculate (a partial image
+    // stays literal text, never an inert `<a>`). Block speculation when an
+    // UNESCAPED `!` immediately precedes this `[`. (An escaped `\!` is a literal
+    // `!` followed by a real link, so it may still speculate — hence the
+    // backslash check.)
+    if start > 0
+        && bytes[start - 1] == b'!'
+        && !(start >= 2 && bytes[start - 2] == b'\\')
+    {
+        return None;
+    }
+    // Read the link text (None if no closing `]` yet → nothing to speculate).
+    let (text_range, after_text) = read_balanced_brackets(bytes, start)?;
+    // Only an INLINE link can speculate: the next byte must be `(`. Reference
+    // forms (`[t][r]`, `[t][]`, `[t]`) are left to the real `try_link` so they
+    // resolve (or stay literal) unchanged.
+    if bytes.get(after_text) != Some(&b'(') {
+        return None;
+    }
+    // §6.6: a complete nested link inside the label disqualifies this link —
+    // same guard `try_link` applies, so we never speculate where the real parse
+    // would reject.
+    if text_has_nested_link(bytes, text_range.clone(), opts) {
+        return None;
+    }
+    // The destination must be genuinely still streaming to EOF (no `)`, no hard
+    // terminator). This is the load-bearing mirror of `read_link_destination`.
+    if !dest_streams_to_eof(bytes, after_text + 1) {
+        return None;
+    }
+    // Emit the inert anchor. Match `write_link`'s tail bytes EXACTLY (target +
+    // rel, same order) so node reuse holds when the `)` arrives and `href` is
+    // inserted — NO href here (inert).
+    out.push_str("<a target=\"_blank\" rel=\"noopener noreferrer nofollow\">");
+    let text = std::str::from_utf8(&bytes[text_range.clone()]).unwrap_or("");
+    // Render the label inline. in_link=true (no nested links, §6.6) and
+    // open_tail=false (the label itself is fully present, not the streaming tail).
+    let mut inner_opts = opts.clone();
+    inner_opts.in_link = true;
+    inner_opts.open_tail = false;
+    render_inline(text, &inner_opts, out);
+    out.push_str("</a>");
+    Some(bytes.len())
+}
+
+/// Does the link destination starting at `start` (just after the opening `(`)
+/// describe a destination that is genuinely STILL STREAMING to EOF — i.e. it has
+/// not yet been terminated by a `)`, whitespace, control char, or a closed
+/// `<…>`? Returns `true` only in that case (so the speculative open-tail link
+/// fires); `false` means the destination has ended (a `)` is required and either
+/// present → real link, or absent-after-terminator → malformed → literal).
+///
+/// MUST mirror [`read_link_destination`] exactly so that for every byte-prefix
+/// the speculative path and the real one-shot path agree on parity:
+///   - skip leading ws (` `,`\t`,`\n`); same set `read_link_destination` skips.
+///   - EOF reached (empty dest, still streaming) → true.
+///   - immediate `)` (empty dest closed) → false (real empty link).
+///   - bracketed `<…`: true iff no closing `>`/`\n`/`<` before EOF (still open);
+///     a closed `>` (or a forbidden `\n`/`<`) ends/breaks it → false.
+///   - bare dest: walk with `(`/`)` depth; a space/tab/newline ENDS the bare
+///     dest (now needs a `)` which is absent → malformed-final → literal) → false;
+///     a control char `<0x20` is illegal → false; a depth-0 `)` closes it → false;
+///     reaching EOF still inside the bare dest → true (still streaming).
+fn dest_streams_to_eof(bytes: &[u8], start: usize) -> bool {
+    let mut i = start;
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n') {
+        i += 1;
+    }
+    // Empty destination, still streaming to EOF.
+    if i >= bytes.len() {
+        return true;
+    }
+    // Immediate `)` → empty dest already closed (real empty link).
+    if bytes[i] == b')' {
+        return false;
+    }
+    let streaming = if bytes[i] == b'<' {
+        // Bracketed `<…>`: still streaming iff no closing `>` (and no forbidden
+        // `\n`/`<`) before EOF.
+        let mut j = i + 1;
+        loop {
+            if j >= bytes.len() {
+                break true; // ran to EOF inside the brackets → still streaming
+            }
+            match bytes[j] {
+                b'>' | b'\n' | b'<' => break false, // closed or broken → terminated
+                b'\\' if j + 1 < bytes.len() => j += 2,
+                _ => j += 1,
+            }
+        }
+    } else {
+        // Bare destination: walk with paren depth.
+        let mut depth: i32 = 0;
+        let mut j = i;
+        loop {
+            if j >= bytes.len() {
+                break true; // ran to EOF inside the bare dest → still streaming
+            }
+            let b = bytes[j];
+            if matches!(b, b' ' | b'\t' | b'\n') {
+                // Whitespace ends the bare dest; a `)` is now required and absent
+                // at EOF → malformed-final → literal (not still streaming).
+                break false;
+            }
+            if b == b'\\' && j + 1 < bytes.len() {
+                j += 2;
+                continue;
+            }
+            if b == b'(' {
+                depth += 1;
+                j += 1;
+                continue;
+            }
+            if b == b')' {
+                if depth == 0 {
+                    // Depth-0 `)` closes the destination → terminated.
+                    break false;
+                }
+                depth -= 1;
+                j += 1;
+                continue;
+            }
+            if b < 0x20 {
+                // Control char illegal in a bare destination → terminated.
+                break false;
+            }
+            j += 1;
+        }
+    };
+    // BELT-AND-SUSPENDERS (scanner-drift guard): if `read_link_destination`
+    // would succeed here with a real closing `)`, the destination is NOT still
+    // streaming, so `streaming` MUST be false. Co-located so the two scanners
+    // can't silently diverge.
+    debug_assert!(
+        !(streaming && read_link_destination(bytes, start).is_some()),
+        "dest_streams_to_eof returned true but read_link_destination found a complete \
+         destination (with closing `)`) at start={start}: {:?}",
+        std::str::from_utf8(&bytes[start..]).unwrap_or("<non-utf8>")
+    );
+    streaming
 }
 
 fn try_image(bytes: &[u8], start: usize, opts: &RenderOpts, out: &mut String) -> Option<usize> {

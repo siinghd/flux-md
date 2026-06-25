@@ -40,6 +40,19 @@ pub struct RenderOpts {
     /// true, the inline parser will not recognize nested `[...]` links
     /// (CommonMark disallows nested links).
     pub in_link: bool,
+    /// Speculative open-tail link rendering. `true` ONLY when rendering the
+    /// still-open block that abuts buffer EOF during streaming (the active tail
+    /// the user is currently watching grow). When on, an incomplete inline link
+    /// whose destination is still streaming to EOF — `[label](`, `[label](h`,
+    /// `[label](http…` — renders as an INERT `<a>label</a>` (label inline,
+    /// destination suppressed, NO `href`) instead of flashing the half-typed URL
+    /// as literal text; the real `href` lands only once `)` arrives (node-reuse:
+    /// only the `href` attribute is added). OFF (default) ⇒ byte-identical
+    /// one-shot CommonMark output: an incomplete link degrades to literal text.
+    /// The streaming parser sets this true only on the genuine abuts-EOF active
+    /// tail; `finalize()` forces it false everywhere (literal), so the committed
+    /// output is byte-parity with a one-shot complete-literal render.
+    pub open_tail: bool,
     /// GFM extended autolinks: recognize bare `www.`, `http(s)://`, `ftp://`
     /// URLs (and turn them into links) in ordinary text. Off by default so
     /// strict CommonMark output is unchanged.

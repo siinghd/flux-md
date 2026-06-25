@@ -867,6 +867,13 @@ impl StreamParser {
             committed_refs,
             tail_refs,
             in_link: false,
+            // Base = false (one-shot CommonMark: incomplete link → literal).
+            // Overridden to true PER-BLOCK below, only for the final block when it
+            // abuts buffer EOF and is not blank-line-closed — so `one_shot_open`
+            // (full rescan, single append, no finalize) agrees byte-for-byte with
+            // the streaming-cache `streamed_open`. At finalize (`!finalizing` is
+            // false) every block stays false → committed output is literal.
+            open_tail: false,
             gfm_autolinks: self.gfm_autolinks,
             gfm_alerts: self.gfm_alerts,
             gfm_math: self.gfm_math,
@@ -890,15 +897,41 @@ impl StreamParser {
             html_drop: self.html_drop.clone(),
         };
 
+        // Parity load-bearer for speculative open-tail links. `one_shot_open(md)`
+        // (single append, no finalize) renders the open tail through THIS full
+        // rescan; for `one_shot_open == streamed_open` the rescan's FINAL block
+        // must get `open_tail=true` under the SAME condition the streaming tail
+        // caches fire: it is the last renderable block, it abuts buffer EOF, and
+        // the buffer is not closed by a trailing blank line (which would settle
+        // the block). At finalize (`finalizing`) this stays false everywhere, so
+        // every incomplete link degrades to literal → committed byte-parity with
+        // a one-shot complete-literal render.
+        let buffer_ends_blank =
+            self.buffer.ends_with("\n\n") || self.buffer.ends_with("\r\n\r\n");
+        let last_idx = renderable.len().wrapping_sub(1);
+
         let mut produced: Vec<Block> = Vec::with_capacity(renderable.len());
-        for raw in &renderable {
+        for (bi, raw) in renderable.iter().enumerate() {
             let mut kind = classify(&raw.kind, &tail[raw.range.clone()], self.gfm_alerts);
             let mut html = String::with_capacity(64);
+            // Per-block open_tail: the final block that abuts buffer EOF and is
+            // not blank-line-closed. Clone opts with the flag set only for it.
+            let block_open_tail = !finalizing
+                && bi == last_idx
+                && tail_start + raw.range.end == self.buffer.len()
+                && !buffer_ends_blank;
+            let block_opts;
+            let block_opts_ref: &RenderOpts = if block_open_tail {
+                block_opts = RenderOpts { open_tail: true, ..opts.clone() };
+                &block_opts
+            } else {
+                &opts
+            };
             // render_block returns Some(Enrichment) only for a top-level block
             // with an opt-in payload (Table, Heading) when block_data is on —
             // fold it onto the matching `Option` carrier field. Off ⇒ None ⇒ kind
             // unchanged (byte-identical wire).
-            match render_block(tail, raw, &opts, &mut html) {
+            match render_block(tail, raw, block_opts_ref, &mut html) {
                 Some(Enrichment::Table(td)) => kind = BlockKind::Table(Some(td)),
                 Some(Enrichment::Heading(h)) => {
                     kind = BlockKind::Heading { level: h.level, rich: Some(h) }
@@ -974,7 +1007,7 @@ impl StreamParser {
             collect_footnote_defs(tail, &mut fn_defs, &defs_opts);
         }
 
-        let buffer_ends_blank = self.buffer.ends_with("\n\n") || self.buffer.ends_with("\r\n\r\n");
+        // `buffer_ends_blank` is computed above (for the per-block open_tail gate).
         let last_is_open_fence = renderable.last().map_or(false, |b| {
             matches!(
                 b.kind,
@@ -1588,6 +1621,11 @@ impl StreamParser {
             committed_refs: Rc::clone(&self.committed_refs),
             tail_refs: HashMap::new(),
             in_link: false,
+            // This opts backs the streaming tail caches (paragraph / table /
+            // container / list), which render the still-open, abuts-EOF active
+            // tail. Speculate incomplete open-tail links here so a streaming
+            // `[label](url…` shows an inert `<a>` instead of flashing the URL.
+            open_tail: true,
             gfm_autolinks: self.gfm_autolinks,
             gfm_alerts: self.gfm_alerts,
             gfm_math: self.gfm_math,
