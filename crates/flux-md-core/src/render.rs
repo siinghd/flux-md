@@ -6,7 +6,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::blocks::{AlertKind, BlockKind, HeadingData, MathBlockData, TableCell, TableData};
+use crate::blocks::{
+    AlertKind, BlockKind, ContainerData, HeadingData, MathBlockData, NestedBlock, TableCell,
+    TableData,
+};
 use crate::inline::render_inline;
 use crate::scanner::{
     component_inner_range, indent_cols, is_blank_line, line_end, line_slice, scan, scan_marker,
@@ -182,7 +185,7 @@ pub fn classify(raw: &RawBlockKind, slice: &str, gfm_alerts: bool) -> BlockKind 
     if gfm_alerts {
         if let RawBlockKind::Blockquote = raw {
             if let Some(kind) = alert_head(&blockquote_inner(slice)) {
-                return BlockKind::Alert { kind };
+                return BlockKind::Alert { kind, nested: None };
             }
         }
     }
@@ -205,7 +208,7 @@ pub fn classify(raw: &RawBlockKind, slice: &str, gfm_alerts: bool) -> BlockKind 
         RawBlockKind::IndentedCode => BlockKind::CodeBlock { lang: None, code: None },
         RawBlockKind::MathFence { .. } => BlockKind::MathBlock(None),
         RawBlockKind::List { ordered, .. } => BlockKind::List { ordered: *ordered, start: None },
-        RawBlockKind::Blockquote => BlockKind::Blockquote,
+        RawBlockKind::Blockquote => BlockKind::Blockquote(None),
         RawBlockKind::Table => BlockKind::Table(None),
         RawBlockKind::HorizontalRule => BlockKind::Rule,
         RawBlockKind::HtmlBlock { .. } => BlockKind::Html,
@@ -240,6 +243,11 @@ pub enum Enrichment {
     /// `BlockKind::List { start: Some(_), .. }` (the classified `ordered` is
     /// preserved).
     List(u32),
+    /// Blockquote — folds onto `BlockKind::Blockquote(Some(_))`.
+    Blockquote(ContainerData),
+    /// GFM alert — folds onto `BlockKind::Alert { nested: Some(_), .. }` (the
+    /// classified `kind` is preserved).
+    Alert(ContainerData),
 }
 
 /// Render one block to HTML. Returns `Some(Enrichment)` only for a top-level
@@ -283,7 +291,7 @@ pub fn render_block(source: &str, raw: &RawBlock, opts: &RenderOpts, out: &mut S
             return render_math_block(slice, *terminated, opts, out)
                 .map(|latex| Enrichment::MathBlock(MathBlockData { latex }))
         }
-        RawBlockKind::Blockquote => render_blockquote(slice, opts, out),
+        RawBlockKind::Blockquote => return render_blockquote(slice, opts, out),
         RawBlockKind::List { ordered, start } => {
             render_list(slice, *ordered, *start, opts, out);
             if opts.block_data {
@@ -765,12 +773,11 @@ pub(crate) fn alert_head(inner: &str) -> Option<AlertKind> {
     AlertKind::from_keyword(kw)
 }
 
-fn render_blockquote(slice: &str, opts: &RenderOpts, out: &mut String) {
+fn render_blockquote(slice: &str, opts: &RenderOpts, out: &mut String) -> Option<Enrichment> {
     let inner = blockquote_inner(slice);
     if opts.gfm_alerts {
         if let Some(kind) = alert_head(&inner) {
-            render_alert(&inner, kind, opts, out);
-            return;
+            return render_alert(&inner, kind, opts, out);
         }
     }
     out.push_str("<blockquote");
@@ -784,18 +791,31 @@ fn render_blockquote(slice: &str, opts: &RenderOpts, out: &mut String) {
     if !sub.is_empty() {
         out.push('\n');
     }
+    // Opt-in: capture each inner sub-block's own HTML fragment (byte-identical to
+    // what lands in `out`) into the structured `nested` channel so a keyed
+    // override can render children one node at a time. Off ⇒ no Vec, no Enrichment.
+    let mut nested: Vec<NestedBlock> = if opts.block_data { Vec::with_capacity(sub.len()) } else { Vec::new() };
     for b in &sub {
+        let frag_start = out.len();
         render_block(&inner, b, opts, out);
+        if opts.block_data {
+            nested.push(NestedBlock { html: out[frag_start..].to_string() });
+        }
         out.push('\n');
     }
     out.push_str("</blockquote>");
+    if opts.block_data {
+        Some(Enrichment::Blockquote(ContainerData { nested }))
+    } else {
+        None
+    }
 }
 
 /// Render a GitHub alert as `<div class="markdown-alert markdown-alert-TYPE">`
 /// (GitHub-compatible class names so existing markdown CSS styles it). The body
 /// is everything after the `[!TYPE]` title line, scanned as sub-blocks exactly
 /// like a blockquote.
-fn render_alert(inner: &str, kind: AlertKind, opts: &RenderOpts, out: &mut String) {
+fn render_alert(inner: &str, kind: AlertKind, opts: &RenderOpts, out: &mut String) -> Option<Enrichment> {
     // role="note" (not "alert") for a11y: "alert" forces an immediate
     // screen-reader announcement, which during streaming would be obnoxious.
     out.push_str("<div class=\"markdown-alert markdown-alert-");
@@ -818,11 +838,24 @@ fn render_alert(inner: &str, kind: AlertKind, opts: &RenderOpts, out: &mut Strin
         .into_iter()
         .filter(|b| !matches!(b.kind, RawBlockKind::LinkRefDefinition))
         .collect();
+    // Opt-in: capture each body sub-block's HTML fragment into `nested` (the
+    // title line is the wrapper, not a body block, so it is excluded). Mirrors
+    // `render_blockquote`'s nested capture.
+    let mut nested: Vec<NestedBlock> = if opts.block_data { Vec::with_capacity(sub.len()) } else { Vec::new() };
     for b in &sub {
+        let frag_start = out.len();
         render_block(body, b, opts, out);
+        if opts.block_data {
+            nested.push(NestedBlock { html: out[frag_start..].to_string() });
+        }
         out.push('\n');
     }
     out.push_str("</div>");
+    if opts.block_data {
+        Some(Enrichment::Alert(ContainerData { nested }))
+    } else {
+        None
+    }
 }
 
 // --------------------------------------------------------------------------

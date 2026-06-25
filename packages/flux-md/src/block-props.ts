@@ -2,6 +2,7 @@ import type {
   Block,
   BlockComponentProps,
   CodeBlockData,
+  ContainerData,
   HeadingData,
   ListData,
   MathBlockData,
@@ -125,6 +126,14 @@ export function blockProps(block: Block): BlockComponentProps {
     // `typeof === "object"` guard keeps the off-path naked int out of `heading`.
     if (typeof block.kind.data === "object" && block.kind.data !== null) {
       props.heading = block.kind.data as HeadingData;
+    }
+  } else if (block.kind.type === "Blockquote" || block.kind.type === "Alert") {
+    // When `blockData` is on, a Blockquote's `kind.data` is `{ nested }` and an
+    // Alert's is `{ kind, nested }`; off, a Blockquote has no `data` and an Alert
+    // only `{ kind }`. Surface the keyed `nested` sub-blocks only when present.
+    const cd = block.kind.data as { nested?: { html: string }[] } | undefined;
+    if (cd && Array.isArray(cd.nested)) {
+      props.container = { nested: cd.nested } as ContainerData;
     }
   }
   return props;

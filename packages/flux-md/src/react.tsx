@@ -9,7 +9,7 @@ import {
   type CSSProperties,
   type ReactElement,
 } from "react";
-import type { Block, BlockComponentProps, Components, HeadingData, TableData } from "./types";
+import type { Block, BlockComponentProps, Components, HeadingData, NestedBlock, TableData } from "./types";
 import { FluxClient } from "./client";
 import type { ParserConfig } from "./types-core";
 import { CodeBlock } from "./renderers/CodeBlock";
@@ -362,6 +362,14 @@ export function blockKindProps(block: Block, components?: Components): BlockComp
     if (typeof block.kind.data === "object" && block.kind.data !== null) {
       props.heading = block.kind.data as HeadingData;
     }
+  } else if (block.kind.type === "Blockquote" || block.kind.type === "Alert") {
+    // When `blockData` is on, a Blockquote's `kind.data` is `{ nested }` and an
+    // Alert's is `{ kind, nested }`. Surface the keyed `nested` sub-blocks (the
+    // array, not the bare html) only when present.
+    const cd = block.kind.data as { nested?: NestedBlock[] } | undefined;
+    if (cd && Array.isArray(cd.nested)) {
+      props.container = { nested: cd.nested };
+    }
   }
   return props;
 }
@@ -421,6 +429,72 @@ function SafeHtml({ html, components }: { html: string; components: Components }
   // both @types/react 18 and 19 — React 19 removed the global `JSX` namespace,
   // and a consumer's `next build` type-checks this shipped source.
   return useMemo(() => htmlToReact(html, components), [html, components]) as ReactElement;
+}
+
+/**
+ * Streaming-tail fast path for an OPEN Blockquote / Alert when `blockData` is on.
+ * The container's wrapper is rendered once from `block.html`'s opening tag (its
+ * `dir`/`class`/`data-alert`/`role` attrs are preserved exactly — these are the
+ * only attributes the Rust renderer emits on these wrappers); the inner
+ * sub-blocks come from `container.nested` and render KEYED, each through the same
+ * `htmlToReact(html, components)` memo path as the rest of the renderer (so
+ * component overrides and the sanitizer-hardened conversion still apply — NOT a
+ * raw `dangerouslySetInnerHTML` hole). Because committed inner blocks have stable
+ * HTML, only the open last child re-parses each tick instead of the whole wrapper.
+ */
+function KeyedContainer({
+  block,
+  nested,
+  components,
+}: {
+  block: Block;
+  nested: NestedBlock[];
+  components: Components;
+}) {
+  // The wrapper element (`blockquote` / `div`) and its attributes come straight
+  // off the rendered opening tag, so the streamed wrapper is byte-faithful.
+  const tagName = block.kind.type === "Alert" ? "div" : "blockquote";
+  const attrs = useMemo(() => parseOpenTagAttrs(block.html), [block.html]);
+  const children: ReactElement[] = [];
+  // Alerts keep their title `<p class="markdown-alert-title">…</p>` as the first
+  // child (it is the wrapper, not a body sub-block, so it is not in `nested`).
+  if (block.kind.type === "Alert") {
+    const title = alertTitleHtml(block.html);
+    if (title) {
+      children.push(<SafeHtml key="title" html={title} components={components} />);
+    }
+  }
+  for (let i = 0; i < nested.length; i++) {
+    children.push(<SafeHtml key={i} html={nested[i].html} components={components} />);
+  }
+  return createElement(tagName, attrs, children) as ReactElement;
+}
+
+// Attributes the Rust renderer emits on a blockquote / alert wrapper open tag.
+// Whitelisted (not a generic HTML parser): only these names are forwarded, in
+// their React prop form. `class`→`className`, everything else (`dir`,
+// `data-alert`, `role`) passes through.
+const CONTAINER_ATTR_RE = /([a-zA-Z][a-zA-Z0-9-]*)="([^"]*)"/g;
+function parseOpenTagAttrs(html: string): Record<string, string> {
+  const gt = html.indexOf(">");
+  const open = gt < 0 ? html : html.slice(0, gt);
+  const out: Record<string, string> = {};
+  let m: RegExpExecArray | null;
+  CONTAINER_ATTR_RE.lastIndex = 0;
+  while ((m = CONTAINER_ATTR_RE.exec(open))) {
+    const name = m[1].toLowerCase();
+    if (name === "class") out.className = m[2];
+    else if (name === "dir" || name === "role" || name.startsWith("data-")) out[name] = m[2];
+  }
+  return out;
+}
+
+// Extract an alert's title `<p class="markdown-alert-title"…>Title</p>` from the
+// wrapper HTML so the keyed path keeps it as the first child (it is never in
+// `nested`). Returns "" when not found (defensive — then only `nested` renders).
+function alertTitleHtml(html: string): string {
+  const m = html.match(/<p class="markdown-alert-title"[^>]*>.*?<\/p>/s);
+  return m ? m[0] : "";
 }
 
 // Per-kind off-screen size estimate for `contain-intrinsic-size` — keeps the
@@ -513,6 +587,22 @@ function renderBlockContent({
   // bypassed the user sanitizer. The no-`components` fast path is untouched
   // (byte-identical innerHTML).
   if (components) {
+    // Streaming-tail fast path: an OPEN Blockquote / Alert with structured
+    // `nested` data (blockData on) renders its inner sub-blocks KEYED, so only
+    // the open last child re-parses each tick instead of the whole wrapper. A
+    // `sanitize` hook disables it (it must run over the full wrapper string) and
+    // it falls through to the opaque-html path below. Closed blocks also fall
+    // through — their HTML is stable, so the whole-wrapper memo already holds.
+    if (block.open && !sanitize && (kind === "Blockquote" || kind === "Alert")) {
+      const nested = (block.kind.data as { nested?: NestedBlock[] } | undefined)?.nested;
+      if (Array.isArray(nested)) {
+        return (
+          <div className={className}>
+            <KeyedContainer block={block} nested={nested} components={components} />
+          </div>
+        );
+      }
+    }
     const safe = sanitize ? sanitize(block.html) : block.html;
     return (
       <div className={className}>
