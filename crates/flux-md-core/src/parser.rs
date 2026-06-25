@@ -12,9 +12,9 @@ use crate::render::{
 };
 use crate::blocks::{BlockKind, TableCell, TableData};
 use crate::scanner::{
-    count_table_columns, is_blank_line, is_setext_underline, is_table_delimiter_row, line_end,
-    line_slice, parse_link_ref_def, scan, scan_marker, would_start_other_block, MarkerScan,
-    RawBlock, RawBlockKind, ScanCtx,
+    count_table_columns, detect_html_block_open, html_block_line_closes, is_blank_line,
+    is_setext_underline, is_table_delimiter_row, line_end, line_slice, parse_link_ref_def, scan,
+    scan_marker, would_start_other_block, MarkerScan, RawBlock, RawBlockKind, ScanCtx,
 };
 use crate::inline::{render_inline, render_inline_boundary};
 use crate::url::escape_html;
@@ -155,6 +155,10 @@ pub struct StreamParser {
     container_cache: Option<ContainerCache>,
     /// Fast path for a long open tight, flat list at the tail (see [`ListCache`]).
     list_cache: Option<ListCache>,
+    /// Fast path for a long open indented-code block at the tail (see [`IndentedCodeCache`]).
+    indented_cache: Option<IndentedCodeCache>,
+    /// Fast path for a long open raw-HTML block at the tail (see [`HtmlBlockCache`]).
+    html_cache: Option<HtmlBlockCache>,
 }
 
 #[derive(Default)]
@@ -399,6 +403,68 @@ struct ListCache {
     items: Vec<(usize, usize)>,
 }
 
+/// Incremental render state for a single open *indented-code* block at the tail —
+/// the streaming shape where every line is ≥4-column-indented content with no
+/// interior blank line. Streaming such a block is otherwise O(n²): every append
+/// re-strips and re-escapes the whole growing body (`render_indented_code`).
+/// With this cache an append only strips+escapes the newly-arrived complete
+/// lines and re-renders the (short) trailing partial line.
+///
+/// The cache bails (full path takes over) the instant the simple pattern breaks:
+///   - a newly-complete line that dedents (indent < 4) — it ends the block,
+///   - a blank line — the full path owns interior-blank accounting (the block
+///     range stops at the last content line, blanks may or may not be absorbed),
+///   - a `\r` byte (CRLF) in any processed line.
+/// The mirror of `render_indented_code`: each line strips up to 4 columns of
+/// leading indent (one tab counts as enough and is consumed whole), the body is
+/// the stripped lines joined by `\n`, trailing whitespace trimmed, then a single
+/// `\n`, wrapped in `<pre><code>…</code></pre>`.
+struct IndentedCodeCache {
+    /// Absolute byte offset of the block's first line in `buffer`.
+    start: usize,
+    /// Stable id of the code block (preserved across appends and the close).
+    id: u64,
+    /// Escaped HTML of the complete stripped body lines, joined by `\n`, no
+    /// trailing `\n`. Whitespace bytes survive `escape_html` unchanged, so
+    /// trimming this matches trimming the decoded source.
+    escaped_lines: String,
+    /// Absolute offset just past the last complete body line's `\n`.
+    lines_upto: usize,
+}
+
+/// Incremental render state for a single open *raw-HTML* block at the tail.
+/// Streaming a long HTML block is otherwise O(n²): `render_html_block` re-escapes
+/// (or re-copies) the whole growing slice on every append. The block's output is
+/// a pure function of its contiguous source slice — `<pre><code>` + escaped slice
+/// + `</code></pre>` when escaping, or the trailing-newline-trimmed slice + `\n`
+/// in `unsafe_html` pass-through — so completed lines fold into `cached_prefix`
+/// once and only the short trailing partial is re-processed per append.
+///
+/// `html_type` (1–7, from [`crate::scanner::detect_html_block_open`]) drives the
+/// close detection, which MUST match `scan_html_block` exactly: a completed line
+/// (or the partial) satisfying the type-specific closer (types 1–5, via the
+/// shared [`crate::scanner::html_block_line_closes`]) or a blank line (types 6/7)
+/// ends the block, so the cache bails there and the full path commits it. A `\r`
+/// byte also bails (CRLF routes through the full renderer in both modes).
+struct HtmlBlockCache {
+    /// Absolute byte offset of the block's first line in `buffer`.
+    start: usize,
+    /// Stable id of the HTML block (preserved across appends and the close).
+    id: u64,
+    /// HTML-block type 1–7 (locked at arm time). Drives the close condition.
+    html_type: u8,
+    /// When `true`, raw HTML passes through verbatim (`unsafe_html` and the
+    /// sanitizer is off); when `false`, the slice is escaped into `<pre><code>`.
+    /// Locked at arm time from the parser's options.
+    pass_through: bool,
+    /// Pre-rendered prefix of the completed lines: for pass-through, the raw
+    /// source bytes verbatim (including their `\n`); for the escaped path, their
+    /// `escape_html` output (newlines survive escaping unchanged). No closer.
+    cached_prefix: String,
+    /// Absolute offset just past the last complete folded line's `\n`.
+    lines_upto: usize,
+}
+
 impl StreamParser {
     pub fn new() -> Self {
         Self {
@@ -431,6 +497,8 @@ impl StreamParser {
             table_cache: None,
             container_cache: None,
             list_cache: None,
+            indented_cache: None,
+            html_cache: None,
         }
     }
 
@@ -632,6 +700,12 @@ impl StreamParser {
                 return patch;
             }
             if let Some(patch) = self.try_incremental_list() {
+                return patch;
+            }
+            if let Some(patch) = self.try_incremental_indented() {
+                return patch;
+            }
+            if let Some(patch) = self.try_incremental_html() {
                 return patch;
             }
         }
@@ -921,6 +995,8 @@ impl StreamParser {
         self.table_cache = None;
         self.container_cache = None;
         self.list_cache = None;
+        self.indented_cache = None;
+        self.html_cache = None;
         if !finalizing && new_active.len() == 1 {
             let raw = renderable[to_commit];
             let start = tail_start + raw.range.start;
@@ -977,6 +1053,14 @@ impl StreamParser {
                             *list_start_num,
                             &opts,
                         );
+                    }
+                    RawBlockKind::IndentedCode => {
+                        self.indented_cache =
+                            build_indented_cache(&self.buffer, start, new_active[0].id);
+                    }
+                    RawBlockKind::HtmlBlock { closed: false } => {
+                        self.html_cache =
+                            build_html_cache(&self.buffer, start, new_active[0].id, &opts);
                     }
                     _ => {}
                 }
@@ -1113,6 +1197,183 @@ impl StreamParser {
         };
         self.active_blocks = vec![block.clone()];
         self.fence_cache = Some(cache);
+        Some(Patch { newly_committed: Vec::new(), active: vec![block] })
+    }
+
+    /// O(new bytes) extension of a long open indented-code block at the tail.
+    /// Folds each newly-complete ≥4-indent line into the cached body and
+    /// re-renders only the trailing partial. Returns `None` (dropping the cache)
+    /// the moment the block ends or is no longer the sole open tail — a dedent,
+    /// a blank line, or a `\r` — and the full reparse takes over.
+    fn try_incremental_indented(&mut self) -> Option<Patch> {
+        let mut cache = self.indented_cache.take()?;
+        // The block must still be the tail: only whitespace may sit between the
+        // committed boundary and the opener (normally they're equal).
+        if cache.start < self.committed_offset
+            || self.buffer.as_bytes()[self.committed_offset..cache.start]
+                .iter()
+                .any(|&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        {
+            return None;
+        }
+        let bytes = self.buffer.as_bytes();
+        let end = bytes.len();
+        // Append newly-arrived complete lines to the cached body.
+        let mut pos = cache.lines_upto;
+        while pos < end {
+            match bytes[pos..end].iter().position(|&b| b == b'\n') {
+                None => break, // a partial line; handled below
+                Some(r) => {
+                    let content_end = pos + r;
+                    let next = pos + r + 1;
+                    // A dedent / blank / CRLF line: defer to the full renderer,
+                    // which owns interior-blank accounting and the exact block end.
+                    if bytes[pos..content_end].contains(&b'\r')
+                        || !indented_code_line(&bytes[pos..content_end])
+                    {
+                        return None;
+                    }
+                    if !cache.escaped_lines.is_empty() {
+                        cache.escaped_lines.push('\n');
+                    }
+                    push_indented_content(&bytes[pos..content_end], &mut cache.escaped_lines);
+                    cache.lines_upto = next;
+                    pos = next;
+                }
+            }
+        }
+        // The trailing partial line is re-rendered each append (it is short). An
+        // all-whitespace partial contributes nothing (it is a blank-so-far line
+        // the full renderer would not yet absorb); a partial that already dedents
+        // (content before column 4) ends the block — bail.
+        let partial = &bytes[cache.lines_upto..end];
+        if partial.contains(&b'\r') {
+            return None;
+        }
+        let partial_blank = partial.iter().all(|&b| matches!(b, b' ' | b'\t'));
+        if !partial_blank && !indented_code_line(partial) {
+            return None;
+        }
+        // Assemble: <pre><code> + trim_end(body[+ "\n" + partial]) + "\n" +
+        // </code></pre>. Whitespace survives escape_html unchanged, so trimming
+        // the escaped output equals trimming the decoded source — exactly what
+        // render_indented_code does.
+        let mut html = String::with_capacity(
+            cache.escaped_lines.len() + partial.len() + 32,
+        );
+        html.push_str("<pre><code>");
+        let body_start = html.len();
+        html.push_str(&cache.escaped_lines);
+        if !partial_blank {
+            if !cache.escaped_lines.is_empty() {
+                html.push('\n');
+            }
+            push_indented_content(partial, &mut html);
+        }
+        let trimmed = html.trim_end_matches([' ', '\t', '\n', '\r']).len();
+        html.truncate(trimmed.max(body_start));
+        // Opt-in structured channel: the decoded source is the trimmed body + "\n",
+        // recovered by inverting escape_html — byte-identical to the full path.
+        let kind = if self.block_data {
+            let mut code = crate::render::unescape_html_body(&html[body_start..]);
+            code.push('\n');
+            BlockKind::CodeBlock { lang: None, code: Some(code) }
+        } else {
+            BlockKind::CodeBlock { lang: None, code: None }
+        };
+        html.push('\n');
+        html.push_str("</code></pre>");
+        let block = Block {
+            id: cache.id,
+            kind,
+            start: cache.start,
+            end,
+            html,
+            open: true,
+            speculative: true,
+        };
+        self.active_blocks = vec![block.clone()];
+        self.indented_cache = Some(cache);
+        Some(Patch { newly_committed: Vec::new(), active: vec![block] })
+    }
+
+    /// O(new bytes) extension of a long open raw-HTML block at the tail. Folds
+    /// each newly-complete line into the cached prefix (pass-through or escaped)
+    /// and re-processes only the trailing partial. Returns `None` (dropping the
+    /// cache) the moment the block's type-specific close condition is met (so the
+    /// full reparse closes + commits it), or on a `\r`.
+    fn try_incremental_html(&mut self) -> Option<Patch> {
+        let mut cache = self.html_cache.take()?;
+        // The pass-through decision must still hold (options don't change mid-
+        // stream, but stay defensive: a changed setting voids the cache).
+        if cache.pass_through != (self.unsafe_html && !self.html_sanitize) {
+            return None;
+        }
+        // The block must still be the tail (only whitespace before the opener).
+        if cache.start < self.committed_offset
+            || self.buffer.as_bytes()[self.committed_offset..cache.start]
+                .iter()
+                .any(|&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        {
+            return None;
+        }
+        let html_type = cache.html_type;
+        let bytes = self.buffer.as_bytes();
+        let end = bytes.len();
+        let mut pos = cache.lines_upto;
+        while pos < end {
+            match bytes[pos..end].iter().position(|&b| b == b'\n') {
+                None => break, // a partial line; handled below
+                Some(r) => {
+                    let content_end = pos + r;
+                    let next = pos + r + 1;
+                    let line = &bytes[pos..next];
+                    // The closing line (types 1–5) or a blank line (types 6/7)
+                    // ends the block — defer to the full renderer to close + commit
+                    // it. A `\r` also bails (CRLF goes through the full path).
+                    if html_block_closes_here(line, html_type, &bytes[pos..content_end]) {
+                        return None;
+                    }
+                    fold_html_line(&bytes[pos..next], cache.pass_through, &mut cache.cached_prefix);
+                    cache.lines_upto = next;
+                    pos = next;
+                }
+            }
+        }
+        // The trailing partial line is re-processed each append (it is short). It
+        // ends the block iff it satisfies the close condition — bail then.
+        let partial = &bytes[cache.lines_upto..end];
+        if html_block_closes_here(partial, html_type, partial) {
+            return None;
+        }
+        let mut html = String::with_capacity(cache.cached_prefix.len() + partial.len() + 32);
+        if cache.pass_through {
+            // Pass-through: prefix + partial verbatim, trailing newlines trimmed,
+            // then a single `\n` (matches render_html_block's pass-through).
+            html.push_str(&cache.cached_prefix);
+            html.push_str(std::str::from_utf8(partial).unwrap_or(""));
+            let trimmed = html.trim_end_matches(['\n', '\r']).len();
+            html.truncate(trimmed);
+            html.push('\n');
+        } else {
+            // Escaped: <pre><code> + escape_html(prefix + partial) + </code></pre>.
+            // The prefix is already escaped; only the partial needs escaping now.
+            html.push_str("<pre><code>");
+            html.push_str(&cache.cached_prefix);
+            escape_html(std::str::from_utf8(partial).unwrap_or(""), &mut html);
+            html.push_str("</code></pre>");
+        }
+        let block = Block {
+            id: cache.id,
+            kind: BlockKind::Html,
+            start: cache.start,
+            end,
+            html,
+            open: true,
+            speculative: true,
+        };
+        self.active_blocks = vec![block.clone()];
+        self.html_cache = Some(cache);
         Some(Patch { newly_committed: Vec::new(), active: vec![block] })
     }
 
@@ -2249,6 +2510,158 @@ fn build_paragraph_cache(buffer: &str, start: usize, id: u64, opts: &RenderOpts)
     let mut committed_inner = String::new();
     render_inline(&buffer[start..cut], opts, &mut committed_inner);
     Some(ParagraphCache { start, id, cut, committed_inner })
+}
+
+/// True iff `line` (content only, no terminator) is an indented-code line:
+/// ≥4 columns of leading whitespace (one tab counts as 4) followed by content.
+/// Mirrors the per-line gate in `scan_indented_code`.
+fn indented_code_line(line: &[u8]) -> bool {
+    let mut indent = 0usize;
+    let mut i = 0usize;
+    while i < line.len() {
+        match line[i] {
+            b' ' => {
+                indent += 1;
+                i += 1;
+            }
+            b'\t' => {
+                indent += 4;
+                i += 1;
+            }
+            _ => break,
+        }
+        if indent >= 4 {
+            break;
+        }
+    }
+    indent >= 4 && i < line.len() && !matches!(line[i], b'\n' | b'\r')
+}
+
+/// Strip up to 4 columns of leading indent from `line` (content only) — one tab
+/// is consumed whole and stops the strip — then escape the remainder into `out`.
+/// Mirrors the per-line stripping in `render_indented_code`.
+fn push_indented_content(line: &[u8], out: &mut String) {
+    let mut i = 0usize;
+    let mut consumed = 0usize;
+    while i < line.len() && consumed < 4 {
+        match line[i] {
+            b' ' => {
+                consumed += 1;
+                i += 1;
+            }
+            b'\t' => {
+                i += 1;
+                break;
+            }
+            _ => break,
+        }
+    }
+    escape_html(std::str::from_utf8(&line[i..]).unwrap_or(""), out);
+}
+
+/// True iff this `line` ends the open HTML block of `html_type` — the
+/// type-specific closer (types 1–5, via the shared scanner predicate, on the
+/// content slice `content`) or a blank line (types 6/7), or a `\r` anywhere
+/// (CRLF defers to the full path). MUST match `scan_html_block`'s loop exactly.
+fn html_block_closes_here(line: &[u8], html_type: u8, content: &[u8]) -> bool {
+    if line.contains(&b'\r') {
+        return true;
+    }
+    if html_block_line_closes(line, html_type) {
+        return true;
+    }
+    // Types 6/7 end on a blank line (which is not part of the block).
+    matches!(html_type, 6 | 7) && content.iter().all(|&b| matches!(b, b' ' | b'\t'))
+}
+
+/// Fold one complete HTML-block source line (terminator included) into the
+/// cached prefix: verbatim for pass-through, `escape_html`d otherwise. Newlines
+/// pass through `escape_html` unchanged, so the escaped prefix keeps line breaks.
+fn fold_html_line(line: &[u8], pass_through: bool, out: &mut String) {
+    let s = std::str::from_utf8(line).unwrap_or("");
+    if pass_through {
+        out.push_str(s);
+    } else {
+        escape_html(s, out);
+    }
+}
+
+/// Arm the indented-code cache for the open block at `start`, walking its body
+/// lines once. Returns `None` (no caching) if a line dedents, is blank, or
+/// contains a `\r` — those keep going through the full renderer, which gets the
+/// interior-blank accounting and exact block end right.
+fn build_indented_cache(buffer: &str, start: usize, id: u64) -> Option<IndentedCodeCache> {
+    let bytes = buffer.as_bytes();
+    let end = bytes.len();
+    let mut escaped_lines = String::new();
+    let mut lines_upto = start;
+    let mut pos = start;
+    while pos < end {
+        match bytes[pos..end].iter().position(|&b| b == b'\n') {
+            None => break,
+            Some(r) => {
+                let content_end = pos + r;
+                let next = pos + r + 1;
+                if bytes[pos..content_end].contains(&b'\r')
+                    || !indented_code_line(&bytes[pos..content_end])
+                {
+                    return None;
+                }
+                if !escaped_lines.is_empty() {
+                    escaped_lines.push('\n');
+                }
+                push_indented_content(&bytes[pos..content_end], &mut escaped_lines);
+                lines_upto = next;
+                pos = next;
+            }
+        }
+    }
+    // The trailing partial must not already dedent (else the block has ended and
+    // the full path owns it); an all-whitespace partial is fine (blank-so-far).
+    let partial = &bytes[lines_upto..end];
+    if partial.contains(&b'\r') {
+        return None;
+    }
+    let partial_blank = partial.iter().all(|&b| matches!(b, b' ' | b'\t'));
+    if !partial_blank && !indented_code_line(partial) {
+        return None;
+    }
+    Some(IndentedCodeCache { start, id, escaped_lines, lines_upto })
+}
+
+/// Arm the raw-HTML-block cache for the open block at `start`, walking its body
+/// lines once. Returns `None` (no caching) if the block already meets its close
+/// condition (a closing line / a blank line for types 6–7) or any line carries a
+/// `\r` — those keep going through the full renderer.
+fn build_html_cache(buffer: &str, start: usize, id: u64, opts: &RenderOpts) -> Option<HtmlBlockCache> {
+    let bytes = buffer.as_bytes();
+    let end = bytes.len();
+    let (_, html_type) = detect_html_block_open(bytes, start)?;
+    let pass_through = opts.unsafe_html && !opts.html_sanitize;
+    let mut cached_prefix = String::new();
+    let mut lines_upto = start;
+    let mut pos = start;
+    while pos < end {
+        match bytes[pos..end].iter().position(|&b| b == b'\n') {
+            None => break,
+            Some(r) => {
+                let content_end = pos + r;
+                let next = pos + r + 1;
+                let line = &bytes[pos..next];
+                if html_block_closes_here(line, html_type, &bytes[pos..content_end]) {
+                    return None;
+                }
+                fold_html_line(line, pass_through, &mut cached_prefix);
+                lines_upto = next;
+                pos = next;
+            }
+        }
+    }
+    let partial = &bytes[lines_upto..end];
+    if html_block_closes_here(partial, html_type, partial) {
+        return None;
+    }
+    Some(HtmlBlockCache { start, id, html_type, pass_through, cached_prefix, lines_upto })
 }
 
 /// True if the open paragraph beginning before `cut` actually ends somewhere in
