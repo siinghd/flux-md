@@ -4,6 +4,51 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.16.0 — 2026-06-25
+
+### Added
+
+- **Keyed streaming renderers (opt-in via `blockData`).** Tables, lists, and
+  blockquote/alert containers now render keyed sub-blocks (`<tr>` / `<li>` /
+  inner blocks), so while a block streams only the growing tail row/item
+  re-renders instead of the whole block — committed rows keep their DOM
+  identity (scroll/selection survive). React + vanilla DOM. Backed by new
+  `ListData.items` and `ContainerData` block-data channels.
+- **`onRenderMetrics` hook + render counters.** Opt-in per-block render-churn
+  probe; `getMetrics()` gains `renderCount` / `rebuildCount`. Zero cost when
+  unused.
+- **Opt-in render/scheduling knobs (all default off):** `coalesce` (rAF patch
+  coalescing for the React/store path), `deferTail` (`useDeferredValue`),
+  `childMemo` (fine-grained `htmlToReact` reuse), `morphOpenBlocks` (in-place
+  DOM morph of open blocks), a DOM prefix-extension tail-append fast path, and
+  fine-grained tail-block signals for Solid/Vue/Svelte.
+
+### Performance
+
+- **Footnotes no longer disable the streaming caches.** The paragraph, list,
+  table, and blockquote/alert caches now stay armed when `gfm_footnotes` is on,
+  via placeholder occurrence-id tokens resolved on commit — closing the O(n²)
+  tail re-scan for footnote-bearing streamed blocks. Output is byte-identical
+  to a one-shot render.
+- **Huge unclosed blocks stream in O(new bytes).** New incremental caches for
+  open indented-code and raw-HTML blocks remove their O(n²) tail re-scan.
+- Single-pass URL scheme probe and memoized keyed-table header sniffs trim two
+  hot paths.
+
+### Build & size
+
+- The published tarball is ~32 KB gzip smaller. The WASM core is rebuilt with
+  `-Z build-std` + `panic=immediate-abort` (~219 → ~178 KB), and `CHANGELOG.md`
+  + a stray wasm-pack `package.json` no longer ship. **Note:** building the
+  WASM now requires the nightly Rust toolchain + `rust-src`; consumers are
+  unaffected (the prebuilt binary ships), and `build:wasm:stable` remains for
+  stable toolchains.
+
+### Security
+
+- Footnote occurrence-id placeholder tokens can never leak into rendered HTML
+  (defensive guard + a debug assertion exercised by the streaming fuzz corpus).
+
 ## 0.15.1 — 2026-06-22
 
 ### Security
