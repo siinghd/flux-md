@@ -127,6 +127,42 @@ test.skipIf(!haveWasm)("real WASM: WITHOUT setBlockData a Table has no kind.data
   expect(Object.keys(table.kind)).toEqual(["type"]);
 });
 
+const LIST_MD = "1. **one**\n2. [two](u)\n3. three\n";
+
+test.skipIf(!haveWasm)("real WASM: a List carries per-item HTML in kind.data.items when setBlockData is on", () => {
+  // Guards the keyed-list serde path across the real boundary: kind.data carries
+  // `{ ordered, start, items }`, and each item's `html` is the inline-rendered
+  // inner <li> HTML (so a keyed renderer reuses unchanged items mid-stream).
+  const { blocks } = parseAll(LIST_MD, (p) => p.setBlockData(true));
+  const list = blocks.find((b) => b.kind.type === "List");
+  expect(list).toBeDefined();
+  const d = list.kind.data;
+  expect(d).toBeDefined();
+  expect(d.ordered).toBe(true);
+  expect(d.start).toBe(1);
+  // Each item's html is byte-identical to the inline content inside the matching
+  // <li> of list.html — including the default link rel/target attributes.
+  expect(d.items.length).toBe(3);
+  expect(d.items[0].html).toBe("<strong>one</strong>");
+  expect(d.items[1].html).toContain('<a href="u"');
+  expect(d.items[1].html).toContain(">two</a>");
+  expect(d.items[2].html).toBe("three");
+  // The concatenated items reconstruct the inner <li>…</li> of the rendered HTML.
+  for (let i = 0; i < d.items.length; i++) {
+    expect(list.html).toContain(`<li>${d.items[i].html}</li>`);
+  }
+});
+
+test.skipIf(!haveWasm)("real WASM: WITHOUT setBlockData a List has no items (byte-identical-off tripwire)", () => {
+  // The default-off contract: kind.data is exactly `{ ordered }` — no `start`, no
+  // `items` — so a non-user pays zero serde bytes for the keyed-list channel.
+  const { blocks } = parseAll(LIST_MD);
+  const list = blocks.find((b) => b.kind.type === "List");
+  expect(list).toBeDefined();
+  expect(list.kind.data).toEqual({ ordered: true });
+  expect(list.kind.data.items).toBeUndefined();
+});
+
 const HEADING_MD = "## **Bold** & plain\n";
 
 test.skipIf(!haveWasm)("real WASM: a Heading carries structured kind.data when setBlockData is on", () => {

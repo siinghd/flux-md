@@ -10,7 +10,7 @@ use crate::render::{
     parse_alignments, push_code_fence_open, push_table_cell, render_block,
     render_footnote_section, split_table_cells, Enrichment, LinkRef, RenderOpts,
 };
-use crate::blocks::{BlockKind, TableCell, TableData};
+use crate::blocks::{BlockKind, ListItemData, TableCell, TableData};
 use crate::scanner::{
     count_table_columns, is_blank_line, is_setext_underline, is_table_delimiter_row, line_end,
     line_slice, parse_link_ref_def, scan, scan_marker, would_start_other_block, MarkerScan,
@@ -397,6 +397,11 @@ struct ListCache {
     /// `end` is the byte just before that line's `\n` (so `&buffer[s..e]` is
     /// the line content). Used to re-render on the tight→loose transition.
     items: Vec<(usize, usize)>,
+    /// Per-item inner `<li>` HTML for the opt-in `kind.data` channel — one entry
+    /// per `items` span, parallel to `cached_prefix`. Empty unless `block_data` is
+    /// on; surfaced on the active block's `BlockKind::List { items }` so the keyed
+    /// renderer reuses unchanged item nodes while the list streams.
+    item_html: Vec<ListItemData>,
 }
 
 impl StreamParser {
@@ -719,10 +724,11 @@ impl StreamParser {
                     }
                 }
                 Some(Enrichment::MathBlock(md)) => kind = BlockKind::MathBlock(Some(md)),
-                // List keeps its classified `ordered`; only `start` is folded on.
-                Some(Enrichment::List(start)) => {
+                // List keeps its classified `ordered`; `start` + per-item `items`
+                // (inner `<li>` HTML) are folded on for the keyed renderer.
+                Some(Enrichment::List(start, items)) => {
                     if let BlockKind::List { ordered, .. } = kind {
-                        kind = BlockKind::List { ordered, start: Some(start) };
+                        kind = BlockKind::List { ordered, start: Some(start), items };
                     }
                 }
                 None => {}
@@ -1672,14 +1678,14 @@ impl StreamParser {
                     if !cache.loose {
                         rebuild_loose(&mut cache, bytes, &opts)?;
                     }
-                    let cached_len_before = cache.cached_prefix.len();
-                    if render_item_line(look_line, &m, true, &opts, &mut cache.cached_prefix)
-                        .is_none()
-                    {
-                        cache.cached_prefix.truncate(cached_len_before);
-                        return None;
-                    }
-                    cache.cached_prefix.push('\n');
+                    fold_item_line(
+                        look_line,
+                        &m,
+                        true,
+                        &opts,
+                        &mut cache.cached_prefix,
+                        Some(&mut cache.item_html),
+                    )?;
                     cache.lines_upto = look_next;
                     cache.items.push((look, look_end));
                     pos = look_next;
@@ -1691,12 +1697,15 @@ impl StreamParser {
             if !sibling_match(&m, &cache) {
                 return None;
             }
-            let cached_len_before = cache.cached_prefix.len();
-            if render_item_line(line, &m, cache.loose, &opts, &mut cache.cached_prefix).is_none() {
-                cache.cached_prefix.truncate(cached_len_before);
-                return None;
-            }
-            cache.cached_prefix.push('\n');
+            let loose = cache.loose;
+            fold_item_line(
+                line,
+                &m,
+                loose,
+                &opts,
+                &mut cache.cached_prefix,
+                Some(&mut cache.item_html),
+            )?;
             cache.lines_upto = next;
             cache.items.push((pos, content_end));
             pos = next;
@@ -1705,9 +1714,13 @@ impl StreamParser {
         // Speculatively render the trailing partial line as an item. Three
         // shapes are valid: empty (no partial), all whitespace including `\n`
         // (trailing blanks after a settled item — emit nothing; cache armed),
-        // or a sibling marker line (render in the cache's current style).
+        // or a sibling marker line (render in the cache's current style). The
+        // partial item's inner HTML rides on the active block's `items` too (so
+        // the keyed renderer sees the streaming tail item), but is NOT folded into
+        // the cache's committed `item_html` — it may be revised next chunk.
         let partial = &bytes[cache.lines_upto..end];
         let mut partial_html = String::new();
+        let mut partial_item: Vec<ListItemData> = Vec::new();
         if !partial.is_empty() {
             if partial.contains(&b'\r') {
                 return None;
@@ -1719,10 +1732,18 @@ impl StreamParser {
                 if !sibling_match(&m, &cache) {
                     return None;
                 }
-                if render_item_line(partial, &m, cache.loose, &opts, &mut partial_html).is_none() {
+                if fold_item_line(
+                    partial,
+                    &m,
+                    cache.loose,
+                    &opts,
+                    &mut partial_html,
+                    Some(&mut partial_item),
+                )
+                .is_none()
+                {
                     return None;
                 }
-                partial_html.push('\n');
             }
         }
 
@@ -1734,6 +1755,19 @@ impl StreamParser {
         html.push_str(&partial_html);
         html.push_str(close);
 
+        // Opt-in structured channel: surface the per-item inner HTML (committed
+        // items + the speculative trailing item) on the active block so the keyed
+        // renderer reuses unchanged item nodes mid-stream. Off ⇒ empty (omitted on
+        // the wire, byte-identical). The committed `cache.item_html` is borrowed by
+        // reference + the trailing partial appended without disturbing the cache.
+        let items: Vec<ListItemData> = if self.block_data {
+            let mut v = Vec::with_capacity(cache.item_html.len() + partial_item.len());
+            v.extend_from_slice(&cache.item_html);
+            v.append(&mut partial_item);
+            v
+        } else {
+            Vec::new()
+        };
         let block = Block {
             id: cache.id,
             // Opt-in structured channel: fold the start number on when block_data
@@ -1741,6 +1775,7 @@ impl StreamParser {
             kind: BlockKind::List {
                 ordered: cache.ordered,
                 start: if self.block_data { Some(cache.start_num) } else { None },
+                items,
             },
             start: cache.start,
             end,
@@ -1761,14 +1796,17 @@ impl StreamParser {
 ///   loose: `<li dir?>{checkbox?}\n<p dir?>{inline}</p></li>`
 /// (`render_list` emits the trailing `\n` after each item; the cache also
 /// pushes that `\n`, so byte layout is identical in both branches.)
-/// Returns `None` on any invalid-UTF-8 path so the cache can bail.
+/// Returns `None` on any invalid-UTF-8 path so the cache can bail; on success
+/// returns `Some((lo, hi))` — the byte range *within `out`* of this item's inner
+/// `<li>` HTML (the bytes between `<li…>` and `</li>`), so the cache can surface it
+/// as `ListItemData` for the keyed renderer without a second render.
 fn render_item_line(
     line: &[u8],
     m: &MarkerScan,
     loose: bool,
     opts: &RenderOpts,
     out: &mut String,
-) -> Option<()> {
+) -> Option<(usize, usize)> {
     let content_bytes = &line[m.content_byte..];
     let content_str = std::str::from_utf8(content_bytes).ok()?;
     // Trim trailing whitespace to match `render_list_item`'s `body_trimmed`.
@@ -1794,8 +1832,10 @@ fn render_item_line(
     // the `<p>` wrap path. A pure-checkbox item keeps the wrapper / checkbox
     // but still skips the `<p>` (the scanner sees no paragraph to wrap).
     if rest.is_empty() && checkbox.is_none() {
+        let lo = out.len();
         out.push_str("<li></li>");
-        return Some(());
+        // Inner span is empty, just past the 4-byte `<li>` opener.
+        return Some((lo + 4, lo + 4));
     }
 
     // a11y: mirror `render_list_item`'s `<label>` wrap — ONLY the tight,
@@ -1806,6 +1846,8 @@ fn render_item_line(
     out.push_str("<li");
     out.push_str(opts.dir());
     out.push('>');
+    // Inner-HTML span starts just past the `<li…>` opening tag.
+    let inner_lo = out.len();
     if wrap_label {
         out.push_str("<label>");
     }
@@ -1832,8 +1874,10 @@ fn render_item_line(
     if wrap_label {
         out.push_str("</label>");
     }
+    // Inner-HTML span ends just before `</li>`.
+    let inner_hi = out.len();
     out.push_str("</li>");
-    Some(())
+    Some((inner_lo, inner_hi))
 }
 
 /// Tight→loose one-time rebuild. Re-renders `cached_prefix` from the source
@@ -1848,12 +1892,20 @@ fn rebuild_loose(cache: &mut ListCache, bytes: &[u8], opts: &RenderOpts) -> Opti
     cache.loose = true;
     cache.cached_prefix.clear();
     cache.cached_prefix.push_str(&cache.opener_html);
-    for &(s, e) in &cache.items {
+    // Rebuild the keyed-renderer item HTML in lockstep (the loose `<p>`-wrapped
+    // inner differs from the tight inline form), so `item_html` stays parallel.
+    cache.item_html.clear();
+    // Borrow `items` separately so `cached_prefix`/`item_html` can be mutated.
+    let spans = std::mem::take(&mut cache.items);
+    for &(s, e) in &spans {
         let line = &bytes[s..e];
         let m = scan_marker(line)?;
-        render_item_line(line, &m, true, opts, &mut cache.cached_prefix)?;
-        cache.cached_prefix.push('\n');
+        if fold_item_line(line, &m, true, opts, &mut cache.cached_prefix, Some(&mut cache.item_html)).is_none() {
+            cache.items = spans;
+            return None;
+        }
     }
+    cache.items = spans;
     Some(())
 }
 
@@ -2229,7 +2281,40 @@ fn build_list_cache(
         lines_upto: start,
         loose: false,
         items: Vec::new(),
+        item_html: Vec::new(),
     })
+}
+
+/// Fold one item line into `cached_prefix` and, when `block_data` is on, capture
+/// its inner `<li>` HTML into `item_html` (the keyed-renderer channel). Mirrors
+/// the raw `render_item_line` + `push('\n')` the cache did before, so byte layout
+/// is unchanged. Returns `None` (so the caller can truncate + bail) on the
+/// invalid-UTF-8 path. `out`/`html_sink` are passed separately so the trailing
+/// (speculative) item can capture into a scratch buffer without committing it to
+/// the cache's `item_html`.
+fn fold_item_line(
+    line: &[u8],
+    m: &MarkerScan,
+    loose: bool,
+    opts: &RenderOpts,
+    out: &mut String,
+    html_sink: Option<&mut Vec<ListItemData>>,
+) -> Option<()> {
+    let cached_len_before = out.len();
+    let (lo, hi) = match render_item_line(line, m, loose, opts, out) {
+        Some(range) => range,
+        None => {
+            out.truncate(cached_len_before);
+            return None;
+        }
+    };
+    if let Some(sink) = html_sink {
+        if opts.block_data {
+            sink.push(ListItemData { html: out[lo..hi].to_string() });
+        }
+    }
+    out.push('\n');
+    Some(())
 }
 
 /// Arm the paragraph cache for the open paragraph at `start`, rendering its

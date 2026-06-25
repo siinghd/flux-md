@@ -1,6 +1,6 @@
 import type { FluxClient } from "./client";
 import { highlight } from "./hi";
-import type { Block, BlockComponentProps, BlockKindTag } from "./types-core";
+import type { Block, BlockComponentProps, BlockKindTag, ListData } from "./types-core";
 import { blockProps, extractLang } from "./block-props";
 
 /**
@@ -243,6 +243,17 @@ export function mountFluxMarkdown(
         return renderMermaid(b);
     }
 
+    // 2b. Keyed list renderer (opt-in: only when `blockData` is on, so
+    // `kind.data.items` carries per-item inner HTML). For an OPEN list, stamp one
+    // `<li>` per item — each item's inner HTML routed through the SAME sanitize
+    // path the generic innerHTML branch uses — so the rebuilt list tracks the
+    // structured items instead of re-parsing the whole `<ul>`/`<ol>` HTML. Closed
+    // lists fall through (their node is reused untouched, never rebuilt).
+    if (b.open && kind === "List") {
+      const keyed = renderKeyedList(b);
+      if (keyed) return keyed;
+    }
+
     // 3. Generic fast path.
     const node = document.createElement("div");
     node.className =
@@ -251,6 +262,32 @@ export function mountFluxMarkdown(
       (b.open ? " flux-open" : "") +
       (b.speculative ? " flux-speculative" : "");
     node.innerHTML = sanitize ? sanitize(b.html) : b.html;
+    return node;
+  }
+
+  // Build a `<div class="flux-block flux-block-list flux-open …"><ul|ol>…</ul|ol>`
+  // node from the structured `kind.data.items`, one `<li>` per item with its inner
+  // HTML sanitized via the shared `sanitize` path. Returns `null` when the items
+  // channel is absent (blockData off) so the caller falls back to opaque HTML.
+  function renderKeyedList(b: Block): HTMLElement | null {
+    const ld = b.kind.data as ListData | undefined;
+    const items = ld?.items;
+    if (!items || items.length === 0) return null;
+    const node = document.createElement("div");
+    node.className =
+      "flux-block flux-block-list" +
+      (b.open ? " flux-open" : "") +
+      (b.speculative ? " flux-speculative" : "");
+    const list = document.createElement(ld?.ordered ? "ol" : "ul");
+    if (ld?.ordered && ld.start !== undefined && ld.start !== 1) {
+      list.setAttribute("start", String(ld.start));
+    }
+    for (const it of items) {
+      const li = document.createElement("li");
+      li.innerHTML = sanitize ? sanitize(it.html) : it.html;
+      list.appendChild(li);
+    }
+    node.appendChild(list);
     return node;
   }
 

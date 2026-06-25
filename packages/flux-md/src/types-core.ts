@@ -85,16 +85,29 @@ export interface MathBlockData {
 }
 
 /**
+ * One list item in {@link ListData.items}. `html` is the inline-rendered inner
+ * HTML of the item's `<li>` (byte-identical to the content between the matching
+ * `<li…>`/`</li>` in `block.html`), so a keyed renderer can stamp one node per
+ * item and reuse the unchanged items while the list streams.
+ */
+export interface ListItemData {
+  html: string;
+}
+
+/**
  * A List's `kind.data` when {@link ParserConfig.blockData} is on. `ordered` is the
  * always-on flag; `start` is the opt-in ordered-list start number (the `start="N"`
  * HTML attribute; `1` for an unordered list), only present when `blockData` is on.
- * Renumber / continue a split list from `start` alone — no HTML re-parse. When
- * `blockData` is off, `start` is absent and `kind.data` is just `{ ordered }`,
- * byte-identical to before.
+ * `items` carries each item's inner `<li>` HTML — present (and non-empty) only when
+ * `blockData` is on — so a keyed renderer can re-render only the items that changed
+ * since the last patch instead of the whole list's HTML. Renumber / continue a
+ * split list from `start` alone — no HTML re-parse. When `blockData` is off, `start`
+ * and `items` are absent and `kind.data` is just `{ ordered }`, byte-identical.
  */
 export interface ListData {
   ordered: boolean;
   start?: number;
+  items?: ListItemData[];
 }
 
 export interface Block {

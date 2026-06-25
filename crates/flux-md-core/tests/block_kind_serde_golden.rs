@@ -16,7 +16,9 @@
 //! same plain-object shape the derive produced — so these `serde_json` goldens
 //! also pin the wire contract `props.table = block.kind.data` depends on.
 
-use flux_md_core::blocks::{AlertKind, BlockKind, HeadingData, MathBlockData, TableCell, TableData};
+use flux_md_core::blocks::{
+    AlertKind, BlockKind, HeadingData, ListItemData, MathBlockData, TableCell, TableData,
+};
 use std::rc::Rc;
 
 fn j(k: &BlockKind) -> String {
@@ -104,21 +106,35 @@ fn every_variant_matches_pre_refactor_golden() {
         r#"{"type":"CodeBlock","data":{"lang":null,"code":"plain\n"}}"#
     );
     assert_eq!(
-        j(&BlockKind::List { ordered: true, start: None }),
+        j(&BlockKind::List { ordered: true, start: None, items: vec![] }),
         r#"{"type":"List","data":{"ordered":true}}"#
     );
     assert_eq!(
-        j(&BlockKind::List { ordered: false, start: None }),
+        j(&BlockKind::List { ordered: false, start: None, items: vec![] }),
         r#"{"type":"List","data":{"ordered":false}}"#
     );
     // ON: the ordered-list start number rides alongside the always-on `ordered`.
+    // (An empty `items` is still omitted — `skip_serializing_if`.)
     assert_eq!(
-        j(&BlockKind::List { ordered: true, start: Some(5) }),
+        j(&BlockKind::List { ordered: true, start: Some(5), items: vec![] }),
         r#"{"type":"List","data":{"ordered":true,"start":5}}"#
     );
     assert_eq!(
-        j(&BlockKind::List { ordered: false, start: Some(1) }),
+        j(&BlockKind::List { ordered: false, start: Some(1), items: vec![] }),
         r#"{"type":"List","data":{"ordered":false,"start":1}}"#
+    );
+    // ON with per-item HTML: `items` rides after `start` (the keyed-renderer
+    // channel). Each entry is `{ "html": <inner-<li> HTML> }`.
+    assert_eq!(
+        j(&BlockKind::List {
+            ordered: true,
+            start: Some(1),
+            items: vec![
+                ListItemData { html: "first".into() },
+                ListItemData { html: "<strong>second</strong>".into() },
+            ],
+        }),
+        r#"{"type":"List","data":{"ordered":true,"start":1,"items":[{"html":"first"},{"html":"<strong>second</strong>"}]}}"#
     );
     assert_eq!(
         j(&BlockKind::Alert {

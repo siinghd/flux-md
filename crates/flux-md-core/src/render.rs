@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::blocks::{AlertKind, BlockKind, HeadingData, MathBlockData, TableCell, TableData};
+use crate::blocks::{AlertKind, BlockKind, HeadingData, ListItemData, MathBlockData, TableCell, TableData};
 use crate::inline::render_inline;
 use crate::scanner::{
     component_inner_range, indent_cols, is_blank_line, line_end, line_slice, scan, scan_marker,
@@ -204,7 +204,9 @@ pub fn classify(raw: &RawBlockKind, slice: &str, gfm_alerts: bool) -> BlockKind 
         }
         RawBlockKind::IndentedCode => BlockKind::CodeBlock { lang: None, code: None },
         RawBlockKind::MathFence { .. } => BlockKind::MathBlock(None),
-        RawBlockKind::List { ordered, .. } => BlockKind::List { ordered: *ordered, start: None },
+        RawBlockKind::List { ordered, .. } => {
+            BlockKind::List { ordered: *ordered, start: None, items: Vec::new() }
+        }
         RawBlockKind::Blockquote => BlockKind::Blockquote,
         RawBlockKind::Table => BlockKind::Table(None),
         RawBlockKind::HorizontalRule => BlockKind::Rule,
@@ -236,10 +238,10 @@ pub enum Enrichment {
     CodeBlock(String),
     /// Display-math block — folds onto `BlockKind::MathBlock(Some(_))`.
     MathBlock(MathBlockData),
-    /// Ordered/unordered list — folds the start number onto
-    /// `BlockKind::List { start: Some(_), .. }` (the classified `ordered` is
-    /// preserved).
-    List(u32),
+    /// Ordered/unordered list — folds the start number and the per-item inner
+    /// HTML onto `BlockKind::List { start: Some(_), items, .. }` (the classified
+    /// `ordered` is preserved).
+    List(u32, Vec<ListItemData>),
 }
 
 /// Render one block to HTML. Returns `Some(Enrichment)` only for a top-level
@@ -285,9 +287,9 @@ pub fn render_block(source: &str, raw: &RawBlock, opts: &RenderOpts, out: &mut S
         }
         RawBlockKind::Blockquote => render_blockquote(slice, opts, out),
         RawBlockKind::List { ordered, start } => {
-            render_list(slice, *ordered, *start, opts, out);
+            let items = render_list(slice, *ordered, *start, opts, out);
             if opts.block_data {
-                return Some(Enrichment::List(*start));
+                return Some(Enrichment::List(*start, items));
             }
         }
         RawBlockKind::Table => return render_table(slice, opts, out).map(Enrichment::Table),
@@ -1070,8 +1072,13 @@ fn strip_cols(line: &[u8], cols: usize) -> String {
     std::str::from_utf8(&line[i..]).unwrap_or("").to_string()
 }
 
-fn render_list(slice: &str, ordered: bool, start: u32, opts: &RenderOpts, out: &mut String) {
+/// Render a list to HTML. When `opts.block_data` is on, also returns one
+/// `ListItemData` per item carrying that item's inner `<li>` HTML (byte-identical
+/// to the content between the matching `<li…>`/`</li>` in `out`); returns an empty
+/// `Vec` when off (zero extra work / allocation).
+fn render_list(slice: &str, ordered: bool, start: u32, opts: &RenderOpts, out: &mut String) -> Vec<ListItemData> {
     let bytes = slice.as_bytes();
+    let mut items: Vec<ListItemData> = Vec::new();
     // Split into sibling items by tracking each item's own content_indent
     // (CMark §5.2). A line opens a new sibling item iff it carries a marker of
     // this list's family, is indented at most `edge + 3` columns, and is
@@ -1121,7 +1128,7 @@ fn render_list(slice: &str, ordered: bool, start: u32, opts: &RenderOpts, out: &
         pos = line_end(bytes, pos);
     }
     if item_starts.is_empty() {
-        return;
+        return items;
     }
     item_starts.push(bytes.len());
 
@@ -1159,10 +1166,18 @@ fn render_list(slice: &str, ordered: bool, start: u32, opts: &RenderOpts, out: &
         let s = win[0];
         let e = win[1];
         let item_slice = &bytes[s..e];
-        render_list_item(item_slice, ordered, loose, opts, out);
+        let inner = render_list_item(item_slice, ordered, loose, opts, out);
+        // Structured channel (block_data on): slice the item's inner `<li>` HTML
+        // out of `out` (the range render_list_item just recorded) so the keyed
+        // renderer gets the exact bytes between this `<li…>` and its `</li>` —
+        // no second render, no HTML re-parse.
+        if let Some((lo, hi)) = inner {
+            items.push(ListItemData { html: out[lo..hi].to_string() });
+        }
         out.push('\n');
     }
     out.push_str(if ordered { "</ol>" } else { "</ul>" });
+    items
 }
 
 /// Does a single list item *directly* contain two block-level elements
@@ -1200,13 +1215,18 @@ fn item_directly_loose(item: &[u8], ctx: ScanCtx) -> bool {
     false
 }
 
-fn render_list_item(item: &[u8], ordered: bool, loose: bool, opts: &RenderOpts, out: &mut String) {
+/// Render one `<li…>…</li>` into `out`. When `opts.block_data` is on, returns the
+/// `(start, end)` byte range *within `out`* of this item's inner HTML (the bytes
+/// between the `<li…>` opening tag and its `</li>`) so `render_list` can surface it
+/// as `ListItemData` without a second render; returns `None` when off.
+fn render_list_item(item: &[u8], ordered: bool, loose: bool, opts: &RenderOpts, out: &mut String) -> Option<(usize, usize)> {
     let _ = ordered;
     let mut body = match item_body(item) {
         Some(b) => b,
         None => {
+            let lo = out.len();
             out.push_str("<li></li>");
-            return;
+            return opts.block_data.then(|| (lo + 4, lo + 4));
         }
     };
 
@@ -1248,6 +1268,8 @@ fn render_list_item(item: &[u8], ordered: bool, loose: bool, opts: &RenderOpts, 
     out.push_str("<li");
     out.push_str(opts.dir());
     out.push('>');
+    // Inner-HTML span starts just past the `<li…>` opening tag (block_data only).
+    let inner_lo = out.len();
     if wrap_label {
         out.push_str("<label>");
     }
@@ -1280,7 +1302,10 @@ fn render_list_item(item: &[u8], ordered: bool, loose: bool, opts: &RenderOpts, 
     if wrap_label {
         out.push_str("</label>");
     }
+    // Inner-HTML span ends just before `</li>`.
+    let inner_hi = out.len();
     out.push_str("</li>");
+    opts.block_data.then_some((inner_lo, inner_hi))
 }
 
 /// Render a GFM table to HTML. When `opts.block_data` is on, also returns the

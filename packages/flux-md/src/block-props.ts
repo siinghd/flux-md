@@ -86,7 +86,7 @@ export function blockProps(block: Block): BlockComponentProps {
     speculative: block.speculative,
   };
   const data = block.kind.data as
-    | { lang?: string | null; code?: string; latex?: string; start?: number; ordered?: boolean; tag?: string; attrs?: [string, string][] }
+    | { lang?: string | null; code?: string; latex?: string; start?: number; ordered?: boolean; items?: { html: string }[]; tag?: string; attrs?: [string, string][] }
     | undefined;
   if (block.kind.type === "CodeBlock") {
     // Prefer the structured `code` (present when blockData is on) over the HTML
@@ -105,9 +105,10 @@ export function blockProps(block: Block): BlockComponentProps {
     }
   } else if (block.kind.type === "List") {
     // Structured list data is present only when blockData is on (the `start` key
-    // rides the opt-in channel); surface it as the typed convenience field.
+    // rides the opt-in channel); surface it as the typed convenience field,
+    // including the opt-in per-item HTML (`items`) for a keyed renderer.
     if (data && typeof data.start === "number") {
-      props.list = { ordered: !!data.ordered, start: data.start } as ListData;
+      props.list = { ordered: !!data.ordered, start: data.start, items: data.items } as ListData;
     }
   } else if (block.kind.type === "Component") {
     props.tag = data?.tag ?? "";

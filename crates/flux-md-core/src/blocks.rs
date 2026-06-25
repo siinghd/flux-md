@@ -77,15 +77,18 @@ pub enum BlockKind {
     /// is the generic carrier (like `Table(Option<TableData>)`).
     MathBlock(Option<MathBlockData>),
     Mermaid,
-    /// An ordered or unordered list. `ordered` is the always-on flag. `start` is
-    /// the opt-in structured channel (`setBlockData`): `None` (default-off) ⇒
-    /// serializes as `{"type":"List","data":{"ordered":<bool>}}`, byte-identical
-    /// to before; `Some(n)` (on) ⇒ `{"type":"List","data":{"ordered":<bool>,
-    /// "start":<n>}}` carrying the ordered-list start number (the `start="N"` HTML
-    /// attribute) so a consumer can renumber / continue a split list from DATA
-    /// without re-parsing the `<ol start=…>` attribute. The opt-in `start` rides
-    /// behind `#[serde(skip_serializing_if)]` so the off wire stays byte-identical.
-    List { ordered: bool, start: Option<u32> },
+    /// An ordered or unordered list. `ordered` is the always-on flag. `start` and
+    /// `items` are the opt-in structured channel (`setBlockData`): off (default) ⇒
+    /// serializes as `{"type":"List","data":{"ordered":<bool>}}`, byte-identical to
+    /// before; on ⇒ `{"type":"List","data":{"ordered":<bool>,"start":<n>,
+    /// "items":[{"html":…},…]}}`. `start` is the ordered-list start number (the
+    /// `start="N"` HTML attribute) so a consumer can renumber / continue a split
+    /// list from DATA; `items` carries the inline-rendered inner HTML of each
+    /// `<li>` so a keyed renderer can stamp one node per item and skip the
+    /// re-render of unchanged items while the list streams. Both opt-in fields ride
+    /// behind `#[serde(skip_serializing_if)]` (`items` skipped when empty) so the
+    /// off wire stays byte-identical.
+    List { ordered: bool, start: Option<u32>, items: Vec<ListItemData> },
     Blockquote,
     /// GitHub-style alert / admonition (a `> [!NOTE]` blockquote). `kind`
     /// serializes to a lowercase string ("note", "tip", …) so the JS layer can
@@ -127,13 +130,17 @@ struct CodeBlockData<'a> {
     code: &'a Option<String>,
 }
 #[derive(Serialize)]
-struct ListData {
+struct ListData<'a> {
     ordered: bool,
     /// Opt-in ordered-list start (`setBlockData`); omitted when off so the wire
     /// stays byte-identical (`{"ordered":…}`), present when on (`{"ordered":…,
     /// "start":N}`).
     #[serde(skip_serializing_if = "Option::is_none")]
     start: Option<u32>,
+    /// Opt-in per-item inner HTML (`setBlockData`); omitted when empty (off) so the
+    /// off wire stays byte-identical, present when on (`{…,"items":[{"html":…},…]}`).
+    #[serde(skip_serializing_if = "<[ListItemData]>::is_empty")]
+    items: &'a [ListItemData],
 }
 #[derive(Serialize)]
 struct AlertData {
@@ -194,8 +201,8 @@ impl Serialize for BlockKind {
             BlockKind::CodeBlock { lang, code } => {
                 with_data(s, "CodeBlock", &CodeBlockData { lang, code })
             }
-            BlockKind::List { ordered, start } => {
-                with_data(s, "List", &ListData { ordered: *ordered, start: *start })
+            BlockKind::List { ordered, start, items } => {
+                with_data(s, "List", &ListData { ordered: *ordered, start: *start, items })
             }
             BlockKind::Alert { kind } => with_data(s, "Alert", &AlertData { kind: *kind }),
             BlockKind::Component { tag, attrs } => {
@@ -274,6 +281,17 @@ pub struct TableData {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TableCell {
     pub text: String,
+    pub html: String,
+}
+
+/// One list item in the opt-in structured channel (the `items` payload of
+/// `BlockKind::List`). `html` is the inline-rendered inner HTML of the item's
+/// `<li>` — byte-identical to the content between the matching `<li…>` and
+/// `</li>` in `Block::html` — so a keyed renderer can stamp one node per item
+/// (`<li key={i}>`) and re-render only the items whose `html` changed while the
+/// list streams, instead of re-rendering the whole list's HTML every patch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ListItemData {
     pub html: String,
 }
 

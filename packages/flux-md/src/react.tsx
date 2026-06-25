@@ -9,7 +9,7 @@ import {
   type CSSProperties,
   type ReactElement,
 } from "react";
-import type { Block, BlockComponentProps, Components, HeadingData, TableData } from "./types";
+import type { Block, BlockComponentProps, Components, HeadingData, ListData, ListItemData, TableData } from "./types";
 import { FluxClient } from "./client";
 import type { ParserConfig } from "./types-core";
 import { CodeBlock } from "./renderers/CodeBlock";
@@ -320,7 +320,7 @@ export function blockKindProps(block: Block, components?: Components): BlockComp
     speculative: block.speculative,
   };
   const data = block.kind.data as
-    | { lang?: string | null; code?: string; latex?: string; start?: number; ordered?: boolean; tag?: string; attrs?: [string, string][] }
+    | { lang?: string | null; code?: string; latex?: string; start?: number; ordered?: boolean; items?: { html: string }[]; tag?: string; attrs?: [string, string][] }
     | undefined;
   if (block.kind.type === "CodeBlock") {
     // Prefer the structured `code` (present when blockData is on) over the HTML
@@ -337,7 +337,7 @@ export function blockKindProps(block: Block, components?: Components): BlockComp
     }
   } else if (block.kind.type === "List") {
     if (data && typeof data.start === "number") {
-      props.list = { ordered: !!data.ordered, start: data.start };
+      props.list = { ordered: !!data.ordered, start: data.start, items: data.items };
     }
   } else if (block.kind.type === "Component") {
     props.tag = data?.tag ?? "";
@@ -423,6 +423,65 @@ function SafeHtml({ html, components }: { html: string; components: Components }
   return useMemo(() => htmlToReact(html, components), [html, components]) as ReactElement;
 }
 
+// One `<li>` of the keyed list renderer. Memoized on its inner `html` (+ the
+// sanitize/components identity) so React skips the item entirely when an earlier
+// item's HTML is unchanged across a streaming patch — the whole point of the
+// keyed path. Routes inner HTML through the SAME components-and-sanitize-aware
+// path the whole-block renderer uses (never a raw innerHTML hole): `SafeHtml`
+// (-> memoized `htmlToReact(html, components)`) when overrides are present, else
+// `dangerouslySetInnerHTML` with the supplied sanitizer (matches the no-overrides
+// fast path's byte-faithful innerHTML).
+function KeyedListItemImpl({
+  html,
+  components,
+  sanitize,
+}: {
+  html: string;
+  components?: Components;
+  sanitize?: (html: string) => string;
+}) {
+  const safe = sanitize ? sanitize(html) : html;
+  if (components) {
+    return (
+      <li>
+        <SafeHtml html={safe} components={components} />
+      </li>
+    );
+  }
+  return <li dangerouslySetInnerHTML={{ __html: safe }} />;
+}
+const KeyedListItem = memo(KeyedListItemImpl);
+
+// Keyed `<ul>`/`<ol>` renderer for an OPEN list when `blockData` is on. Stamps one
+// memoized `<li key={i}>` per `items[i].html` so React reconciles only the items
+// that changed since the last patch (typically just the growing tail), instead of
+// re-parsing the entire list's HTML every tick via the whole-block path.
+function KeyedList({
+  className,
+  ordered,
+  start,
+  items,
+  components,
+  sanitize,
+}: {
+  className: string;
+  ordered: boolean;
+  start?: number;
+  items: ListItemData[];
+  components?: Components;
+  sanitize?: (html: string) => string;
+}) {
+  const children = items.map((it, i) => (
+    <KeyedListItem key={i} html={it.html} components={components} sanitize={sanitize} />
+  ));
+  // `start` mirrors the `<ol start="N">` attribute the whole-block HTML carries
+  // (omitted for 1, matching render_list); `<ul>` ignores it.
+  const inner = ordered
+    ? createElement("ol", start !== undefined && start !== 1 ? { start } : null, children)
+    : createElement("ul", null, children);
+  return <div className={className}>{inner}</div>;
+}
+
 // Per-kind off-screen size estimate for `contain-intrinsic-size` — keeps the
 // scrollbar stable while a block is layout-skipped. Wrong by 2× is fine; the
 // `auto` keyword makes the browser remember the real size once rendered.
@@ -502,6 +561,33 @@ function renderBlockContent({
     kind.toLowerCase() +
     (block.open ? " flux-open" : "") +
     (block.speculative ? " flux-speculative" : "");
+
+  // Keyed list renderer (opt-in: only fires when `blockData` is on, so
+  // `kind.data.items` carries the per-item inner HTML). While a list is OPEN it
+  // gets a fresh block ref every patch, so the whole-block path below re-parses
+  // the entire `<ul>`/`<ol>` HTML every tick. Stamping one memoized `<li key={i}>`
+  // per item instead lets React reuse the unchanged items and re-render only the
+  // tail item that actually grew. Closed lists fall through (committed = free).
+  // Skipped when a tag-level `ul`/`ol`/`li` override is present so those keep
+  // controlling the wrappers via the whole-block path.
+  if (block.open && kind === "List") {
+    const ld = block.kind.data as ListData | undefined;
+    const items = ld?.items;
+    const tagOverride =
+      !!components && (!!components.ul || !!components.ol || !!components.li);
+    if (items && items.length > 0 && !tagOverride) {
+      return (
+        <KeyedList
+          className={className}
+          ordered={!!ld?.ordered}
+          start={ld?.start}
+          items={items}
+          components={components}
+          sanitize={sanitize}
+        />
+      );
+    }
+  }
 
   // Tag-level / inline overrides apply to OPEN and speculative blocks too, not
   // just settled ones: the streaming tail's HTML is always well-formed (the
