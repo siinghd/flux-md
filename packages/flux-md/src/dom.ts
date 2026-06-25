@@ -110,6 +110,10 @@ interface MountedBlock {
   // Lets a later patch update just the growing trailing row in place instead of
   // rebuilding the whole node.
   table?: KeyedTable;
+  // True when `node` is the generic `<div class="flux-block…">` whose entire
+  // `innerHTML` is exactly `html` (no special wrapper, no sanitizer transform).
+  // Only such a node is eligible for the prefix-extension tail-append fast path.
+  generic: boolean;
 }
 
 // Incremental keyed-tbody state for one OPEN table. `<tr>` nodes for committed
@@ -166,6 +170,10 @@ export function mountFluxMarkdown(
   let order: number[] = [];
   let dead = false;
   let frame = 0;
+  // Set by `renderBlockContent` for the call in flight: true only when it took
+  // the generic `<div class="flux-block…">innerHTML=html` path (no override, no
+  // dedicated renderer). Read immediately after the render to tag the mount.
+  let lastRenderGeneric = false;
 
   function sync(): void {
     if (dead) return;
@@ -183,9 +191,10 @@ export function mountFluxMarkdown(
         const mb: MountedBlock = {
           id: b.id, node: undefined as unknown as HTMLElement,
           html: b.html, open: b.open, speculative: b.speculative, kind: b.kind.type,
-          renderCount: 0, toggleCount: 0,
+          renderCount: 0, toggleCount: 0, generic: false,
         };
         mb.node = renderBlock(b, mb);
+        mb.generic = lastRenderGeneric;
         mounted.set(b.id, mb);
         if (onRenderMetrics) noteRender(mb, b, t0);
         continue;
@@ -217,6 +226,29 @@ export function mountFluxMarkdown(
           continue;
         }
       }
+      // Prefix-extension tail-append fast path (generic blocks only, no
+      // sanitizer). When the new html merely *appends* one or more WHOLE
+      // top-level sibling elements to the old html, we can splice the suffix
+      // onto the live node instead of rebuilding the whole subtree. The result
+      // is byte-identical to a full rebuild because the appended suffix is
+      // self-contained markup that begins a new depth-0 sibling — the browser
+      // parses it the same way whether appended or rendered whole. This is still
+      // a render of the node, so it feeds the render-churn probe.
+      if (
+        !sanitize &&
+        existing.generic &&
+        existing.kind === b.kind.type &&
+        existing.open === b.open &&
+        existing.speculative === b.speculative &&
+        b.html.length > existing.html.length &&
+        b.html.startsWith(existing.html) &&
+        isDepth0Boundary(existing.html, b.html)
+      ) {
+        existing.node.insertAdjacentHTML("beforeend", b.html.slice(existing.html.length));
+        if (onRenderMetrics) noteRender(existing, b, t0);
+        existing.html = b.html;
+        continue;
+      }
       // Changed → rebuild and swap in place. A table that just closed (or whose
       // data vanished) drops its keyed manager and re-renders the full HTML once.
       existing.table = undefined;
@@ -228,6 +260,7 @@ export function mountFluxMarkdown(
       existing.open = b.open;
       existing.speculative = b.speculative;
       existing.kind = b.kind.type;
+      existing.generic = lastRenderGeneric;
     }
 
     // Drop ids no longer present (reset() empties the snapshot; a speculative
@@ -298,6 +331,7 @@ export function mountFluxMarkdown(
 
   function renderBlockContent(b: Block, mb: MountedBlock): HTMLElement {
     const kind = b.kind.type;
+    lastRenderGeneric = false;
 
     // 1. Block-kind override (a Component block dispatches on its tag first).
     if (components) {
@@ -364,6 +398,9 @@ export function mountFluxMarkdown(
       }
     }
     node.innerHTML = sanitize ? sanitize(b.html) : b.html;
+    // Eligible for the prefix-append fast path only when no sanitizer rewrote
+    // the html (the stored `html` must equal the node's actual innerHTML source).
+    lastRenderGeneric = !sanitize;
     return node;
   }
 
@@ -690,6 +727,84 @@ function tableData(b: Block): TableData | undefined {
   if (b.kind.type !== "Table") return undefined;
   const data = b.kind.data as TableData | undefined;
   return data && Array.isArray(data.rows) ? data : undefined;
+}
+
+// HTML void elements: they self-terminate, so they never push element depth.
+const VOID_ELEMENTS = new Set([
+  "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+  "meta", "param", "source", "track", "wbr",
+]);
+
+/**
+ * True when `prefix` is a complete run of balanced top-level markup (element
+ * depth returns to 0 at its end and any trailing whitespace/text is harmless)
+ * AND the appended suffix `full.slice(prefix.length)` begins a NEW depth-0
+ * sibling element (an opening tag, not a close tag / text / mid-tag).
+ *
+ * When both hold, splicing the suffix onto the live node via
+ * `insertAdjacentHTML('beforeend', suffix)` yields the exact same DOM the
+ * browser would build from parsing `full` whole — the appended markup is a
+ * self-contained sibling appended after the last existing child. Any other
+ * shape (an unclosed element at the prefix boundary, a suffix that continues
+ * text, closes a tag, or splits a tag) must fall back to a full rebuild.
+ *
+ * The scan is single-pass over `prefix` (O(prefix length)); it is run only on a
+ * confirmed `startsWith` prefix extension, so the amortized streaming cost stays
+ * proportional to the bytes seen.
+ */
+function isDepth0Boundary(prefix: string, full: string): boolean {
+  // Suffix must open a new element: '<' immediately followed by an ASCII letter.
+  const c0 = full.charCodeAt(prefix.length);
+  if (c0 !== 60 /* '<' */) return false;
+  const c1 = full.charCodeAt(prefix.length + 1);
+  const isLetter = (c1 >= 65 && c1 <= 90) || (c1 >= 97 && c1 <= 122);
+  if (!isLetter) return false;
+
+  // Walk `prefix`, tracking element depth. Bail (return false) on anything we
+  // cannot cheaply prove balanced: comments, CDATA, processing instructions,
+  // or any tag that leaves the cursor inside markup at the end.
+  let depth = 0;
+  let i = 0;
+  const n = prefix.length;
+  while (i < n) {
+    const lt = prefix.indexOf("<", i);
+    if (lt === -1) break; // only text remains; depth unchanged
+    i = lt + 1;
+    if (i >= n) return false; // trailing '<' with nothing after → mid-tag
+    const ch = prefix.charCodeAt(i);
+    // Comments / CDATA / declarations / PIs: not handled — fall back.
+    if (ch === 33 /* '!' */ || ch === 63 /* '?' */) return false;
+    let closing = false;
+    if (ch === 47 /* '/' */) {
+      closing = true;
+      i++;
+    }
+    // Read the tag name.
+    const nameStart = i;
+    while (i < n) {
+      const t = prefix.charCodeAt(i);
+      const nameChar =
+        (t >= 65 && t <= 90) || (t >= 97 && t <= 122) || (t >= 48 && t <= 57) || t === 45;
+      if (!nameChar) break;
+      i++;
+    }
+    if (i === nameStart) return false; // '<' not followed by a tag name
+    const name = prefix.slice(nameStart, i).toLowerCase();
+    // Find the tag's '>' (attribute values here never contain a literal '>'
+    // because the renderer emits entity-escaped attributes; if we hit EOF first
+    // the prefix ends mid-tag → not a boundary).
+    const gt = prefix.indexOf(">", i);
+    if (gt === -1) return false;
+    const selfClosing = prefix.charCodeAt(gt - 1) === 47; /* '/' */
+    i = gt + 1;
+    if (closing) {
+      depth--;
+      if (depth < 0) return false; // unbalanced close
+    } else if (!selfClosing && !VOID_ELEMENTS.has(name)) {
+      depth++;
+    }
+  }
+  return depth === 0;
 }
 
 // Local copy of the canonical code-text decoder (kept here so dom.ts depends
