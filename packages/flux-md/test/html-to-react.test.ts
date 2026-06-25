@@ -424,6 +424,75 @@ test("blocksEqual skips re-render (and thus re-parse) only when nothing changed"
 });
 
 // ---------------------------------------------------------------------------
+// Opt-in per-child memoization (open-block top-level node reuse)
+// ---------------------------------------------------------------------------
+
+test("childMemoMap: a growing block re-parses only its new trailing child", () => {
+  const map = new Map();
+  // Tick 1: three top-level siblings → three parseTrustedHtml calls (one per seg).
+  resetParseCount();
+  htmlToReact("<p>a</p><p>b</p><p>c</p>", {}, map);
+  expect(getParseCount()).toBe(3);
+  // Tick 2: append one more sibling. The first three are unchanged → reused from
+  // the map (no re-parse); only the new <p>d</p> is parsed.
+  resetParseCount();
+  htmlToReact("<p>a</p><p>b</p><p>c</p><p>d</p>", {}, map);
+  expect(getParseCount()).toBe(1);
+  // Tick 3: the trailing child grows (b → bb). Only that one re-parses; the
+  // others stay cached.
+  resetParseCount();
+  htmlToReact("<p>a</p><p>b</p><p>cc</p><p>d</p>", {}, map);
+  expect(getParseCount()).toBe(1);
+});
+
+test("childMemoMap: output is identical to the unmemoized single-pass path", () => {
+  const html = "<h2>T</h2><p>x <em>y</em></p><ul><li>a</li><li>b</li></ul>";
+  const plain = render(htmlToReact(html, {}));
+  const memoed = render(htmlToReact(html, {}, new Map()));
+  expect(memoed).toBe(plain);
+  // And a grow step still matches a fresh full parse.
+  const map = new Map();
+  htmlToReact(html, {}, map);
+  const grown = "<h2>T</h2><p>x <em>y</em></p><ul><li>a</li><li>b</li></ul><p>z</p>";
+  expect(render(htmlToReact(grown, {}, map))).toBe(render(htmlToReact(grown, {})));
+});
+
+test("childMemoMap: components/overrides apply through the memo path", () => {
+  const comps: Components = { p: (p: any) => createElement("p", { ...p, className: "x" }) };
+  const out = render(htmlToReact("<p>a</p><p>b</p>", comps, new Map()));
+  expect(out).toBe('<p class="x">a</p><p class="x">b</p>');
+});
+
+test("childMemoMap: no map passed → byte-identical, single full parse", () => {
+  resetParseCount();
+  const html = "<p>a</p><p>b</p><p>c</p>";
+  expect(render(htmlToReact(html, {}))).toBe(render(htmlToReact(html, {}, new Map())));
+  // Without a map, parseTrustedHtml runs once over the whole string (here twice:
+  // the two calls above), never per-segment.
+  resetParseCount();
+  htmlToReact(html, {});
+  expect(getParseCount()).toBe(1);
+});
+
+test("childMemo prop: open block reuses unchanged children across patches", () => {
+  // Multiple top-level siblings in one open block's html (e.g. a streamed
+  // multi-paragraph blockquote body the renderer routes through components).
+  const comps: Components = { p: "p" };
+  const mk = (html: string) =>
+    block({ kind: { type: "Blockquote" }, html, open: true });
+  resetParseCount();
+  render(
+    createElement(FluxMarkdown, {
+      client: fakeClient([mk("<p>a</p><p>b</p>")]),
+      components: comps,
+      childMemo: true,
+    }),
+  );
+  // Two top-level segments → two per-node parses on first paint.
+  expect(getParseCount()).toBe(2);
+});
+
+// ---------------------------------------------------------------------------
 // Security (htmlToReact is exported — must be safe even on untrusted HTML)
 // ---------------------------------------------------------------------------
 

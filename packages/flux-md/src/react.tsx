@@ -8,6 +8,7 @@ import {
   useSyncExternalStore,
   type CSSProperties,
   type ReactElement,
+  type ReactNode,
 } from "react";
 import type { Align, Block, BlockComponentProps, Components, HeadingData, ListData, ListItemData, NestedBlock, TableData } from "./types";
 import { FluxClient } from "./client";
@@ -106,6 +107,18 @@ interface FluxMarkdownProps {
    * on every patch instead of only the streaming tail.
    */
   sanitize?: (html: string) => string;
+  /**
+   * Opt-in: when an OPEN (streaming) block re-renders each patch, reuse the
+   * React nodes of its top-level children whose HTML is unchanged and re-parse
+   * only the new trailing content, instead of re-parsing the block's whole HTML
+   * every tick. Only takes effect when `components` (or `sanitize`) routes a
+   * block through the parser; the no-`components` fast path (`innerHTML`) is
+   * untouched. Off by default and byte-identical to default rendering — enable
+   * it for documents with a long, slowly-growing streamed block under a custom
+   * `components` map. Closed blocks are already wholesale memo-skipped, so this
+   * applies only to the streaming tail.
+   */
+  childMemo?: boolean;
   /** Appended to the root's `className` (the `flux-md` class is always present). */
   className?: string;
   /** Set on the root element. */
@@ -140,6 +153,7 @@ function FluxMarkdownFromClient({
   virtualize,
   stickToBottom,
   sanitize,
+  childMemo,
   className,
   id,
   role,
@@ -180,6 +194,7 @@ function FluxMarkdownFromClient({
           components={comps}
           virtualize={virtualize}
           sanitize={sanitize}
+          childMemo={childMemo}
           onRenderMetrics={onMetrics}
         />
       ))}
@@ -455,12 +470,52 @@ function componentInnerHtml(html: string, tag: string): string {
   return inner.replace(/^\n/, "").replace(/\n$/, "");
 }
 
-/** Convert a closed block's HTML to a React tree, memoized on html+components. */
-function SafeHtml({ html, components }: { html: string; components: Components }) {
+// Cap a single open block's child-memo map so a pathologically long streaming
+// block can't grow it without bound. Each entry keys one top-level node; a few
+// thousand covers any realistic block, and clearing on overflow just costs one
+// full re-parse tick (correctness is unaffected).
+const CHILD_MEMO_CAP = 4096;
+
+/** Convert a closed block's HTML to a React tree, memoized on html+components.
+ *
+ *  When `childMemo` is true (OPEN blocks only — closed blocks are already
+ *  memo-skipped wholesale by `blocksEqual`), this additionally reuses the React
+ *  nodes of top-level children whose HTML is unchanged across ticks, so a
+ *  growing streaming block re-parses only its new trailing content instead of
+ *  its whole html every patch. Opt-in via the `childMemo` prop; with it off the
+ *  output and parse path are byte-identical to before. */
+function SafeHtml({
+  html,
+  components,
+  childMemo,
+}: {
+  html: string;
+  components: Components;
+  childMemo?: boolean;
+}) {
+  // One map per mounted SafeHtml instance (i.e. per block.id, since blocks are
+  // keyed in the list). Cleared when `components` changes — a cached node was
+  // built under the old map and must not leak across the swap.
+  const memoRef = useRef<Map<string, ReactNode> | null>(null);
+  const compRef = useRef<Components | null>(null);
   // `ReactElement` (not the global `JSX.Element`) so the source type-checks under
   // both @types/react 18 and 19 — React 19 removed the global `JSX` namespace,
   // and a consumer's `next build` type-checks this shipped source.
-  return useMemo(() => htmlToReact(html, components), [html, components]) as ReactElement;
+  return useMemo(() => {
+    if (!childMemo) {
+      // Free the map once a block closes (childMemo flips off) so a long doc
+      // doesn't retain per-block caches after streaming finishes.
+      memoRef.current = null;
+      return htmlToReact(html, components) as ReactElement;
+    }
+    if (memoRef.current === null || compRef.current !== components) {
+      memoRef.current = new Map();
+      compRef.current = components;
+    }
+    const map = memoRef.current;
+    if (map.size > CHILD_MEMO_CAP) map.clear();
+    return htmlToReact(html, components, map) as ReactElement;
+  }, [html, components, childMemo]) as ReactElement;
 }
 
 // One `<li>` of the keyed list renderer. Memoized on its inner `html` (+ the
@@ -709,6 +764,7 @@ function BlockViewImpl(props: {
   components?: Components;
   virtualize?: boolean;
   sanitize?: (html: string) => string;
+  childMemo?: boolean;
   onRenderMetrics?: RenderMetricsHook;
 }) {
   const { block, virtualize, onRenderMetrics } = props;
@@ -759,10 +815,12 @@ function renderBlockContent({
   block,
   components,
   sanitize,
+  childMemo,
 }: {
   block: Block;
   components?: Components;
   sanitize?: (html: string) => string;
+  childMemo?: boolean;
 }) {
   const kind = block.kind.type;
 
@@ -876,7 +934,10 @@ function renderBlockContent({
     const safe = sanitize ? sanitize(block.html) : block.html;
     return (
       <div className={className}>
-        <SafeHtml html={safe} components={components} />
+        {/* Child-memo only pays off on the OPEN tail (closed blocks are already
+            wholesale memo-skipped by blocksEqual); gate it on block.open so a
+            closed block frees its per-block map and parses in one pass. */}
+        <SafeHtml html={safe} components={components} childMemo={childMemo && block.open} />
       </div>
     );
   }
@@ -894,8 +955,8 @@ function renderBlockContent({
 // is what stops a committed block from re-rendering (and thus re-parsing) on
 // every streaming patch.
 export function blocksEqual(
-  prev: { block: Block; components?: Components; virtualize?: boolean; sanitize?: (html: string) => string; onRenderMetrics?: RenderMetricsHook },
-  next: { block: Block; components?: Components; virtualize?: boolean; sanitize?: (html: string) => string; onRenderMetrics?: RenderMetricsHook },
+  prev: { block: Block; components?: Components; virtualize?: boolean; sanitize?: (html: string) => string; childMemo?: boolean; onRenderMetrics?: RenderMetricsHook },
+  next: { block: Block; components?: Components; virtualize?: boolean; sanitize?: (html: string) => string; childMemo?: boolean; onRenderMetrics?: RenderMetricsHook },
 ): boolean {
   return (
     prev.block.id === next.block.id &&
@@ -905,6 +966,7 @@ export function blocksEqual(
     prev.components === next.components &&
     prev.virtualize === next.virtualize &&
     prev.sanitize === next.sanitize &&
+    prev.childMemo === next.childMemo &&
     prev.onRenderMetrics === next.onRenderMetrics
   );
 }

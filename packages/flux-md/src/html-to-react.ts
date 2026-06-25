@@ -333,11 +333,115 @@ function nodesToReact(nodes: HNode[], components: Components, keyPrefix: string)
 }
 
 /**
- * Convert a block's trusted HTML string into a React node tree, replacing any
- * element whose tag name appears in `components`. Call this only for **closed**
- * blocks (open/streaming blocks have partial HTML); memoize on `(html,
- * components)` at the call site.
+ * Split trusted HTML into its TOP-LEVEL node segments (each segment is the
+ * exact substring spanning one root node — an element with its full subtree, or
+ * a run of text between elements). Used only by the opt-in child-memo path so an
+ * OPEN block whose leading children are unchanged can reuse their already-built
+ * React nodes instead of re-parsing the whole string every tick. Mirrors
+ * `parseTrustedHtml`'s tokenizer for boundary detection, but records spans only.
  */
-export function htmlToReact(html: string, components: Components): ReactNode {
-  return nodesToReact(parseTrustedHtml(html), components, "");
+function topLevelSegments(html: string): string[] {
+  const segs: string[] = [];
+  let depth = 0; // open-element nesting depth
+  let segStart = 0; // start of the current top-level segment
+  let i = 0;
+  while (i < html.length) {
+    const lt = html.indexOf("<", i);
+    if (lt === -1) break;
+    if (html.startsWith("<!--", lt)) {
+      const end = html.indexOf("-->", lt + 4);
+      i = end === -1 ? html.length : end + 3;
+      continue;
+    }
+    if (html[lt + 1] === "!") {
+      const end = html.indexOf(">", lt);
+      i = end === -1 ? html.length : end + 1;
+      continue;
+    }
+    if (html[lt + 1] === "/") {
+      const end = html.indexOf(">", lt);
+      if (depth > 0) {
+        depth--;
+        if (depth === 0) {
+          // Closing the outermost element ends one top-level segment.
+          const stop = end === -1 ? html.length : end + 1;
+          segs.push(html.slice(segStart, stop));
+          segStart = stop;
+        }
+      }
+      i = end === -1 ? html.length : end + 1;
+      continue;
+    }
+    const c1 = html[lt + 1];
+    const isName = (c1 >= "a" && c1 <= "z") || (c1 >= "A" && c1 <= "Z");
+    if (!isName) {
+      // A stray '<' is literal text — not a boundary.
+      i = lt + 1;
+      continue;
+    }
+    const { tag, selfClose, next } = parseOpenTag(html, lt);
+    if (depth === 0) {
+      // Any text before this element is its own top-level segment.
+      if (lt > segStart) {
+        segs.push(html.slice(segStart, lt));
+        segStart = lt;
+      }
+    }
+    const isVoid = selfClose || VOID.has(tag.toLowerCase());
+    if (isVoid) {
+      if (depth === 0) {
+        segs.push(html.slice(segStart, next));
+        segStart = next;
+      }
+    } else {
+      depth++;
+    }
+    i = next;
+  }
+  // Trailing text (or an unterminated subtree) after the last boundary.
+  if (segStart < html.length) segs.push(html.slice(segStart));
+  return segs;
+}
+
+/**
+ * Convert a block's trusted HTML string into a React node tree, replacing any
+ * element whose tag name appears in `components`.
+ *
+ * With no `childMemoMap`, behavior is byte-identical to a single
+ * `parseTrustedHtml` + convert pass — the closed-block call site memoizes on
+ * `(html, components)`.
+ *
+ * Passing a `childMemoMap` opts into OPEN-block child reuse: the html is split
+ * into top-level node segments and each is keyed by its exact substring. On a
+ * hit the cached React node is reused (no re-parse, no re-serialize); only new /
+ * changed trailing segments are parsed. The caller owns the map's lifetime and
+ * must scope it per block.id and invalidate it when `components` changes (a hit
+ * carries the React node built under the previous components map). Segment keys
+ * carry their original document order via `keyOffset` so React keys stay stable.
+ */
+export function htmlToReact(
+  html: string,
+  components: Components,
+  childMemoMap?: Map<string, ReactNode>,
+): ReactNode {
+  if (!childMemoMap) return nodesToReact(parseTrustedHtml(html), components, "");
+  const segs = topLevelSegments(html);
+  const out: ReactNode[] = [];
+  for (let idx = 0; idx < segs.length; idx++) {
+    const seg = segs[idx];
+    // Key the cache by index + segment text so identical segments at different
+    // positions get distinct React keys (no collision) and a leading segment
+    // stays a hit only while it keeps the same document index (append-only
+    // growth — the common open-block case — preserves both).
+    const cacheKey = idx + " " + seg;
+    const hit = childMemoMap.get(cacheKey);
+    if (hit !== undefined) {
+      out.push(hit);
+      continue;
+    }
+    const node = nodesToReact(parseTrustedHtml(seg), components, idx + ".");
+    childMemoMap.set(cacheKey, node);
+    out.push(node);
+  }
+  return out.length === 0 ? null : out.length === 1 ? out[0] : out;
 }
