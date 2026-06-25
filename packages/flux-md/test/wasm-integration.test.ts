@@ -117,6 +117,42 @@ test.skipIf(!haveWasm)("real WASM: a Table carries structured kind.data when set
   expect(d.rows[0][1].html).toContain('<a href="z"');
 });
 
+test.skipIf(!haveWasm)("real WASM: a STREAMING open Table grows kind.data row-by-row with byte-stable committed cells", () => {
+  // The invariant the keyed-table renderer relies on: while a Table is OPEN, each
+  // append adds the new body row to `kind.data.rows` and the ALREADY-EMITTED rows
+  // keep byte-identical cell html (only the trailing row grows). This is what lets
+  // the renderer reconcile/append only the last row instead of rebuilding the table.
+  const p = new FluxParser();
+  p.setBlockData(true);
+  const openTableOf = (patch: { newly_committed: unknown[]; active: unknown[] }) =>
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    [...patch.newly_committed, ...patch.active].find((b: any) => b.kind.type === "Table") as
+      | { open: boolean; kind: { data?: { rows: { html: string }[][]; aligns: string[] } } }
+      | undefined;
+
+  p.append("| Name | Age |\n");
+  p.append("|:-----|----:|\n");
+  const t1 = openTableOf(p.append("| Alice | 20 |\n"));
+  expect(t1?.open).toBe(true);
+  expect(t1?.kind.data?.aligns).toEqual(["left", "right"]);
+  expect(t1?.kind.data?.rows.length).toBe(1);
+  const row0 = t1!.kind.data!.rows[0].map((c) => c.html);
+  expect(row0).toEqual(["Alice", "20"]);
+
+  const t2 = openTableOf(p.append("| Bob | 25 |\n"));
+  expect(t2?.kind.data?.rows.length).toBe(2);
+  // The previously-emitted row 0 is byte-identical — committed cells never churn.
+  expect(t2!.kind.data!.rows[0].map((c) => c.html)).toEqual(row0);
+  expect(t2!.kind.data!.rows[1].map((c) => c.html)).toEqual(["Bob", "25"]);
+
+  // Append a partial trailing row: row 0 and row 1 stay byte-stable; only the new
+  // (still-open) trailing row differs.
+  const t3 = openTableOf(p.append("| Carol | "));
+  expect(t3!.kind.data!.rows.length).toBe(3);
+  expect(t3!.kind.data!.rows[0].map((c) => c.html)).toEqual(row0);
+  expect(t3!.kind.data!.rows[1].map((c) => c.html)).toEqual(["Bob", "25"]);
+});
+
 test.skipIf(!haveWasm)("real WASM: WITHOUT setBlockData a Table has no kind.data (byte-identical-off tripwire)", () => {
   // The default-off contract across the real serde boundary: `kind` is exactly
   // `{type:"Table"}` — no `data` key — so a non-user pays zero serde bytes.
