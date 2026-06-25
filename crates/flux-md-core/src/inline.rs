@@ -106,8 +106,17 @@ fn render_inline_core(input: &str, opts: &RenderOpts, out: &mut String, track: b
             // escapable; if there's no matching closer we fall back to the
             // escape behavior (a literal `(` / `[`).
             b'\\' if opts.gfm_math && bytes.get(pos + 1) == Some(&b'(') => {
-                match try_math_delim(bytes, pos, b"\\(", b"\\)", false, out) {
-                    Some(end) => pos = end,
+                match try_math_delim(bytes, pos, b"\\(", b"\\)", false, opts.open_tail, out) {
+                    Some(end) => {
+                        // Settled `\(…\)` OR (open_tail only) a speculative open
+                        // inline-math span whose `\)` hasn't streamed yet. The
+                        // speculative arm always returns `Some(bytes.len())`, so
+                        // it is the final construct; mark it unstable.
+                        if opts.open_tail && end == bytes.len() && track && pos < unstable {
+                            unstable = pos;
+                        }
+                        pos = end;
+                    }
                     None => {
                         if track && pos < unstable {
                             unstable = pos; // a later `\)` could form inline math
@@ -118,8 +127,17 @@ fn render_inline_core(input: &str, opts: &RenderOpts, out: &mut String, track: b
                 }
             }
             b'\\' if opts.gfm_math && bytes.get(pos + 1) == Some(&b'[') => {
-                match try_math_delim(bytes, pos, b"\\[", b"\\]", true, out) {
-                    Some(end) => pos = end,
+                match try_math_delim(bytes, pos, b"\\[", b"\\]", true, opts.open_tail, out) {
+                    Some(end) => {
+                        // Settled `\[…\]` OR (open_tail only) a speculative open
+                        // display-math span whose `\]` hasn't streamed yet. The
+                        // speculative arm always returns `Some(bytes.len())`, so
+                        // it is the final construct; mark it unstable.
+                        if opts.open_tail && end == bytes.len() && track && pos < unstable {
+                            unstable = pos;
+                        }
+                        pos = end;
+                    }
                     None => {
                         if track && pos < unstable {
                             unstable = pos; // a later `\]` could form display math
@@ -149,7 +167,17 @@ fn render_inline_core(input: &str, opts: &RenderOpts, out: &mut String, track: b
                 }
             }
             b'`' => {
-                if let Some(consumed) = try_code_span(bytes, pos, out) {
+                if let Some(consumed) = try_code_span(bytes, pos, opts.open_tail, out) {
+                    // Settled `` `code` `` OR (open_tail only) a speculative open
+                    // code span: an unclosed backtick run abutting EOF rendered
+                    // its partial content as `<code>…</code>`. The speculative
+                    // arm always returns `Some(bytes.len())`, so it is the final
+                    // construct in the slice; mark it unstable so the streaming
+                    // boundary tracker never freezes it (a later closing run can
+                    // still change the content / shorten the span).
+                    if opts.open_tail && consumed == bytes.len() && track && pos < unstable {
+                        unstable = pos;
+                    }
                     pos = consumed;
                 } else {
                     // No matching close for this backtick run: the whole run is
@@ -258,8 +286,19 @@ fn render_inline_core(input: &str, opts: &RenderOpts, out: &mut String, track: b
                 }
             }
             b'$' if opts.gfm_math => {
-                match try_dollar_math(bytes, pos, out) {
-                    Some(end) => pos = end,
+                match try_dollar_math(bytes, pos, opts.open_tail, out) {
+                    Some(end) => {
+                        // Settled `$x$` / `$$…$$` OR (open_tail only) a speculative
+                        // open dollar-math span whose closer hasn't streamed yet:
+                        // the partial body rendered as `<span class="math …">`.
+                        // The speculative arm always returns `Some(bytes.len())`,
+                        // so it is the final construct in the slice; mark it
+                        // unstable so the boundary tracker never freezes it.
+                        if opts.open_tail && end == bytes.len() && track && pos < unstable {
+                            unstable = pos;
+                        }
+                        pos = end;
+                    }
                     None => {
                         if track && pos < unstable {
                             unstable = pos; // a later `$` could form inline math
@@ -528,7 +567,38 @@ fn push_escaped_char(c: char, out: &mut String) {
 // Code spans
 // ---------------------------------------------------------------------
 
-fn try_code_span(bytes: &[u8], start: usize, out: &mut String) -> Option<usize> {
+/// Emit `<code>…</code>` for the raw code-span body `content`, applying
+/// CommonMark §6.1 normalization (line endings → spaces; strip one leading +
+/// trailing space when the result starts AND ends with a space and is not all
+/// spaces) and HTML-escaping. Shared by the settled closer and the speculative
+/// open-tail path so both produce byte-identical inner markup.
+fn emit_code_span(content: &[u8], out: &mut String) {
+    let s = std::str::from_utf8(content).unwrap_or("");
+    let mut buf = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '\n' || c == '\r' {
+            buf.push(' ');
+        } else {
+            buf.push(c);
+        }
+    }
+    let trimmed = if buf.len() >= 2
+        && buf.starts_with(' ')
+        && buf.ends_with(' ')
+        && buf.chars().any(|c| c != ' ')
+    {
+        &buf[1..buf.len() - 1]
+    } else {
+        buf.as_str()
+    };
+    out.push_str("<code>");
+    for c in trimmed.chars() {
+        push_escaped_char(c, out);
+    }
+    out.push_str("</code>");
+}
+
+fn try_code_span(bytes: &[u8], start: usize, open_tail: bool, out: &mut String) -> Option<usize> {
     let mut open_len = 0;
     while start + open_len < bytes.len() && bytes[start + open_len] == b'`' {
         open_len += 1;
@@ -541,39 +611,29 @@ fn try_code_span(bytes: &[u8], start: usize, out: &mut String) -> Option<usize> 
                 close_len += 1;
             }
             if close_len == open_len {
-                let content = &bytes[start + open_len..i];
-                let s = std::str::from_utf8(content).unwrap_or("");
-                // CommonMark §6.1: line endings become spaces; then if the
-                // resulting string starts AND ends with a space (and is not
-                // all spaces), strip one space from each side.
-                let mut buf = String::with_capacity(s.len());
-                for c in s.chars() {
-                    if c == '\n' || c == '\r' {
-                        buf.push(' ');
-                    } else {
-                        buf.push(c);
-                    }
-                }
-                let trimmed = if buf.len() >= 2
-                    && buf.starts_with(' ')
-                    && buf.ends_with(' ')
-                    && buf.chars().any(|c| c != ' ')
-                {
-                    &buf[1..buf.len() - 1]
-                } else {
-                    buf.as_str()
-                };
-                out.push_str("<code>");
-                for c in trimmed.chars() {
-                    push_escaped_char(c, out);
-                }
-                out.push_str("</code>");
+                emit_code_span(&bytes[start + open_len..i], out);
                 return Some(i + close_len);
             }
             i += close_len;
         } else {
             i += 1;
         }
+    }
+    // EOF reached with no matching close run. When this is the still-open,
+    // abuts-EOF active tail (open_tail), speculate: render the partial content
+    // (everything after the opening run) as a `<code>` span so a streaming
+    // consumer sees the resolved span instead of a flash of raw backticks +
+    // source. The opening run is hidden inside the tag. Code spans match by
+    // EXACT run length, so a half-streamed run that can't yet match still falls
+    // to literal at finalize (open_tail=false) — byte-parity with one-shot.
+    // Don't speculate an empty body (preserves the literal `` ` `` rule).
+    if open_tail {
+        let content = &bytes[start + open_len..];
+        if content.is_empty() {
+            return None;
+        }
+        emit_code_span(content, out);
+        return Some(bytes.len());
     }
     None
 }
@@ -615,6 +675,7 @@ fn try_math_delim(
     open: &[u8],
     close: &[u8],
     display: bool,
+    open_tail: bool,
     out: &mut String,
 ) -> Option<usize> {
     let content_start = start + open.len();
@@ -628,9 +689,25 @@ fn try_math_delim(
             return Some(i + close.len());
         }
         if bytes[i] == b'\n' && bytes.get(i + 1) == Some(&b'\n') {
-            return None;
+            return None; // never cross a blank line (math stays in its paragraph)
         }
         i += 1;
+    }
+    // EOF reached with no closing delimiter and no intervening blank line. On the
+    // still-open abuts-EOF active tail, speculate: render the partial body as the
+    // final `<span class="math …">` so a streaming consumer never sees the raw
+    // `\(`/`\[` opener + LaTeX source flash. The blank-line guard above already
+    // returned None for a `\n\n` before EOF, so the speculation matches the
+    // one-shot rule that math never crosses a paragraph break. Don't speculate an
+    // empty body (preserves the literal `\(\)` rule). At finalize (open_tail=false)
+    // this is dead → existing None → literal, byte-parity with one-shot.
+    if open_tail {
+        let content = &bytes[content_start..];
+        if content.is_empty() {
+            return None;
+        }
+        emit_inline_math(content, display, out);
+        return Some(bytes.len());
     }
     None
 }
@@ -640,7 +717,7 @@ fn try_math_delim(
 /// the opener must be followed by a non-space, and a closer is only valid when
 /// preceded by a non-space and not followed by an ASCII digit. Returns the
 /// offset past the closing run, or None to fall back to a literal `$`.
-fn try_dollar_math(bytes: &[u8], start: usize, out: &mut String) -> Option<usize> {
+fn try_dollar_math(bytes: &[u8], start: usize, open_tail: bool, out: &mut String) -> Option<usize> {
     let mut run = 0;
     while start + run < bytes.len() && bytes[start + run] == b'$' {
         run += 1;
@@ -688,6 +765,22 @@ fn try_dollar_math(bytes: &[u8], start: usize, out: &mut String) -> Option<usize
         } else {
             i += 1;
         }
+    }
+    // EOF reached with no closing `$`/`$$` run and no intervening blank line. On
+    // the still-open abuts-EOF active tail, speculate: render the partial body as
+    // the final `<span class="math …">` so a streaming `$x^2 + y^2$` never flashes
+    // the raw `$` + source. The pandoc opener guard (single `$` needs a non-space
+    // to its right) already ran above — `$ ` returned None → literal, unchanged.
+    // The non-empty check preserves the literal empty-`$$` rule; closer-side
+    // pandoc checks don't apply (there is no closer in the open tail). At finalize
+    // (open_tail=false) this is dead → existing None → literal (byte-parity).
+    if open_tail {
+        let content = &bytes[content_start..];
+        if content.is_empty() {
+            return None;
+        }
+        emit_inline_math(content, display, out);
+        return Some(bytes.len());
     }
     None
 }

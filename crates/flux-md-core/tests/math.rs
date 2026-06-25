@@ -233,10 +233,43 @@ fn partial_math_degrades_gracefully() {
     p.finalize();
     assert_eq!(collect(&p), "<div class=\"math math-display\">E = mc^2</div>");
 
-    // Unclosed inline forms stay literal; nothing crashes at any cut point.
+    // Unclosed inline forms stay literal at FINALIZE; nothing crashes at any cut
+    // point. (open_tail is forced false at finalize → speculation is dead.)
     for md in ["$x", "$$x", "\\(x", "\\[x", "a $ b $ c", "$$$", "$"] {
         let _ = render(md);
         let _ = render_streamed(md);
     }
     assert!(!render("$x\n").contains("class=\"math"), "unclosed inline must stay literal");
+
+    // ...but while the SAME inline forms are still streaming (open tail, no
+    // finalize), they render speculatively as the resolved `<span class="math
+    // …">` instead of flashing the raw `$`/`\(` source. Mid-stream view = no
+    // finalize.
+    let open = |md: &str| {
+        let mut p = StreamParser::new().with_gfm_math(true);
+        p.append(md);
+        collect(&p)
+    };
+    assert!(
+        open("$x^2").contains("<span class=\"math math-inline\">x^2</span>"),
+        "open `$x^2` should speculate an inline-math span: {}",
+        open("$x^2")
+    );
+    assert!(
+        open("text \\(a+b").contains("<span class=\"math math-inline\">a+b</span>"),
+        "open `\\(a+b` should speculate an inline-math span: {}",
+        open("text \\(a+b")
+    );
+    // Inline display `$$…$$` inside a paragraph (`x $$y`, not a LEADING `$$`
+    // which would open a block-math `<div>`): the open tail speculates an inline
+    // display span over the partial body...
+    assert!(
+        open("x $$y").contains("<span class=\"math math-display\">y</span>"),
+        "open `x $$y` should speculate an inline display-math span: {}",
+        open("x $$y")
+    );
+    // ...and finalizing that very prefix collapses to literal (speculation is
+    // streaming-only), byte-identical to the one-shot literal oracle.
+    assert_eq!(render_streamed("x $$y"), render("x $$y"), "finalize of `x $$y` must be literal-parity");
+    assert!(!render("x $$y").contains("class=\"math"), "finalized `x $$y` must be literal");
 }

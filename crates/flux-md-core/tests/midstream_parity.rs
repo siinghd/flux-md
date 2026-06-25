@@ -376,3 +376,135 @@ fn open_math_block_matches() {
         assert_eq!(streamed, one, "mid-stream != one-shot for {md:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Speculative open-tail INLINE CODE + INLINE MATH (kills the streaming
+// raw-source flash for `` `code` `` / `$x$` / `\(a+b\)`). While the closer is
+// still streaming to EOF, render the resolved `<code>…</code>` /
+// `<span class="math …">…</span>` over the partial body, with the opening
+// delimiter hidden; finalize of an unclosed form is byte-identical literal.
+// ---------------------------------------------------------------------------
+
+/// math-on variants of the parity helpers (the default helpers leave `$`/`\(`
+/// literal). `with_gfm_alerts(true)` mirrors the other speculative helpers.
+fn make_math() -> StreamParser {
+    StreamParser::new().with_gfm_alerts(true).with_gfm_math(true)
+}
+fn one_shot_open_m(md: &str) -> String {
+    let mut p = make_math();
+    p.append(md);
+    collect(&p)
+}
+fn streamed_open_m(md: &str) -> String {
+    let mut p = make_math();
+    let mut buf = [0u8; 4];
+    for ch in md.chars() {
+        p.append(ch.encode_utf8(&mut buf));
+    }
+    p.append("");
+    collect(&p)
+}
+fn assert_parity_m(md: &str) {
+    assert_eq!(streamed_open_m(md), one_shot_open_m(md), "mid-stream != one-shot for {md:?}");
+}
+fn finalized_m(md: &str) -> String {
+    let mut p = make_math();
+    p.append(md);
+    p.finalize();
+    collect(&p)
+}
+
+#[test]
+fn speculative_inline_code_golden() {
+    // Open `` `code here` `` (no closer yet): resolved `<code>` over the partial
+    // body, opening backtick hidden, no raw backtick/source as visible text.
+    let md = "`code here";
+    assert_parity_m(md);
+    let html = streamed_open_m(md);
+    assert!(html.contains("<code>code here</code>"), "expected resolved <code> for {md:?}: {html}");
+    assert!(!visible_text_contains(&html, "`"), "raw backtick must not be visible text for {md:?}: {html}");
+
+    // Closed `` `code here` `` → identical resolved <code> (the close is hidden too).
+    assert_parity_m("`code here`");
+    assert!(streamed_open_m("`code here`").contains("<code>code here</code>"));
+
+    // Lone opener `` ` `` (empty body) is NOT speculated — stays literal.
+    assert_parity_m("`");
+    assert!(!streamed_open_m("`").contains("<code>"), "empty-body backtick must stay literal");
+
+    // Finalize of the unclosed form is byte-identical literal (no <code>).
+    let fin = finalized_m("`code here");
+    assert!(!fin.contains("<code>"), "finalized unclosed code must be literal: {fin}");
+    assert!(fin.contains("`code here"), "literal backtick preserved on finalize: {fin}");
+}
+
+#[test]
+fn speculative_inline_dollar_math_golden() {
+    // Open `$x^2 + y^2$` (no closer yet): resolved inline-math span over the
+    // partial body, opening `$` hidden, no raw `$` as visible text.
+    let md = "$x^2 + y^2";
+    assert_parity_m(md);
+    let html = streamed_open_m(md);
+    assert!(
+        html.contains("<span class=\"math math-inline\">x^2 + y^2</span>"),
+        "expected resolved inline-math span for {md:?}: {html}"
+    );
+    assert!(!visible_text_contains(&html, "$"), "raw $ must not be visible text for {md:?}: {html}");
+
+    // Closed form → identical span.
+    assert_parity_m("$x^2 + y^2$");
+    assert!(streamed_open_m("$x^2 + y^2$").contains("<span class=\"math math-inline\">x^2 + y^2</span>"));
+
+    // pandoc currency guard preserved: `$ ` (space after single `$`) never
+    // speculates; `$5 and $10` stays literal currency text.
+    assert_parity_m("$ x");
+    assert!(!streamed_open_m("$ x").contains("class=\"math"), "`$ ` must not speculate (pandoc guard)");
+    assert_parity_m("I have $5 and $10 left");
+
+    // Finalize of the unclosed form is literal.
+    let fin = finalized_m("$x^2 + y^2");
+    assert!(!fin.contains("class=\"math"), "finalized unclosed $math must be literal: {fin}");
+    assert!(fin.contains("$x^2 + y^2"), "literal $ preserved on finalize: {fin}");
+}
+
+#[test]
+fn speculative_inline_latex_math_golden() {
+    // Open `\(a+b\)` (no closer yet): resolved inline-math span over the partial
+    // body, opening `\(` hidden, no raw `\(` as visible text.
+    let md = "\\(a+b";
+    assert_parity_m(md);
+    let html = streamed_open_m(md);
+    assert!(
+        html.contains("<span class=\"math math-inline\">a+b</span>"),
+        "expected resolved inline-math span for {md:?}: {html}"
+    );
+    assert!(!visible_text_contains(&html, "\\("), "raw \\( must not be visible text for {md:?}: {html}");
+
+    // Inline display `\[a=b\]` open form → inline display span. (A LEADING `\[`
+    // opens a block-level `<div class="math math-display">` instead — a separate,
+    // already-parity scanner path — so prefix it with inline text to exercise the
+    // inline `try_math_delim` speculation.)
+    let dm = "x \\[a=b";
+    assert_parity_m(dm);
+    assert!(
+        streamed_open_m(dm).contains("<span class=\"math math-display\">a=b</span>"),
+        "expected resolved inline display-math span for {dm:?}: {}",
+        streamed_open_m(dm)
+    );
+
+    // Closed forms → identical spans.
+    assert_parity_m("\\(a+b\\)");
+    assert!(streamed_open_m("\\(a+b\\)").contains("<span class=\"math math-inline\">a+b</span>"));
+
+    // Empty body `\(` (opener only) is NOT speculated — stays literal `(`.
+    assert_parity_m("\\(");
+
+    // Blank-line guard: a `\n\n` before EOF closes the paragraph → literal (math
+    // never crosses a paragraph break), matching one-shot.
+    assert_parity_m("\\(a+b\n\npara2");
+    assert!(!streamed_open_m("\\(a+b\n\npara2").contains("class=\"math"), "math must not cross a blank line");
+
+    // Finalize of the unclosed form is literal.
+    let fin = finalized_m("\\(a+b");
+    assert!(!fin.contains("class=\"math"), "finalized unclosed \\(…) must be literal: {fin}");
+}
