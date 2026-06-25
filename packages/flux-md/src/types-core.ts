@@ -110,6 +110,30 @@ export interface ListData {
   items?: ListItemData[];
 }
 
+/**
+ * One inner sub-block of a `Blockquote` / `Alert` as STRUCTURED DATA (opt-in via
+ * {@link ParserConfig.blockData}). `html` is that sub-block's pre-rendered display
+ * markup (e.g. `<p>…</p>`), byte-for-byte the matching fragment inside the
+ * container's `block.html` wrapper.
+ */
+export interface NestedBlock {
+  html: string;
+}
+
+/**
+ * A `Blockquote`'s `kind.data` (and the `nested` carrier inside an `Alert`'s data)
+ * when {@link ParserConfig.blockData} is on. `nested` is the ordered list of the
+ * container's inner sub-blocks, each as its own pre-rendered HTML. A
+ * `components.Blockquote` / `components.Alert` override can render these KEYED (one
+ * node per entry) so that while the container streams only its last (open) inner
+ * block re-renders each tick — committed inner blocks have stable HTML and memoize.
+ * When `blockData` is off, a Blockquote has no `kind.data` and an Alert's is just
+ * `{ kind }` (byte-identical to before).
+ */
+export interface ContainerData {
+  nested: NestedBlock[];
+}
+
 export interface Block {
   id: number;
   kind: BlockKind;
@@ -209,6 +233,14 @@ export interface BlockComponentProps {
    * start number) without re-parsing the `<ol start=…>` attribute.
    */
   list?: ListData;
+  /**
+   * Structured container data — present for `Blockquote` / `Alert` blocks when
+   * {@link ParserConfig.blockData} is on (otherwise `undefined`). `{ nested }` —
+   * the ordered pre-rendered HTML of each inner sub-block. The default renderers
+   * use this to render the children KEYED (one node per entry) so that while the
+   * container streams, only its open last inner block re-renders each tick.
+   */
+  container?: ContainerData;
 }
 
 /**

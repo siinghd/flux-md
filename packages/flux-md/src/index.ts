@@ -37,4 +37,6 @@ export type {
   CodeBlockData,
   MathBlockData,
   ListData,
+  NestedBlock,
+  ContainerData,
 } from "./types";

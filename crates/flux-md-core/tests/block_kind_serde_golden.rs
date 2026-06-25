@@ -17,7 +17,8 @@
 //! also pin the wire contract `props.table = block.kind.data` depends on.
 
 use flux_md_core::blocks::{
-    AlertKind, BlockKind, HeadingData, ListItemData, MathBlockData, TableCell, TableData,
+    AlertKind, BlockKind, ContainerData, HeadingData, ListItemData, MathBlockData, NestedBlock,
+    TableCell, TableData,
 };
 use std::rc::Rc;
 
@@ -42,7 +43,7 @@ fn every_variant_matches_pre_refactor_golden() {
     // Unit kinds — no `data` key.
     assert_eq!(j(&BlockKind::Paragraph), r#"{"type":"Paragraph"}"#);
     assert_eq!(j(&BlockKind::Mermaid), r#"{"type":"Mermaid"}"#);
-    assert_eq!(j(&BlockKind::Blockquote), r#"{"type":"Blockquote"}"#);
+    assert_eq!(j(&BlockKind::Blockquote(None)), r#"{"type":"Blockquote"}"#);
     assert_eq!(j(&BlockKind::Rule), r#"{"type":"Rule"}"#);
     assert_eq!(j(&BlockKind::Html), r#"{"type":"Html"}"#);
 
@@ -138,7 +139,8 @@ fn every_variant_matches_pre_refactor_golden() {
     );
     assert_eq!(
         j(&BlockKind::Alert {
-            kind: AlertKind::Note
+            kind: AlertKind::Note,
+            nested: None,
         }),
         r#"{"type":"Alert","data":{"kind":"note"}}"#
     );
@@ -156,6 +158,31 @@ fn every_variant_matches_pre_refactor_golden() {
         j(&BlockKind::Table(Some(td))),
         r#"{"type":"Table","data":{"headers":[{"text":"H","html":"<strong>H</strong>"}],"rows":[[{"text":"x","html":"x"}]],"aligns":["center",null]}}"#
     );
+
+    // The Blockquote carrier: off (None) drops the `data` key (byte-identical to
+    // the pre-carrier unit variant); on (Some) carries the keyed `nested` blocks.
+    assert_eq!(j(&BlockKind::Blockquote(None)), r#"{"type":"Blockquote"}"#);
+    assert_eq!(
+        j(&BlockKind::Blockquote(Some(ContainerData {
+            nested: vec![
+                NestedBlock { html: "<p>a</p>".into() },
+                NestedBlock { html: "<p>b</p>".into() },
+            ],
+        }))),
+        r#"{"type":"Blockquote","data":{"nested":[{"html":"<p>a</p>"},{"html":"<p>b</p>"}]}}"#
+    );
+
+    // The Alert carrier: `kind` is always-on; the opt-in `nested` rides behind
+    // `skip_serializing_if` so the off wire (`{"kind":…}`) is byte-identical.
+    assert_eq!(
+        j(&BlockKind::Alert {
+            kind: AlertKind::Tip,
+            nested: Some(ContainerData {
+                nested: vec![NestedBlock { html: "<p>x</p>".into() }],
+            }),
+        }),
+        r#"{"type":"Alert","data":{"kind":"tip","nested":[{"html":"<p>x</p>"}]}}"#
+    );
 }
 
 /// Every `AlertKind` keyword still serializes to its lowercase string inside the
@@ -170,7 +197,7 @@ fn alert_kinds_serialize_lowercase() {
         (AlertKind::Caution, "caution"),
     ] {
         assert_eq!(
-            j(&BlockKind::Alert { kind: k }),
+            j(&BlockKind::Alert { kind: k, nested: None }),
             format!(r#"{{"type":"Alert","data":{{"kind":"{want}"}}}}"#)
         );
     }

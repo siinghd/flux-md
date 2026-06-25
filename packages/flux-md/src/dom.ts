@@ -261,6 +261,20 @@ export function mountFluxMarkdown(
       kind.toLowerCase() +
       (b.open ? " flux-open" : "") +
       (b.speculative ? " flux-speculative" : "");
+    // Streaming-tail keyed path: an OPEN Blockquote / Alert with structured
+    // `nested` data (blockData on) builds its wrapper with one child node per
+    // inner sub-block instead of a single full-wrapper `innerHTML`. Each child's
+    // `html` is the SAME safe-allowlist-serialized fragment as the corresponding
+    // slice of `b.html` (no new innerHTML hole). A `sanitize` hook disables it
+    // (it must run over the full wrapper string). Closed blocks fall through —
+    // their node fingerprint is stable, so they are never rebuilt anyway.
+    if (b.open && !sanitize && (kind === "Blockquote" || kind === "Alert")) {
+      const wrapper = renderKeyedContainer(b);
+      if (wrapper) {
+        node.appendChild(wrapper);
+        return node;
+      }
+    }
     node.innerHTML = sanitize ? sanitize(b.html) : b.html;
     return node;
   }
@@ -289,6 +303,37 @@ export function mountFluxMarkdown(
     }
     node.appendChild(list);
     return node;
+  }
+
+  // Build a Blockquote / Alert wrapper with KEYED inner sub-block nodes from the
+  // structured `nested` channel. The wrapper element + its attributes (`dir`/
+  // `class`/`data-alert`/`role`) come from `b.html`'s opening tag so the streamed
+  // wrapper is byte-faithful; the alert title `<p>` is kept as the first child
+  // (it is the wrapper, not a body block). Returns null when `nested` is absent.
+  function renderKeyedContainer(b: Block): HTMLElement | null {
+    const nested = (b.kind.data as { nested?: { html: string }[] } | undefined)?.nested;
+    if (!Array.isArray(nested)) return null;
+    const tagName = b.kind.type === "Alert" ? "div" : "blockquote";
+    const wrapper = document.createElement(tagName);
+    applyOpenTagAttrs(wrapper, b.html);
+    if (b.kind.type === "Alert") {
+      const title = alertTitleHtml(b.html);
+      if (title) {
+        const t = document.createElement("div");
+        t.innerHTML = title;
+        const titleNode = t.firstElementChild;
+        if (titleNode) wrapper.appendChild(titleNode);
+      }
+    }
+    for (let i = 0; i < nested.length; i++) {
+      const child = document.createElement("div");
+      child.innerHTML = nested[i].html;
+      const inner = child.firstElementChild;
+      // A nested block is a single root element (`<p>…</p>`, `<ul>…</ul>`, …);
+      // unwrap the temp `<div>` so the wrapper holds the real element directly.
+      wrapper.appendChild(inner ?? child);
+    }
+    return wrapper;
   }
 
   // An override may return an element (used directly) or an HTML string (wrapped
@@ -481,4 +526,29 @@ function decodeCodeText(html: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&amp;/g, "&");
+}
+
+// Attributes the Rust renderer emits on a blockquote / alert wrapper open tag
+// (`dir`/`class`/`data-alert`/`role`). Whitelisted (not a generic HTML parser):
+// only these names are forwarded onto the keyed wrapper element so it is
+// byte-faithful to the full-wrapper innerHTML path.
+const CONTAINER_ATTR_RE = /([a-zA-Z][a-zA-Z0-9-]*)="([^"]*)"/g;
+function applyOpenTagAttrs(el: HTMLElement, html: string): void {
+  const gt = html.indexOf(">");
+  const open = gt < 0 ? html : html.slice(0, gt);
+  let m: RegExpExecArray | null;
+  CONTAINER_ATTR_RE.lastIndex = 0;
+  while ((m = CONTAINER_ATTR_RE.exec(open))) {
+    const name = m[1].toLowerCase();
+    if (name === "class" || name === "dir" || name === "role" || name.startsWith("data-")) {
+      el.setAttribute(name, m[2]);
+    }
+  }
+}
+
+// Extract an alert's title `<p class="markdown-alert-title"…>Title</p>` from the
+// wrapper HTML so the keyed path keeps it as the first child (never in `nested`).
+function alertTitleHtml(html: string): string {
+  const m = html.match(/<p class="markdown-alert-title"[^>]*>[\s\S]*?<\/p>/);
+  return m ? m[0] : "";
 }

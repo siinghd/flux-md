@@ -89,11 +89,27 @@ pub enum BlockKind {
     /// behind `#[serde(skip_serializing_if)]` (`items` skipped when empty) so the
     /// off wire stays byte-identical.
     List { ordered: bool, start: Option<u32>, items: Vec<ListItemData> },
-    Blockquote,
+    /// A blockquote. `nested` is the opt-in structured channel (`setBlockData`):
+    /// `None` (default-off) ⇒ serializes as `{"type":"Blockquote"}` with no `data`
+    /// key, byte-identical to before; `Some(cd)` (on) ⇒
+    /// `{"type":"Blockquote","data":{"nested":[{ html }, …]}}` carrying the
+    /// pre-rendered HTML of each inner sub-block so a `components.Blockquote`
+    /// override can render the children KEYED (one node per inner block) instead
+    /// of re-parsing the whole wrapper HTML every streaming tick. The single
+    /// `Option`-bearing field — not a paired bare/with-data variant — covers both
+    /// wire shapes (the generic carrier, like `Table(Option<TableData>)`).
+    Blockquote(Option<ContainerData>),
     /// GitHub-style alert / admonition (a `> [!NOTE]` blockquote). `kind`
     /// serializes to a lowercase string ("note", "tip", …) so the JS layer can
-    /// dispatch a custom renderer via `components.Alert`.
-    Alert { kind: AlertKind },
+    /// dispatch a custom renderer via `components.Alert`. `nested` is the opt-in
+    /// structured channel (`setBlockData`): `None` (default-off) ⇒ serializes as
+    /// `{"type":"Alert","data":{"kind":"note"}}`, byte-identical to before;
+    /// `Some(cd)` (on) ⇒ `{"type":"Alert","data":{"kind":"note","nested":[…]}}`
+    /// carrying the pre-rendered HTML of each inner body sub-block (the alert
+    /// title line is the wrapper, not an inner block) for the same keyed-children
+    /// render. The opt-in `nested` rides behind `#[serde(skip_serializing_if)]`
+    /// so the off wire stays byte-identical.
+    Alert { kind: AlertKind, nested: Option<ContainerData> },
     /// A GFM table. The `Option<TableData>` is the opt-in structured channel
     /// (`setBlockData`): `None` (default-off) ⇒ serializes as `{"type":"Table"}`
     /// with no `data` key, byte-identical to before; `Some(td)` (on) ⇒
@@ -143,8 +159,13 @@ struct ListData<'a> {
     items: &'a [ListItemData],
 }
 #[derive(Serialize)]
-struct AlertData {
+struct AlertData<'a> {
     kind: AlertKind,
+    /// Opt-in pre-rendered inner sub-blocks (`setBlockData`); flattened from the
+    /// `ContainerData` carrier and omitted entirely when off so the wire stays
+    /// byte-identical (`{"kind":…}`), present when on (`{"kind":…,"nested":[…]}`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nested: Option<&'a Vec<NestedBlock>>,
 }
 #[derive(Serialize)]
 struct ComponentData<'a> {
@@ -185,7 +206,6 @@ impl Serialize for BlockKind {
             // True unit kinds — `{"type": tag}` with no `data` key.
             BlockKind::Paragraph
             | BlockKind::Mermaid
-            | BlockKind::Blockquote
             | BlockKind::Rule
             | BlockKind::Html => no_data(s, self.tag()),
             // The opt-in carrier: `None` ⇒ naked scalar payload
@@ -204,11 +224,21 @@ impl Serialize for BlockKind {
             BlockKind::List { ordered, start, items } => {
                 with_data(s, "List", &ListData { ordered: *ordered, start: *start, items })
             }
-            BlockKind::Alert { kind } => with_data(s, "Alert", &AlertData { kind: *kind }),
+            // Alert always carries its `kind`; the opt-in `nested` rides behind
+            // `skip_serializing_if` so the off wire (`{"kind":…}`) is byte-identical.
+            BlockKind::Alert { kind, nested } => with_data(
+                s,
+                "Alert",
+                &AlertData { kind: *kind, nested: nested.as_ref().map(|cd| &cd.nested) },
+            ),
             BlockKind::Component { tag, attrs } => {
                 with_data(s, "Component", &ComponentData { tag, attrs })
             }
             // The opt-in carrier: present `data` iff the payload is `Some`.
+            BlockKind::Blockquote(opt) => match opt {
+                Some(cd) => with_data(s, "Blockquote", cd),
+                None => no_data(s, "Blockquote"),
+            },
             BlockKind::Table(opt) => match opt {
                 Some(td) => with_data(s, "Table", td),
                 None => no_data(s, "Table"),
@@ -295,6 +325,31 @@ pub struct ListItemData {
     pub html: String,
 }
 
+/// Structured container payload for the opt-in `kind.data` channel (the `Some`
+/// payload of `BlockKind::Blockquote` / the `nested` carrier inside an `Alert`'s
+/// data). Serializes to `{ nested: NestedBlock[] }` for a blockquote, and is
+/// flattened to the `nested` key alongside `kind` for an alert.
+///
+/// `nested` is the ordered list of the container's inner sub-blocks, each as its
+/// own pre-rendered HTML string — byte-identical to the corresponding fragment
+/// inside `Block::html`'s wrapper. A `components.Blockquote` / `components.Alert`
+/// override can render these KEYED (one node per entry) so that while the
+/// container streams, only its last (open) inner block re-renders each tick —
+/// the committed inner blocks have stable HTML and memoize. The wrapper
+/// (`<blockquote>` / the alert `<div>` + title) is NOT in `nested`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContainerData {
+    pub nested: Vec<NestedBlock>,
+}
+
+/// One inner sub-block of a blockquote / alert in the structured channel. `html`
+/// is the pre-rendered display HTML of that sub-block (e.g. `<p>…</p>`),
+/// byte-identical to the matching fragment inside the container's `Block::html`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NestedBlock {
+    pub html: String,
+}
+
 /// The five GitHub alert keywords. Serializes to lowercase ("note", …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -353,7 +408,7 @@ impl BlockKind {
             BlockKind::MathBlock(_) => "MathBlock",
             BlockKind::Mermaid => "Mermaid",
             BlockKind::List { .. } => "List",
-            BlockKind::Blockquote => "Blockquote",
+            BlockKind::Blockquote(_) => "Blockquote",
             BlockKind::Alert { .. } => "Alert",
             BlockKind::Table(_) => "Table",
             BlockKind::Rule => "Rule",

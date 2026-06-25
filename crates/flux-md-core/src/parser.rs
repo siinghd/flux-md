@@ -10,7 +10,7 @@ use crate::render::{
     parse_alignments, push_code_fence_open, push_table_cell, render_block,
     render_footnote_section, split_table_cells, Enrichment, LinkRef, RenderOpts,
 };
-use crate::blocks::{BlockKind, ListItemData, TableCell, TableData};
+use crate::blocks::{BlockKind, ContainerData, ListItemData, NestedBlock, TableCell, TableData};
 use crate::scanner::{
     count_table_columns, detect_html_block_open, html_block_line_closes, is_blank_line,
     is_setext_underline, is_table_delimiter_row, line_end, line_slice, parse_link_ref_def, scan,
@@ -328,6 +328,13 @@ struct ContainerCache {
     /// shape `<p dir?>{inline}</p>\n`. Closed paragraphs never re-render
     /// (each blank `>` line costs one final `render_inline` and one push).
     committed_paras_html: String,
+    /// Structured `kind.data` channel (only populated when `block_data` is on):
+    /// each fully-closed inner paragraph's own HTML (`<p dir?>{inline}</p>`, no
+    /// trailing `\n`), pushed in lock-step with `committed_paras_html` so a
+    /// keyed override gets one stable, memoizable entry per committed paragraph.
+    /// The still-open current paragraph is appended fresh each patch (mirroring
+    /// `partial_html` in the table cache). Empty + unused when off.
+    committed_paras: Vec<NestedBlock>,
     /// Stripped inner content of the CURRENT (still-open) paragraph, one
     /// `\n`-terminated line per processed source line. Cleared on close.
     inner_buffer: String,
@@ -803,6 +810,13 @@ impl StreamParser {
                 Some(Enrichment::List(start, items)) => {
                     if let BlockKind::List { ordered, .. } = kind {
                         kind = BlockKind::List { ordered, start: Some(start), items };
+                    }
+                }
+                Some(Enrichment::Blockquote(cd)) => kind = BlockKind::Blockquote(Some(cd)),
+                // Alert keeps its classified `kind`; only `nested` is folded on.
+                Some(Enrichment::Alert(cd)) => {
+                    if let BlockKind::Alert { kind: ak, .. } = kind {
+                        kind = BlockKind::Alert { kind: ak, nested: Some(cd) };
                     }
                 }
                 None => {}
@@ -1805,6 +1819,18 @@ impl StreamParser {
         {
             html.pop();
         }
+        // Structured channel: the current (still-open) paragraph's own HTML, if it
+        // has content — captured from the just-assembled bytes so it is
+        // byte-identical to the wrapper's last `<p>…</p>`. Built before the
+        // wrapper close / opener-backout so the slice is exactly the open paragraph.
+        let open_para_html: Option<String> = if opts.block_data && html.len() > body_content_start {
+            let mut p = String::with_capacity(html.len() - body_p_start + 4);
+            p.push_str(&html[body_p_start..]);
+            p.push_str("</p>");
+            Some(p)
+        } else {
+            None
+        };
         if html.len() == body_content_start {
             // Empty current paragraph → back out the `<p>` opener (matches
             // the full renderer, which emits no body sub-block for an empty
@@ -1819,9 +1845,21 @@ impl StreamParser {
         // unchanged for the next append.
         cache.inner_buffer.truncate(committed_inner_end);
 
+        // Assemble the opt-in `nested` channel: the stable committed paragraphs
+        // (O(paras) clone of cheap entries) plus the current open paragraph.
+        // emit-on-every-patch so DATA never lags HTML, mirroring the table cache.
+        let container_data = if opts.block_data {
+            let mut nested = cache.committed_paras.clone();
+            if let Some(p) = open_para_html {
+                nested.push(NestedBlock { html: p });
+            }
+            Some(ContainerData { nested })
+        } else {
+            None
+        };
         let kind = match cache.kind {
-            ContainerCacheKind::Blockquote => BlockKind::Blockquote,
-            ContainerCacheKind::Alert(ak) => BlockKind::Alert { kind: ak },
+            ContainerCacheKind::Blockquote => BlockKind::Blockquote(container_data),
+            ContainerCacheKind::Alert(ak) => BlockKind::Alert { kind: ak, nested: container_data },
         };
         let block = Block {
             id: cache.id,
@@ -2411,6 +2449,16 @@ fn close_container_paragraph(cache: &mut ContainerCache, opts: &RenderOpts) {
     cache.committed_paras_html.push_str(&cache.body_p_open);
     cache.committed_paras_html.push_str(final_text);
     cache.committed_paras_html.push_str(&cache.body_p_close);
+    // Structured channel: record this just-closed paragraph's own HTML (no
+    // trailing `\n` separator), in lock-step with `committed_paras_html`, so the
+    // keyed `nested` data carries one stable entry per committed paragraph.
+    if opts.block_data {
+        let mut html = String::with_capacity(cache.body_p_open.len() + final_text.len() + 4);
+        html.push_str(&cache.body_p_open);
+        html.push_str(final_text);
+        html.push_str("</p>");
+        cache.committed_paras.push(NestedBlock { html });
+    }
     cache.inner_buffer.clear();
     cache.inner_cut = 0;
     cache.committed_inner_html.clear();
@@ -2445,14 +2493,14 @@ fn build_container_cache(
     body_p_open.push('>');
     let body_p_close = String::from("</p>\n");
     let (kind, wrapper_open, wrapper_close, lines_upto) = match block_kind {
-        BlockKind::Blockquote => {
+        BlockKind::Blockquote(_) => {
             let mut w = String::with_capacity(32);
             w.push_str("<blockquote");
             w.push_str(opts.dir());
             w.push_str(">\n");
             (ContainerCacheKind::Blockquote, w, String::from("</blockquote>"), start)
         }
-        BlockKind::Alert { kind: ak } => {
+        BlockKind::Alert { kind: ak, .. } => {
             let mut w = String::with_capacity(96);
             w.push_str("<div class=\"markdown-alert markdown-alert-");
             w.push_str(ak.class());
@@ -2479,6 +2527,7 @@ fn build_container_cache(
         body_p_close,
         wrapper_close,
         committed_paras_html: String::new(),
+        committed_paras: Vec::new(),
         inner_buffer: String::new(),
         lines_upto,
         inner_cut: 0,
