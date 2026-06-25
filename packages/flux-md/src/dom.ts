@@ -28,6 +28,18 @@ import { blockProps, extractLang } from "./block-props";
 export interface MountHandle {
   destroy(): void;
   refresh(): void;
+  /**
+   * The id of the streaming **tail** block — the one block that may re-render on
+   * the next patch (a committed block's node is frozen, so its id never appears
+   * here). Returns `null` when no block is open (idle / fully committed).
+   *
+   * Purely derived from the live snapshot; reading it renders nothing and mutates
+   * nothing. It exists so a fine-grained framework binding (Solid `createMemo`,
+   * Vue `computed`, Svelte `derived`) can narrow a reactive cell to *just the tail*
+   * for its own scheduling/diagnostics — the DOM is already updated by the
+   * renderer's own subscribe loop, so this never changes what is drawn.
+   */
+  openBlockId(): number | null;
 }
 
 export type DomBlockComponent = (props: BlockComponentProps) => HTMLElement | string;
@@ -430,7 +442,22 @@ export function mountFluxMarkdown(
       if (dead) return;
       sync();
     },
+    openBlockId() {
+      return tailOpenBlockId(client.getSnapshot());
+    },
   };
+}
+
+/**
+ * Derive the streaming tail's block id from an ordered snapshot: the id of the
+ * last block when it is open, else `null`. The open block is always the tail by
+ * construction (the parser only keeps the final block speculative/open), so this
+ * is an O(1) read of the last element — no scan. Shared so the framework
+ * adapters expose the same "what may re-render next" signal as the DOM handle.
+ */
+export function tailOpenBlockId(snapshot: readonly Block[]): number | null {
+  const tail = snapshot.length > 0 ? snapshot[snapshot.length - 1] : undefined;
+  return tail && tail.open ? tail.id : null;
 }
 
 // Local copy of the canonical code-text decoder (kept here so dom.ts depends

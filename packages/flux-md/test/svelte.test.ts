@@ -1,7 +1,8 @@
 import { test, expect, beforeAll, afterEach, spyOn } from "bun:test";
 import { GlobalWindow } from "happy-dom";
 import { FluxClient, FluxPool } from "../src/client";
-import { fluxMarkdown, fluxMarkdownString } from "../src/svelte";
+import { fluxMarkdown, fluxMarkdownString, tailBlockId } from "../src/svelte";
+import { tailOpenBlockId } from "../src/dom";
 import type { Block, FromWorker, ToWorker, WorkerLike } from "../src/types";
 
 // A no-op Worker stub for the fluxMarkdownString tests below. Those tests use
@@ -180,6 +181,70 @@ test("remount on changed client also never destroys either client", () => {
 
   expect(aSpy).not.toHaveBeenCalled();
   expect(bSpy).not.toHaveBeenCalled();
+});
+
+// --------------------------------------------------------------------------
+// TAIL-BINDING (svelte-tail-finegrain)
+// --------------------------------------------------------------------------
+
+test("action: committed-block nodes keep identity across patches; only the open tail rebuilds", () => {
+  const { client, worker } = makeClient();
+  client.append("");
+  const node = document.createElement("div");
+  const action = fluxMarkdown(node, { client });
+  const root = node.querySelector(".flux-md")!;
+
+  // Commit block 1, open block 2 as the tail.
+  drive(worker, patch([para(1, "<p>committed</p>")], [para(2, "<p>t", true)]));
+  const committedNode = root.children[0];
+  const tailV1 = root.children[1];
+
+  for (const t of ["<p>ta", "<p>tail</p>"]) {
+    drive(worker, patch([], [para(2, t, true)]));
+    expect(root.children[0]).toBe(committedNode); // committed: identity held
+  }
+  expect(root.children[1]).not.toBe(tailV1); // tail: rebuilt
+
+  drive(worker, patch([para(2, "<p>tail final</p>")], []));
+  expect(root.children[0]).toBe(committedNode);
+
+  action.destroy!();
+});
+
+test("tailBlockId store tracks the open tail, stays stable on pure growth, stops on last unsubscribe", () => {
+  const { client, worker } = makeClient();
+  client.append("");
+  const store = tailBlockId(client);
+
+  const seen: Array<number | null> = [];
+  const unsub = store.subscribe((v) => seen.push(v));
+  expect(seen[seen.length - 1]).toBe(null); // initial: nothing open
+
+  drive(worker, patch([para(1, "<p>c</p>")], [para(2, "<p>t", true)]));
+  expect(seen[seen.length - 1]).toBe(2);
+
+  // Pure tail growth keeps id 2 → Svelte's set is identity-checked, so NO new
+  // emission lands (length unchanged).
+  const lenBefore = seen.length;
+  drive(worker, patch([], [para(2, "<p>tail more</p>", true)]));
+  expect(seen.length).toBe(lenBefore); // stable id → no re-fire
+  expect(tailOpenBlockId(client.getSnapshot())).toBe(2);
+
+  // Commit the tail → emits null.
+  drive(worker, patch([para(2, "<p>tail final</p>")], []));
+  expect(seen[seen.length - 1]).toBe(null);
+
+  // Last unsubscribe runs the readable stop fn (client.subscribe unsubscribed):
+  // a later patch no longer pushes into a (re)subscribed store.
+  unsub();
+  const reSeen: Array<number | null> = [];
+  const unsub2 = store.subscribe((v) => reSeen.push(v));
+  // Fresh subscriber gets the current value once...
+  expect(reSeen).toEqual([null]);
+  drive(worker, patch([], [para(3, "<p>after", true)]));
+  // ...and a re-subscribed store tracks again (stop/restart is transparent).
+  expect(reSeen[reSeen.length - 1]).toBe(3);
+  unsub2();
 });
 
 // --------------------------------------------------------------------------

@@ -1,7 +1,8 @@
 import type { ActionReturn } from "svelte/action";
+import { readable, type Readable } from "svelte/store";
 import { FluxClient } from "./client";
 import type { ParserConfig } from "./types-core";
-import { mountFluxMarkdown, type DomComponents, type MountOptions } from "./dom";
+import { mountFluxMarkdown, tailOpenBlockId, type DomComponents, type MountOptions } from "./dom";
 
 /**
  * Svelte action that mounts a streaming {@link FluxClient} into the host node.
@@ -53,6 +54,30 @@ export function fluxMarkdown(
       handle.destroy();
     },
   };
+}
+
+/**
+ * A fine-grained Svelte `Readable` store of the streaming **tail** block id — the
+ * one block that may still re-render — driven by the client's own subscribe loop.
+ * The store sets a new value only when the tail id changes, so a `$tail`
+ * subscription or `derived(tail, …)` re-evaluates *only* for the tail, never for
+ * the committed body. Subscribing renders nothing: {@link fluxMarkdown} draws the
+ * document; this mirrors `MountHandle.openBlockId` through Svelte's primitive for
+ * any extra tail-scoped work. The client subscription is owned by the store and
+ * torn down when the last subscriber leaves (Svelte's `readable` stop fn).
+ *
+ * ```svelte
+ * const tail = tailBlockId(client); // $tail is the open block id, or null
+ * ```
+ */
+export function tailBlockId(client: FluxClient): Readable<number | null> {
+  return readable<number | null>(tailOpenBlockId(client.getSnapshot()), (set) => {
+    // `set` is identity-checked by Svelte's store, so pure tail-html growth that
+    // keeps the same open id never re-fires subscribers. The returned stop fn
+    // unsubscribes from the client when no one is listening.
+    const unsubscribe = client.subscribe(() => set(tailOpenBlockId(client.getSnapshot())));
+    return unsubscribe;
+  });
 }
 
 /**

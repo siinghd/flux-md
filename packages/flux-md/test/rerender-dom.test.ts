@@ -1,7 +1,7 @@
 import { test, expect, beforeAll } from "bun:test";
 import { GlobalWindow } from "happy-dom";
 import { FluxClient, FluxPool } from "../src/client";
-import { mountFluxMarkdown } from "../src/dom";
+import { mountFluxMarkdown, tailOpenBlockId } from "../src/dom";
 import type { Block, FromWorker, ToWorker, WorkerLike } from "../src/types";
 
 // Mirror test/dom.test.ts: register a DOM in this file only (no global preload).
@@ -102,6 +102,52 @@ test("NODE-REUSE: committed block node is reused across tail growth; a changed b
   drive(client, worker, patch([], [para(3, "<p>x changed</p>", true)]));
   expect(root.children[2]).not.toBe(changingNode); // changed → node replaced
   expect(root.children[2].textContent).toBe("x changed");
+
+  handle.destroy();
+});
+
+// --------------------------------------------------------------------------
+// TAIL-BINDING (open-block-id)
+//
+// The fine-grained "what may re-render next" signal that the framework adapters
+// narrow their reactivity to. It is a pure derivation over the snapshot and must
+// never change rendered output — the DOM here is identical to the NODE-REUSE
+// test, we only additionally read handle.openBlockId().
+// --------------------------------------------------------------------------
+
+test("TAIL-BINDING: handle.openBlockId is the open tail id, null when committed, and stable across pure tail growth", () => {
+  // Pure-function derivation: tail open id, null otherwise.
+  expect(tailOpenBlockId([])).toBe(null);
+  expect(tailOpenBlockId([para(1, "<p>a</p>")])).toBe(null); // closed tail
+  expect(tailOpenBlockId([para(1, "<p>a</p>"), para(2, "<p>b", true)])).toBe(2); // open tail
+
+  const { client, worker } = makeClient();
+  client.append("");
+  const container = document.createElement("div");
+  const handle = mountFluxMarkdown(client, container, { batch: false });
+  const root = container.querySelector(".flux-md")!;
+
+  // No patch yet → nothing open.
+  expect(handle.openBlockId()).toBe(null);
+
+  // Commit block 1, open block 2 as the tail → openBlockId is 2.
+  drive(client, worker, patch([para(1, "<p>committed</p>")], [para(2, "<p>t", true)]));
+  const committedNode = root.children[0];
+  expect(handle.openBlockId()).toBe(2);
+
+  // Pure tail growth keeps the SAME open id (2) every tick — the signal is
+  // stable, so a fine-grained binding keyed off it never re-fires — while the
+  // committed node keeps identity.
+  for (const tail of ["<p>ta", "<p>tai", "<p>tail grows</p>"]) {
+    drive(client, worker, patch([], [para(2, tail, true)]));
+    expect(handle.openBlockId()).toBe(2);
+    expect(root.children[0]).toBe(committedNode);
+  }
+
+  // Commit the tail → nothing open → null.
+  drive(client, worker, patch([para(2, "<p>tail final</p>")], []));
+  expect(handle.openBlockId()).toBe(null);
+  expect(root.children[0]).toBe(committedNode); // committed body untouched
 
   handle.destroy();
 });

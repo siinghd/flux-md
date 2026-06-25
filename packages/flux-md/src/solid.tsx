@@ -1,7 +1,7 @@
-import { createEffect, onCleanup, onMount, type JSX } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, type Accessor, type JSX } from "solid-js";
 import { FluxClient } from "./client";
 import type { ParserConfig } from "./types-core";
-import { mountFluxMarkdown, type MountHandle, type MountOptions } from "./dom";
+import { mountFluxMarkdown, tailOpenBlockId, type MountHandle, type MountOptions } from "./dom";
 
 /**
  * Solid binding for the framework-neutral DOM renderer ({@link mountFluxMarkdown}).
@@ -46,6 +46,41 @@ export function mountSolid(
   });
   registerCleanup(() => handle.destroy());
   return handle;
+}
+
+/**
+ * A fine-grained accessor for the streaming **tail** block id — the one block
+ * that may still re-render — driven by Solid's own reactivity. Subscribes to the
+ * client once and updates a `createSignal` only when the tail id changes, so a
+ * downstream `createMemo`/effect that reads it re-evaluates *only* for the tail,
+ * never for the committed body. Reading it renders nothing: the DOM is owned by
+ * {@link mountFluxMarkdown}; this is a scheduling/diagnostic signal that mirrors
+ * {@link MountHandle.openBlockId} through Solid's primitive.
+ *
+ * Registrars are injected (like {@link mountSolid}) so the testable core runs
+ * under any toolchain; the public {@link createTailBlockId} wires Solid's
+ * `onCleanup`.
+ */
+export function setupTailBlockId(
+  client: FluxClient,
+  registerCleanup: (fn: () => void) => void,
+): Accessor<number | null> {
+  const [tail, setTail] = createSignal<number | null>(tailOpenBlockId(client.getSnapshot()));
+  // setTail no-ops when the value is unchanged (Solid's default equality), so
+  // pure tail-html growth that keeps the same open id never re-fires downstream.
+  const unsubscribe = client.subscribe(() => setTail(tailOpenBlockId(client.getSnapshot())));
+  registerCleanup(unsubscribe);
+  return tail;
+}
+
+/**
+ * Own a fine-grained tail-block-id accessor for `client`, wired to Solid's
+ * `onCleanup`. Pair it with `<FluxMarkdown client={client} />`: the component
+ * draws the document, this accessor narrows any extra reactive work you key off
+ * the live tail (e.g. a "streaming…" affordance) to just the open block.
+ */
+export function createTailBlockId(client: FluxClient): Accessor<number | null> {
+  return setupTailBlockId(client, onCleanup);
 }
 
 /**

@@ -1,8 +1,14 @@
-import { defineComponent, h, onMounted, onUnmounted, ref, watch } from "vue";
+import { defineComponent, h, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import type { PropType, Ref } from "vue";
 import { FluxClient } from "./client";
 import type { ParserConfig } from "./types-core";
-import { mountFluxMarkdown, type DomComponents, type MountHandle, type MountOptions } from "./dom";
+import {
+  mountFluxMarkdown,
+  tailOpenBlockId,
+  type DomComponents,
+  type MountHandle,
+  type MountOptions,
+} from "./dom";
 
 /**
  * Vue 3 bindings for {@link mountFluxMarkdown}. Thin lifecycle glue: mount the
@@ -71,6 +77,27 @@ export function useFluxMarkdown(getOpts: () => UseFluxMarkdownOptions): {
   onUnmounted(teardown);
 
   return { container };
+}
+
+/**
+ * A fine-grained `Ref` to the streaming **tail** block id — the one block that
+ * may still re-render — driven by Vue's reactivity. Subscribes to the client
+ * once and writes a `shallowRef` only when the tail id changes, so a `computed`
+ * or `watch` keyed off it re-evaluates *only* for the tail, never for the
+ * committed body. Reading it renders nothing: {@link useFluxMarkdown} draws the
+ * document; this mirrors {@link MountHandle.openBlockId} through Vue's primitive
+ * for any extra tail-scoped work the caller schedules. Auto-unsubscribes on the
+ * owning component's unmount.
+ */
+export function useTailBlockId(client: FluxClient): Ref<number | null> {
+  const tail = shallowRef<number | null>(tailOpenBlockId(client.getSnapshot()));
+  // A shallowRef assignment only triggers when the value actually changes, so
+  // pure tail-html growth that keeps the same open id never re-fires watchers.
+  const unsubscribe = client.subscribe(() => {
+    tail.value = tailOpenBlockId(client.getSnapshot());
+  });
+  onUnmounted(unsubscribe);
+  return tail;
 }
 
 /**
