@@ -5,6 +5,7 @@ import {
   createFluxMarkdownString,
   mountSolid,
   setupFluxMarkdownString,
+  setupTailBlockId,
   type FluxMarkdownProps,
 } from "../src/solid";
 import type { Block, FromWorker, ToWorker, WorkerLike } from "../src/types";
@@ -149,6 +150,61 @@ test("props are snapshotted once at mount (getProps read a single time)", () => 
   mountSolid(() => { reads++; return props; }, container, cleanups.register);
 
   expect(reads).toBe(1);
+});
+
+test("mountSolid: committed-block nodes keep identity across patches; only the open tail rebuilds", () => {
+  const { client, worker } = makeClient();
+  client.append("");
+  const container = document.createElement("div");
+  const cleanups = makeCleanups();
+
+  const props: FluxMarkdownProps = { client, batch: false };
+  mountSolid(() => props, container, cleanups.register);
+  const root = container.querySelector(".flux-md")!;
+
+  // Commit block 1, open block 2 as the tail.
+  worker().fire(patch([para(1, "<p>committed</p>")], [para(2, "<p>t", true)]));
+  const committedNode = root.children[0];
+  const tailV1 = root.children[1];
+
+  // Several pure tail-growth patches: block 1 is never re-sent, so its node must
+  // be the SAME reference every time; the tail node IS rebuilt on growth.
+  for (const tail of ["<p>ta", "<p>tai", "<p>tail</p>"]) {
+    worker().fire(patch([], [para(2, tail, true)]));
+    expect(root.children[0]).toBe(committedNode); // committed: identity held
+  }
+  expect(root.children[1]).not.toBe(tailV1); // tail: rebuilt
+
+  // Commit the tail → block 1 STILL the same node (committed body never churns).
+  worker().fire(patch([para(2, "<p>tail final</p>")], []));
+  expect(root.children[0]).toBe(committedNode);
+
+  cleanups.run();
+});
+
+test("setupTailBlockId tracks the open tail, no-ops on stable id, unsubscribes on cleanup", () => {
+  const { client, worker } = makeClient();
+  client.append("");
+  const cleanups = makeCleanups();
+
+  const tail = setupTailBlockId(client, cleanups.register);
+  expect(tail()).toBe(null); // nothing open yet
+
+  worker().fire(patch([para(1, "<p>c</p>")], [para(2, "<p>t", true)]));
+  expect(tail()).toBe(2);
+
+  // Pure tail growth keeps the same open id → the accessor stays === 2.
+  worker().fire(patch([], [para(2, "<p>tail more</p>", true)]));
+  expect(tail()).toBe(2);
+
+  // Commit the tail → null.
+  worker().fire(patch([para(2, "<p>tail final</p>")], []));
+  expect(tail()).toBe(null);
+
+  // Cleanup unsubscribes: a later patch no longer moves the accessor.
+  cleanups.run();
+  worker().fire(patch([], [para(3, "<p>after", true)]));
+  expect(tail()).toBe(null);
 });
 
 // --------------------------------------------------------------------------

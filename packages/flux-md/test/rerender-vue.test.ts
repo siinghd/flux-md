@@ -12,6 +12,8 @@ import type { Block, FromWorker, ToWorker, WorkerLike } from "../src/types";
 // FluxMarkdown component has no `batch` prop, so dom.ts batches via rAF and only
 // re-arms when `frame === 0`; returning 0 flushes every patch synchronously
 // inside `subscribe`.
+import { tailOpenBlockId } from "../src/dom";
+
 let vue: typeof import("vue");
 let adapter: typeof import("../src/vue");
 
@@ -162,6 +164,58 @@ test("vue-no-mountcount: unrelated parent re-renders never remount the renderer 
   expect(host.querySelector(".flux-md")).toBe(root);
   expect(root!.textContent).toBe("persistedafter churn");
   expect(root!.children.length).toBe(2);
+
+  app.unmount();
+});
+
+// --------------------------------------------------------------------------
+// TAIL-BINDING (vue-tail-finegrain)
+//
+// useTailBlockId narrows reactivity to the open tail block id: a shallowRef that
+// only changes when the tail id changes. Committed-block DOM nodes keep identity
+// across patches (the renderer owns that); this test asserts BOTH — the tail ref
+// tracks the open id, stays stable on pure tail growth, and the committed node is
+// never rebuilt — and that the rendered output is unchanged by reading the ref.
+// --------------------------------------------------------------------------
+test("vue-tail-finegrain: useTailBlockId tracks the open tail; committed nodes keep identity", async () => {
+  const { client, worker } = makeClient();
+  client.append("");
+  const host = document.createElement("div");
+
+  let readTail: (() => number | null) | null = null;
+  const wrapper = vue.defineComponent({
+    setup() {
+      const tail = adapter.useTailBlockId(client);
+      readTail = () => tail.value;
+      return () => vue.h(adapter.FluxMarkdown, { client });
+    },
+  });
+  const app = vue.createApp(wrapper);
+  app.mount(host);
+
+  const root = host.querySelector(".flux-md")!;
+  expect(readTail!()).toBe(null); // nothing open yet
+
+  // Commit block 1, open block 2 as the tail.
+  drive(worker, patch([para(1, "<p>committed</p>")], [para(2, "<p>t", true)]));
+  await vue.nextTick();
+  const committedNode = root.children[0];
+  expect(readTail!()).toBe(2);
+
+  // Pure tail growth: the tail ref stays === 2 (no re-fire), committed node held.
+  for (const t of ["<p>ta", "<p>tail</p>"]) {
+    drive(worker, patch([], [para(2, t, true)]));
+    await vue.nextTick();
+    expect(readTail!()).toBe(2);
+    expect(root.children[0]).toBe(committedNode);
+  }
+
+  // Commit the tail → null; the snapshot derivation agrees.
+  drive(worker, patch([para(2, "<p>tail final</p>")], []));
+  await vue.nextTick();
+  expect(readTail!()).toBe(null);
+  expect(tailOpenBlockId(client.getSnapshot())).toBe(null);
+  expect(root.children[0]).toBe(committedNode); // committed body never churns
 
   app.unmount();
 });
