@@ -4,6 +4,26 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.16.2 — 2026-06-26
+
+### Fixed
+
+- **Retryable WASM init.** A transient failure fetching the `.wasm` asset (web
+  path) no longer poisons every subsequent `initFlux()` / `renderToString()` —
+  the cached rejected promise is dropped so the next call retries.
+- **Defensive `blockData` guards.** A malformed/drifted keyed-list `items` field
+  or table `rows`/`aligns`/`headers` now falls back to the full-HTML render path
+  instead of crashing the streaming render. The start-only ordered-list
+  renumber path is unaffected.
+
+### Changed
+
+- `<flux-markdown>` stream-failure logging now logs only the error *message*,
+  not the raw `src` URL or the full error object (avoids a console forwarder
+  shipping a tokenized URL / bulky error body to monitoring).
+- Micro-perf: memoized the components normalization and hoisted `parseOpenTag`'s
+  single-char regexes to module scope on the React render path.
+
 ## 0.16.1 — 2026-06-25
 
 ### Fixed
