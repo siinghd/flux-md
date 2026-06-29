@@ -4,6 +4,23 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.18.3 — 2026-06-29
+
+### Fixed
+
+- **Nested bullets flattened mid-stream (a visible list reflow).** While
+  streaming a *loose* outer list (items separated by a blank line) whose items
+  contain indented nested sub-bullets, the incremental list fast path treated a
+  2-space-indented sub-bullet marker as a top-level **sibling** (it accepted any
+  marker within `edge + 3` columns). So the moment the outer list's second item
+  began streaming, the first item's nested `<ul>` **collapsed into flat top-level
+  items**, then re-nested at finalize — a jarring "indentation disappears then
+  comes back" flicker. The sibling test now uses the first item's content column,
+  so a marker at or past it correctly nests (the cache bails to the full reparse,
+  which renders the nesting). Streamed output now matches a one-shot parse at
+  **every prefix**; the only remaining list change while streaming is the
+  inherent tight→loose spacing, which a non-streaming parser shows too.
+
 ## 0.18.2 — 2026-06-29
 
 ### Fixed

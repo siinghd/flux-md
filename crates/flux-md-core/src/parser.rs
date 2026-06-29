@@ -490,9 +490,14 @@ struct ListCache {
     /// Marker family + delimiter (`b'-'`/`b'*'`/`b'+'` for bullets,
     /// `b'.'`/`b')'` for ordered). A sibling must match.
     delim: u8,
-    /// `marker_indent` of the first item — siblings must have
-    /// `marker_indent <= edge + 3` (CommonMark §5.2).
+    /// `marker_indent` of the first item (the list's left edge).
     edge: usize,
+    /// `content_indent` of the first item — the column where its content starts.
+    /// A later marker is a SIBLING only if `marker_indent < content_indent`; a
+    /// marker at or past the content column begins a NESTED sub-list, which this
+    /// flat-list cache can't render — so it bails to the full reparse instead of
+    /// flattening the sub-list (CommonMark §5.2 / §5.3).
+    content_indent: usize,
     /// `<ul>` / `<ol start=N>` opener + `\n`, frozen at arm time. Kept separate
     /// from item HTML so the tight→loose rebuild only touches items.
     opener_html: String,
@@ -2220,11 +2225,15 @@ impl StreamParser {
         // the full path).
         let opts = self.build_inline_opts(&self.buffer[cache.start..end]);
 
-        // Helper: a marker line `line` qualifies as a sibling of this list.
+        // Helper: a marker line `line` qualifies as a SIBLING of this list. A
+        // marker indented to/past the first item's content column nests a
+        // sub-list (it is NOT a sibling) — returning false there makes the caller
+        // bail to the full reparse, which renders the nesting correctly. Using
+        // `<= edge + 3` here flattened 2-space-indented sub-bullets into siblings.
         let sibling_match = |m: &MarkerScan, cache: &ListCache| {
             m.ordered == cache.ordered
                 && m.delim == cache.delim
-                && m.marker_indent <= cache.edge + 3
+                && m.marker_indent < cache.content_indent
         };
 
         // Fold every newly-complete sibling line into `cached_prefix`. Any
@@ -2966,6 +2975,7 @@ fn build_list_cache(
         start_num: list_start_num,
         delim: m.delim,
         edge: m.marker_indent,
+        content_indent: m.content_indent,
         opener_html,
         cached_prefix,
         lines_upto: start,

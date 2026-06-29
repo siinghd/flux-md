@@ -524,3 +524,18 @@ fn test_backslash_artifact_in_paren_math() {
         println!("No trailing backslash artifact detected");
     }
 }
+
+#[test]
+fn nested_list_does_not_flatten_when_outer_goes_loose() {
+    // Regression: the list-cache fast path treated a 2-space-indented sub-bullet
+    // as a top-level SIBLING (`marker_indent <= edge + 3`), so the moment a loose
+    // outer list's second item appeared, the first item's nested sub-bullets
+    // FLATTENED into top-level items mid-stream (a visible "indentation vanishes
+    // then comes back" reflow). The sibling test now uses the first item's
+    // content column, so a marker at/past it nests (cache bails to the full path).
+    assert_parity("- **A:**\n  - x1\n  - x2\n\n- **B"); // 2nd item incomplete — the exact trigger
+    assert_parity("- **A:**\n  - x1\n  - x2\n\n- **B:**\n  - y1\n  - y2\n");
+    assert_parity("- a\n  - nested\n\n- b\n"); // minimal loose-outer + nested
+    assert_parity("1. top\n   1. nested\n   2. nested2\n\n2. second\n"); // ordered, 3-space content col
+    assert_parity("- one\n  - sub a\n  - sub b\n  - sub c\n\n- two\n  - sub d\n"); // the user's shape
+}

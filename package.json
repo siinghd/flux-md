@@ -1,7 +1,7 @@
 {
   "name": "md-streamer",
   "private": true,
-  "version": "0.18.2",
+  "version": "0.18.3",
   "workspaces": ["packages/*", "web"],
   "scripts": {
     "build:wasm": "cd crates/flux-md-core && RUSTUP_TOOLCHAIN=nightly CARGO_UNSTABLE_BUILD_STD=std,panic_abort RUSTFLAGS='-Zunstable-options -Cpanic=immediate-abort -C link-arg=-zstack-size=262144' wasm-pack build --target web --release --out-dir ../../packages/flux-md/src/wasm && rm -f ../../packages/flux-md/src/wasm/.gitignore ../../packages/flux-md/src/wasm/package.json",
