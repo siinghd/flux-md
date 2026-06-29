@@ -68,6 +68,38 @@ fn dangerous_image_schemes_are_neutralized() {
     }
 }
 
+/// Script-capable `data:` media types (svg+xml, xhtml+xml, xml) must not
+/// render as a live LINK href / autolink / component URL attribute — a browser
+/// navigating to them executes their script. The inert IMAGE path keeps its
+/// own `data:image/` allowlist (`<img src=data:image/svg+xml>` can't run
+/// script), so that one is verified to still pass through.
+#[test]
+fn scriptable_data_links_are_neutralized() {
+    // Space-free destinations (the real vector — a link/autolink URL cannot
+    // contain spaces, so attackers base64/percent-encode the payload).
+    let attacks = [
+        "data:image/svg+xml;base64,PHN2Zz4=",
+        "data:application/xhtml+xml;base64,PGh0bWw+",
+        "data:text/xml;base64,PHgvPg==",
+        "data:application/xml;base64,PHgvPg==",
+        "data:application/javascript;base64,YWxlcnQoMSk=",
+    ];
+    for a in attacks {
+        // Regular link.
+        let out = render(&format!("[x]({a})\n"));
+        assert!(out.contains("href=\"#\""), "link data: not blocked for {a:?}: {out}");
+        assert!(!out.contains("href=\"data:"), "link data: leaked for {a:?}: {out}");
+        // URI autolink.
+        let out = render(&format!("<{a}>\n"));
+        assert!(!out.contains("href=\"data:"), "autolink data: leaked for {a:?}: {out}");
+    }
+    // Carve-out: inline SVG/raster IMAGES via data: are inert and still render.
+    assert!(
+        render("![x](data:image/svg+xml;base64,PHN2Zz4=)\n").contains("src=\"data:image/svg+xml;base64,PHN2Zz4=\""),
+        "data:image/svg+xml must still work as an <img src>",
+    );
+}
+
 /// Legitimate URLs must still render (the fix must not over-block).
 #[test]
 fn legitimate_urls_still_render() {

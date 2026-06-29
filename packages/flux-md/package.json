@@ -1,6 +1,6 @@
 {
   "name": "flux-md",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "Zero-dep streaming markdown for the browser. Rust→WASM core, Web Worker per stream, incremental parse with speculative closure.",
   "type": "module",
   "sideEffects": ["./dist/worker.js", "./dist/styles.css"],
@@ -11,6 +11,7 @@
     "./client": { "types": "./dist/client.d.ts", "import": "./dist/client.js" },
     "./react": { "types": "./dist/react.d.ts", "import": "./dist/react.js" },
     "./server": { "types": "./dist/server.d.ts", "import": "./dist/server.js" },
+    "./server/react": { "types": "./dist/server-react.d.ts", "import": "./dist/server-react.js" },
     "./dom": { "types": "./dist/dom.d.ts", "import": "./dist/dom.js" },
     "./element": { "types": "./dist/element.d.ts", "import": "./dist/element.js" },
     "./vue": { "types": "./dist/vue.d.ts", "import": "./dist/vue.js" },
@@ -23,7 +24,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "peerDependencies": {
     "react": ">=18",

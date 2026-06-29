@@ -365,10 +365,14 @@ export interface ParserConfig {
 // (the worker pool). `ready` is the exception — it's worker-level (WASM loaded),
 // not stream-level. The first message for a stream may carry `config`, applied
 // when that stream's parser is created.
+// `epoch` is a per-stream generation counter the client bumps on reset(): the
+// worker echoes the current epoch on every patch so the client can DROP a patch
+// that was produced for content from before the reset (an in-flight patch racing
+// a reset() would otherwise repopulate the just-cleared store with ghost blocks).
 export type ToWorker =
-  | { type: "append"; streamId: number; chunk: string; config?: ParserConfig }
-  | { type: "finalize"; streamId: number; config?: ParserConfig }
-  | { type: "reset"; streamId: number }
+  | { type: "append"; streamId: number; chunk: string; config?: ParserConfig; epoch?: number }
+  | { type: "finalize"; streamId: number; config?: ParserConfig; epoch?: number }
+  | { type: "reset"; streamId: number; epoch?: number }
   | { type: "dispose"; streamId: number };
 
 export type FromWorker =
@@ -383,6 +387,13 @@ export type FromWorker =
       parseMicros: number;
       retainedBytes: number;
       wasmMemoryBytes: number;
+      // True only on the terminal patch emitted by finalize(). The client flushes
+      // it synchronously even under rAF coalescing, regardless of how many append
+      // patches preceded it — `final` rides the message so the sync flush binds to
+      // the ACTUAL terminal patch, not whichever patch happens to arrive first.
+      final?: boolean;
+      // The stream generation this patch belongs to (see ToWorker.epoch).
+      epoch?: number;
     }
   // `fatal` marks a worker-level failure (WASM init) that dooms every stream on
   // the worker — not a single parse error. It carries no meaningful streamId.

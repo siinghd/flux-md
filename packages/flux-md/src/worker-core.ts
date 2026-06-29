@@ -47,6 +47,11 @@ export class WorkerCore {
   private pending = new Map<number, string>();
   private totalAppended = new Map<number, number>();
   private finalizePending = new Set<number>();
+  // Per-stream generation, echoed on emitted patches so the client can drop a
+  // patch produced before a reset (see FromWorker.epoch). A microtask flush
+  // drains `pending` between messages, so the epoch at emit time is always the
+  // epoch the buffered input was appended under.
+  private epochs = new Map<number, number>();
   private flushScheduled = false;
   private ready = false;
 
@@ -59,6 +64,10 @@ export class WorkerCore {
     // it arrives before the parser is created in flush/finalize).
     if ((msg.type === "append" || msg.type === "finalize") && msg.config) {
       this.config.set(id, msg.config);
+    }
+    // Track the stream generation carried on append/finalize/reset.
+    if (msg.type !== "dispose" && msg.epoch !== undefined) {
+      this.epochs.set(id, msg.epoch);
     }
     switch (msg.type) {
       case "append":
@@ -74,7 +83,9 @@ export class WorkerCore {
       case "reset":
         // Free and recreate lazily on the next append — same stream id, **same
         // config** (kept). The client resets its local state synchronously.
-        this.parsers.get(id)?.free();
+        // free() is a WASM call: if the instance was poisoned by an earlier trap
+        // it can throw, so guard it — a reset must never throw out of the loop.
+        this.safeFree(id);
         this.parsers.delete(id);
         this.pending.delete(id);
         this.finalizePending.delete(id); // a reset cancels a not-yet-run early finalize
@@ -109,15 +120,32 @@ export class WorkerCore {
   }
 
   private dispose(streamId: number): void {
-    this.parsers.get(streamId)?.free();
+    this.safeFree(streamId); // guarded: a poisoned instance can throw on free()
     this.parsers.delete(streamId);
     this.config.delete(streamId);
     this.pending.delete(streamId);
     this.finalizePending.delete(streamId);
     this.totalAppended.delete(streamId);
+    this.epochs.delete(streamId);
   }
 
-  private emitPatch(streamId: number, patch: string, parser: ParserLike, parseMicros: number): void {
+  /** free() a stream's parser, swallowing a throw from a poisoned WASM instance
+   *  so teardown can never escape the message loop. */
+  private safeFree(streamId: number): void {
+    try {
+      this.parsers.get(streamId)?.free();
+    } catch {
+      /* instance already trapped/poisoned — nothing to reclaim */
+    }
+  }
+
+  private emitPatch(
+    streamId: number,
+    patch: string,
+    parser: ParserLike,
+    parseMicros: number,
+    final: boolean,
+  ): void {
     this.deps.post({
       type: "patch",
       streamId,
@@ -126,6 +154,8 @@ export class WorkerCore {
       parseMicros,
       retainedBytes: parser.retainedBytes(),
       wasmMemoryBytes: this.deps.memBytes(),
+      final,
+      epoch: this.epochs.get(streamId),
     });
   }
 
@@ -151,9 +181,9 @@ export class WorkerCore {
         const patch = parser.append(chunk);
         const dt = (performance.now() - t0) * 1000;
         this.totalAppended.set(streamId, (this.totalAppended.get(streamId) ?? 0) + chunk.length);
-        this.emitPatch(streamId, patch, parser, dt);
+        this.emitPatch(streamId, patch, parser, dt, false);
       } catch (e: unknown) {
-        this.deps.post({ type: "error", streamId, message: e instanceof Error ? e.message : String(e) });
+        this.postParseError(streamId, e);
       }
     }
   }
@@ -170,9 +200,27 @@ export class WorkerCore {
         this.totalAppended.set(streamId, (this.totalAppended.get(streamId) ?? 0) + buffered.length);
       }
       const patch = parser.finalize();
-      this.emitPatch(streamId, patch, parser, 0);
+      this.emitPatch(streamId, patch, parser, 0, true);
     } catch (e: unknown) {
-      this.deps.post({ type: "error", streamId, message: e instanceof Error ? e.message : String(e) });
+      this.postParseError(streamId, e);
     }
+  }
+
+  // A WASM trap (stack overflow / unreachable / OOM) throws a
+  // WebAssembly.RuntimeError and POISONS the singleton instance shared by every
+  // stream on this worker — so it is escalated to `fatal`, which the pool treats
+  // as a worker-level failure (eviction + terminate). A plain Error (e.g. a
+  // parser-construction failure) stays a recoverable per-stream error.
+  private postParseError(streamId: number, e: unknown): void {
+    const fatal =
+      typeof WebAssembly !== "undefined" &&
+      typeof WebAssembly.RuntimeError === "function" &&
+      e instanceof WebAssembly.RuntimeError;
+    this.deps.post({
+      type: "error",
+      streamId,
+      message: e instanceof Error ? e.message : String(e),
+      fatal,
+    });
   }
 }

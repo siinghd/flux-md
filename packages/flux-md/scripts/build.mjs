@@ -174,6 +174,19 @@ assert(read("worker.js").includes("./wasm/flux_md_core_bg.wasm"), "worker wasm r
 assert(!/\bfrom\s*["']\.\/(client|react|hi|html-to-react)["']/.test(read("index.js")),
   "index.js still has an extensionless relative import");
 
+// flux-md/server is the documented React-FREE entry — a non-React consumer must
+// be able to import renderToString/parseToBlocks/initFlux without react installed.
+// An eager `react` import here (directly, or transitively via ./react.js /
+// ./html-to-react.js) would break that, so fail the build if one reappears. The
+// React server component lives in dist/server-react.js (flux-md/server/react).
+assert(statSync(path.join(distDir, "server.js")).isFile(), "dist/server.js missing");
+assert(statSync(path.join(distDir, "server-react.js")).isFile(), "dist/server-react.js missing");
+const serverJs = read("server.js");
+assert(!/\bfrom\s*["']react(\/|["'])/.test(serverJs), "dist/server.js imports react (must stay React-free)");
+assert(!/\bfrom\s*["']\.\/(react|html-to-react)\.js["']/.test(serverJs),
+  "dist/server.js imports ./react or ./html-to-react (pulls react transitively — must stay React-free)");
+assert(/\bfrom\s*["']react["']/.test(read("server-react.js")), "dist/server-react.js should import react");
+
 // FAIL-LOUD coverage for the regex-vs-parser gaps (the post-process is the only
 // thing standing between source and a broken Node-ESM dist). Re-scan the FINAL
 // dist and throw on anything the rewriter could have silently missed:

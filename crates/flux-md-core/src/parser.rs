@@ -1046,18 +1046,50 @@ impl StreamParser {
         let commit_all = finalizing
             || (buffer_ends_blank && !last_is_open_fence && !last_is_resumable_container);
         let n = renderable.len();
+        let final_line_start = tail.rfind('\n').map_or(0, |i| i + 1);
+        // A block whose start sits on the buffer's still-growing FINAL line (no
+        // terminating newline yet) is only PROVISIONALLY classified: `#x`, `</p`,
+        // or a lone `*` look like a Heading / type-6 HTML block / new list bullet
+        // now, but dissolve into a lazy continuation of the previous block once
+        // the line completes (`#hashtag`, `</pre>`, `*emph*`). Committing the
+        // block BEFORE such a transient would freeze a split the FINALIZED
+        // one-shot parse never makes. Bounded: it clears the moment any `\n`
+        // arrives. (The Paragraph guard below is the special case where the
+        // provisional block already classifies as a Paragraph; this generalizes
+        // it to Heading/HtmlBlock/List/… block starts.)
+        let last_starts_final_line = !finalizing
+            && n >= 2
+            && tail_start + renderable[n - 1].range.end == self.buffer.len()
+            && !self.buffer.ends_with('\n')
+            && !self.buffer.ends_with('\r')
+            && renderable[n - 1].range.start >= final_line_start;
+        // …and the line just before that final line must be non-blank, so the
+        // final line can actually be a lazy continuation of it. A blank line
+        // closes the previous block (`para\n\n#x` is two real paragraphs), and
+        // holding `para` back across it would re-scan it every append — O(n²).
+        let prev_line_nonblank = final_line_start > 0 && {
+            let before = &tail[..final_line_start - 1];
+            let prev_start = before.rfind('\n').map_or(0, |i| i + 1);
+            !before[prev_start..].trim().is_empty()
+        };
         let to_commit = if produced.is_empty() {
             0
         } else if commit_all {
             produced.len()
         } else if n >= 2
-            && matches!(renderable[n - 1].kind, RawBlockKind::Paragraph)
-            && is_resumable(&renderable[n - 2].kind)
+            && ((matches!(renderable[n - 1].kind, RawBlockKind::Paragraph)
+                && is_resumable(&renderable[n - 2].kind))
+                || (last_starts_final_line
+                    && prev_line_nonblank
+                    && (matches!(renderable[n - 2].kind, RawBlockKind::Paragraph)
+                        || is_resumable(&renderable[n - 2].kind))))
         {
             // A resumable container immediately followed by a paragraph may
             // still be mid-parse — the "paragraph" could be a partial list
             // marker or a lazy continuation that merges back into the
-            // container once more bytes arrive. Keep both uncommitted.
+            // container once more bytes arrive — OR the trailing block is a
+            // provisional marker on the unterminated final line that may lazily
+            // continue a continuable penultimate. Keep both uncommitted.
             n - 2
         } else {
             produced.len() - 1

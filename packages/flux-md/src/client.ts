@@ -235,6 +235,19 @@ export class FluxPool {
         }
       }
       for (const sid of pw.streamIds) this.dispatch(sid, msg);
+      // Evict the dead worker: terminate it and drop it from the pool. A fatally
+      // failed worker (WASM-init failure, or a trap that poisoned the shared
+      // instance) can never parse again, so retaining it would (a) leak an OS
+      // thread per failure and (b) keep counting against `cap` — once `cap`
+      // failures accumulate, pick()'s cap branch dies and it spawns workers
+      // unbounded. Reaping it restores the cap and lets a fresh worker be made.
+      try {
+        pw.worker.terminate();
+      } catch {
+        /* already gone */
+      }
+      const idx = this.workers.indexOf(pw);
+      if (idx !== -1) this.workers.splice(idx, 1);
       return;
     }
     this.dispatch(msg.streamId, msg);
@@ -327,8 +340,13 @@ export class FluxClient {
   private coalesce = false;
   private rafHandle: number | null = null;
   // Set by finalize(); the next patch's emit flushes synchronously (a 'done'
-  // notification must not be deferred a frame) and clears it.
+  // notification must not be deferred a frame) and clears it. Belt-and-suspenders
+  // alongside the per-patch `final` flag, which is the authoritative signal.
   private finalizePending = false;
+  // Stream generation, bumped on reset(). Stamped on every worker message and
+  // echoed back on each patch; a patch whose epoch is older than this is a
+  // pre-reset straggler and is dropped before it can repopulate the cleared store.
+  private epoch = 0;
 
   // Perf
   private appendedBytes = 0;
@@ -397,7 +415,12 @@ export class FluxClient {
    * multiplexing (pick() is unchanged and remains the only path to create()).
    */
   private ensureAcquired(): PoolWorker {
-    if (this.pw) return this.pw;
+    if (this.pw && !this.pw.failed) return this.pw;
+    // A previously-acquired worker that failed fatally (WASM-init failure or a
+    // trap that poisoned the shared instance) was evicted from the pool; drop the
+    // stale reference and re-acquire so this stream can recover onto a fresh
+    // worker (the caller already received the fatal onError).
+    this.pw = null;
     const { streamId, pw } = this.pool.acquire((msg) => this.onMessage(msg));
     this.streamId = streamId;
     this.pw = pw;
@@ -425,7 +448,7 @@ export class FluxClient {
   append(chunk: string) {
     const pw = this.ensureAcquired();
     if (this.firstAppendMs === 0) this.firstAppendMs = performance.now();
-    this.pool.send(pw, { type: "append", streamId: this.streamId, chunk, config: this.firstConfig() });
+    this.pool.send(pw, { type: "append", streamId: this.streamId, chunk, config: this.firstConfig(), epoch: this.epoch });
   }
 
   finalize() {
@@ -433,7 +456,7 @@ export class FluxClient {
     // The terminal patch this triggers must reach subscribers synchronously, not
     // a frame late — mark it so the next emit flushes now even under coalescing.
     this.finalizePending = true;
-    this.pool.send(pw, { type: "finalize", streamId: this.streamId, config: this.firstConfig() });
+    this.pool.send(pw, { type: "finalize", streamId: this.streamId, config: this.firstConfig(), epoch: this.epoch });
   }
 
   /**
@@ -574,9 +597,13 @@ export class FluxClient {
     // it can't fire a notify referencing content reset() just dropped.
     this.cancelFrame();
     this.finalizePending = false;
+    // Bump the generation: any patch the worker already emitted for the content
+    // we just cleared is now a straggler and will be dropped on arrival (it would
+    // otherwise re-add ghost blocks to the empty store).
+    this.epoch += 1;
     // Same streamId + worker — the worker frees and lazily recreates the parser.
     const pw = this.ensureAcquired();
-    this.pool.send(pw, { type: "reset", streamId: this.streamId });
+    this.pool.send(pw, { type: "reset", streamId: this.streamId, epoch: this.epoch });
     if (hadContent) this.emit(true); // clear-the-view notify is synchronous
   }
 
@@ -718,6 +745,10 @@ export class FluxClient {
         // parse it once here on the main thread. A malformed patch must surface
         // via onError, not throw inside the message handler (which would break the
         // pool's dispatch loop for every stream on the worker).
+        // Drop a straggler patch produced before the latest reset(): applying it
+        // would repopulate the just-cleared store with ghost blocks. (epoch is
+        // absent only from a pre-epoch fake message in tests → never dropped.)
+        if (msg.epoch !== undefined && msg.epoch < this.epoch) break;
         let patch: Patch;
         try {
           patch = JSON.parse(msg.patch) as Patch;
@@ -736,8 +767,11 @@ export class FluxClient {
         this.patchCount += 1;
         this.lastPatchMs = performance.now();
         // The post-finalize (done) patch must notify synchronously — never defer
-        // stream completion to the next frame. One-shot: cleared after use.
-        const sync = this.finalizePending;
+        // stream completion to the next frame. `msg.final` tags the ACTUAL
+        // terminal patch at its source, so the sync flush binds to it regardless
+        // of how many append patches preceded it (the one-shot `finalizePending`
+        // alone could be consumed by an earlier in-flight append patch).
+        const sync = this.finalizePending || msg.final === true;
         this.finalizePending = false;
         this.emit(sync);
         // After subscribers see the new snapshot, fire the per-block hook for

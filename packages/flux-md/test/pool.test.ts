@@ -464,3 +464,51 @@ test("warm() on a pool whose only worker died fatally builds a fresh one", () =>
   pool.warm(); // must not hand back the dead worker
   expect(created.length).toBe(2);
 });
+
+test("a fatally-failed worker is terminated and reaped, so repeated failures never bypass the cap", () => {
+  const { pool, created } = makePool(2);
+  // Each failure must terminate + drop the worker (not retain it). Without
+  // reaping, failed workers accumulate, `cap` is exceeded, and the pool spawns a
+  // new Worker per stream forever.
+  for (let i = 0; i < 5; i++) {
+    pool.acquire(() => {});
+    const w = created[created.length - 1];
+    w.fire({ type: "error", streamId: -1, message: "dead", fatal: true });
+    expect(w.terminated).toBe(true); // evicted
+    expect(pool.workerCount).toBe(0); // reaped — not leaked
+  }
+  expect(created.length).toBe(5); // 5 distinct workers made, each reaped
+  expect(pool.workerCount).toBe(0);
+});
+
+test("reset() drops a straggler patch from the previous generation (no ghost blocks)", () => {
+  const { pool, created } = makePool(1);
+  const c = new FluxClient({ pool });
+  c.append("a"); // acquire worker + stream id (epoch 0)
+  const w = created[0];
+  const sid = (w.sent.find((m) => m.type === "append") as { streamId: number }).streamId;
+  const mkPatch = (epoch: number, id: number, html: string): FromWorker => ({
+    type: "patch",
+    streamId: sid,
+    patch: JSON.stringify({
+      newly_committed: [{ id, kind: { type: "Paragraph" }, start: 0, end: html.length, html, open: false, speculative: false }],
+      active: [],
+    }),
+    appendedBytes: 0, parseMicros: 0, retainedBytes: 0, wasmMemoryBytes: 0, epoch,
+  });
+
+  w.fire(mkPatch(0, 0, "<p>old</p>"));
+  expect(c.getSnapshot().length).toBe(1);
+
+  c.reset(); // clears the store and bumps the generation → epoch 1
+  expect(c.getSnapshot().length).toBe(0);
+
+  // A patch the worker emitted for the PRE-reset content (epoch 0), still in
+  // flight when reset() ran, must be dropped — not re-added as a ghost block.
+  w.fire(mkPatch(0, 1, "<p>ghost</p>"));
+  expect(c.getSnapshot().length).toBe(0);
+
+  // A patch from the new generation applies normally.
+  w.fire(mkPatch(1, 0, "<p>new</p>"));
+  expect(c.getSnapshot().map((b) => b.html)).toEqual(["<p>new</p>"]);
+});

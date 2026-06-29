@@ -871,7 +871,7 @@ fn try_autolink(bytes: &[u8], start: usize, out: &mut String) -> Option<usize> {
         // dangerous-scheme filter as regular links so the href becomes `#`. The
         // visible link TEXT below is unaffected (still HTML-escaped verbatim).
         let decoded = crate::url::decode_text(s);
-        if crate::url::is_dangerous_scheme(&decoded) {
+        if crate::url::is_dangerous_href_scheme(&decoded) {
             out.push('#');
         } else {
             // Backslash escapes are NOT processed in autolinks; percent-encode

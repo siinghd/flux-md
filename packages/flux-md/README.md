@@ -25,8 +25,10 @@ constructs Web Workers). For **server-side / static rendering of finished
 content** — SSR, React Server Components, build steps — use the worker-free,
 synchronous [`flux-md/server`](#server-side-rendering) entry. The framework packages — `react`,
 `vue`, `svelte`, `solid-js` — are all **optional** peer dependencies; you only
-need the one whose binding you import. The core (`flux-md`, `flux-md/client`,
-`flux-md/dom`, `flux-md/element`) needs none.
+need the one whose binding you import. The framework-free entries
+(`flux-md/client`, `flux-md/dom`, `flux-md/element`, and `flux-md/server`) need
+none. (The bare `flux-md` entry re-exports the React component surface, so it
+pulls `react` — import from `flux-md/client` if you want a framework-free core.)
 
 > **Vite — one-line config.** Vite's dependency pre-bundling (esbuild) hoists
 > the wasm-bindgen glue into `.vite/deps/`, which breaks the relative
@@ -44,43 +46,35 @@ need the one whose binding you import. The core (`flux-md`, `flux-md/client`,
 
 <a id="nextjs"></a>
 
-> **Next.js (App Router) — two requirements.** Verified on **Next.js 16** with
-> **Turbopack** (the default for both `next dev` and `next build`). The same two
-> requirements apply under webpack. Because flux-md ships TypeScript source:
+> **Next.js (App Router) — one requirement.** Works on **Next.js** with
+> **Turbopack** (the default for both `next dev` and `next build`) or webpack.
+> Since 0.17.0 flux-md ships **compiled ESM**, so **no `transpilePackages` or
+> other build config is needed** — earlier versions required it only because the
+> package shipped raw TypeScript, which Next does not compile inside
+> `node_modules`. That no longer applies.
 >
-> 1. **Transpile the package.** Next does not compile `node_modules` TypeScript
->    by default — without this, Turbopack errors with *"Unknown module type"* on
->    `react.tsx`. Add flux-md to `transpilePackages`:
+> **Use it from a Client Component.** `<FluxMarkdown>` uses React hooks (and
+> spawns a Web Worker on mount), so it must carry `"use client"` — it can't be
+> a Server Component. (It is still SSR-safe: on the server it renders an empty
+> shell and only starts streaming after hydration, so there's no SSR crash —
+> the constraint is hooks, not the worker.)
 >
->    ```ts
->    // next.config.ts
->    import type { NextConfig } from "next";
->    const nextConfig: NextConfig = { transpilePackages: ["flux-md"] };
->    export default nextConfig;
->    ```
+> ```tsx
+> "use client";
+> import { FluxMarkdown } from "flux-md/react";
 >
-> 2. **Use it from a Client Component.** `<FluxMarkdown>` uses React hooks (and
->    spawns a Web Worker on mount), so it must carry `"use client"` — it can't be
->    a Server Component. (It is still SSR-safe: on the server it renders an empty
->    shell and only starts streaming after hydration, so there's no SSR crash —
->    the constraint is hooks, not the worker.)
+> export default function Answer({ stream }: { stream: AsyncIterable<string> }) {
+>   return <FluxMarkdown stream={stream} />;
+> }
+> ```
 >
->    ```tsx
->    "use client";
->    import { FluxMarkdown } from "flux-md/react";
->
->    export default function Answer({ stream }: { stream: AsyncIterable<string> }) {
->      return <FluxMarkdown stream={stream} />;
->    }
->    ```
->
->    **Create the `stream` in Client Component code, not in a Server Component.**
->    A `Response` / `ReadableStream` / `AsyncIterable` isn't serializable, so it
->    can't be passed as a prop from a Server Component (e.g. `page.tsx`) — that
->    throws *"Only plain objects can be passed to Client Components."* Pass a
->    serializable prop (a URL, the chat messages) from the server and open the
->    stream on the client — e.g. `stream={await fetch("/api/chat")}` from a client
->    effect, or the `useFluxStream` hook (see [Quick start](#quick-start)).
+> **Create the `stream` in Client Component code, not in a Server Component.**
+> A `Response` / `ReadableStream` / `AsyncIterable` isn't serializable, so it
+> can't be passed as a prop from a Server Component (e.g. `page.tsx`) — that
+> throws *"Only plain objects can be passed to Client Components."* Pass a
+> serializable prop (a URL, the chat messages) from the server and open the
+> stream on the client — e.g. `stream={await fetch("/api/chat")}` from a client
+> effect, or the `useFluxStream` hook (see [Quick start](#quick-start)).
 >
 > That's it — Turbopack bundles the worker and emits the `.wasm` to
 > `_next/static/media` itself, so no extra asset/loader config is needed (and the
@@ -427,12 +421,15 @@ const html = renderToString("# Hello\n\n**world**");   // sync HTML string, no w
 ```
 
 For React server rendering (RSC, static generation, or SSR), use
-`<FluxMarkdownStatic>` — a hookless, RSC-safe component that renders finished
-content with the same `components` overrides (inline/block component tags
-dispatch on the server too):
+`<FluxMarkdownStatic>` from **`flux-md/server/react`** — a hookless, RSC-safe
+component that renders finished content with the same `components` overrides
+(inline/block component tags dispatch on the server too). It lives in its own
+subpath so the core `flux-md/server` above stays importable with no `react`
+installed:
 
 ```tsx
-import { initFlux, FluxMarkdownStatic } from "flux-md/server";
+import { initFlux } from "flux-md/server";
+import { FluxMarkdownStatic } from "flux-md/server/react";
 
 await initFlux();
 export default function Doc({ md }: { md: string }) {
@@ -451,10 +448,11 @@ export default function Doc({ md }: { md: string }) {
   bundler-resolved asset. On edge runtimes pass bytes yourself:
   `initFluxSync(wasmBytes)`.
 - **`renderToString(md, { config })`** — synchronous HTML string, **zero React
-  dependency**.
+  dependency** (imports cleanly with no `react` installed).
 - **`parseToBlocks(md, { config })`** — the block array, for custom rendering.
-- **`<FluxMarkdownStatic content config components />`** — synchronous React tree
-  for **render-once** contexts; render it with your framework's server renderer
+- **`<FluxMarkdownStatic content config components />`** (from
+  `flux-md/server/react`) — synchronous React tree for **render-once** contexts;
+  render it with your framework's server renderer
   (`renderToStaticMarkup`, RSC, …). For live streaming, client-side code
   highlighting, or Mermaid, render `<FluxMarkdown>` on the client instead — it's a
   separate component. (If you SSR-then-hydrate, use the *same* component on both
@@ -1161,7 +1159,7 @@ re-snapping during streaming, so treat smooth following there as best-effort.
 │              microtask, calls WASM   │
 └──┬──── ffi ───────────────────────────┘
    ▼
-┌── Rust → WASM (~150 KB after opt) ────┐
+┌── Rust → WASM (~170 KB after opt) ────┐
 │  StreamParser:                        │
 │    buffer: append-only                │
 │    committed_offset                   │

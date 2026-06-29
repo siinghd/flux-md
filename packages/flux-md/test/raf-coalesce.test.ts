@@ -165,6 +165,43 @@ test("DONE-FLUSHES-SYNC: after finalize(), the terminal patch notifies synchrono
   }
 });
 
+test("DONE-FLUSHES-SYNC even when an append patch precedes the terminal patch (the `final` flag binds the sync flush to the real terminal patch)", () => {
+  const raf = installFakeRaf();
+  try {
+    const { client, created } = setup(true);
+    const { sid, w } = wire(client, created);
+
+    let lastHtml = "";
+    client.subscribe(() => {
+      lastHtml = client.getSnapshot()[0]?.html ?? "";
+    });
+
+    // Real async order when append()+finalize() are issued in one task: the
+    // worker emits the (still-open) APPEND patch first, then the terminal
+    // finalize patch. The append patch must NOT steal the synchronous-completion
+    // signal — that's what the one-shot finalizePending flag did, deferring the
+    // actual terminal patch a frame.
+    client.finalize();
+    firePatch(w, sid, { newly_committed: [], active: [blk(1, "<p>stream</p>", true)] }); // intermediate, no `final`
+    w.fire({
+      type: "patch",
+      streamId: sid,
+      patch: JSON.stringify({ newly_committed: [blk(1, "<p>stream done</p>")], active: [] }),
+      appendedBytes: 0, parseMicros: 0, retainedBytes: 0, wasmMemoryBytes: 0,
+      final: true, // tagged at the source by worker-core.doFinalize()
+    });
+
+    // The terminal committed state was delivered SYNCHRONOUSLY — not parked in a frame.
+    expect(lastHtml).toBe("<p>stream done</p>");
+    expect(client.getSnapshot()[0].html).toBe("<p>stream done</p>");
+    expect(raf.pendingCount()).toBe(0);
+    raf.drain(); // nothing deferred to deliver
+    expect(client.getSnapshot()[0].html).toBe("<p>stream done</p>");
+  } finally {
+    raf.restore();
+  }
+});
+
 // --------------------------------------------------------------------------
 // RESET-CANCELS-FRAME — reset() drops a pending coalesced frame
 // --------------------------------------------------------------------------

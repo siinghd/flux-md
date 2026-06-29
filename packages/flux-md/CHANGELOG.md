@@ -4,6 +4,96 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.18.0 — 2026-06-29
+
+### Added
+
+- **`flux-md/server/react` subpath.** Exports `FluxMarkdownStatic` (the hookless
+  RSC / SSR React component), moved here from `flux-md/server` so that the core
+  server entry stays React-free (see Changed).
+
+### Changed
+
+- **`FluxMarkdownStatic` moved from `flux-md/server` to `flux-md/server/react`.**
+  `flux-md/server` (`initFlux` / `initFluxSync` / `isFluxReady` / `parseToBlocks`
+  / `renderToString`) is now genuinely **React-free**: it imports no framework, so
+  a non-React build step or a Vue/Svelte SSR app can
+  `import { renderToString } from "flux-md/server"` even when `react` is not
+  installed. (Previously the entry failed to load without `react`, because the
+  component pulled it in eagerly — contradicting the "zero React dependency"
+  promise.) Update RSC/SSR imports to
+  `import { FluxMarkdownStatic } from "flux-md/server/react"`.
+
+### Fixed
+
+- **Streaming finalize divergence (correctness).** A document streamed
+  char-by-char could finalize to different HTML than the same bytes parsed in one
+  shot, when the still-growing final line transiently looked like a block start
+  (`#…`, `</p…`, a lone `*` / `-`) and then completed into a lazy continuation of
+  the previous block (`#hashtag`, `</pre>`, `*emph*`). The penultimate block was
+  committed too early and frozen, permanently splitting a block the one-shot parse
+  keeps whole. The streaming commit boundary now keeps the penultimate block
+  speculative across such a provisional final line.
+- **Coalesced completion deferred a frame.** Under the React hooks' rAF
+  coalescing (default since 0.17.0), the terminal `finalize()` patch could be
+  delivered one frame late — its synchronous-flush signal was consumed by an
+  earlier in-flight append patch — briefly showing a finished code block without
+  its highlight / copy button. The terminal patch is now tagged `final` at the
+  worker, so the sync flush binds to it regardless of how many append patches
+  precede it.
+- **`reset()` ghost blocks.** Swapping a streaming source mid-flight (e.g. a React
+  "regenerate") could leave stale blocks from the previous content in the store,
+  because an in-flight patch raced the `reset()`. A per-stream generation counter
+  now drops pre-reset patches before they reach the cleared store.
+- **Worker-pool robustness.** A fatally-failed worker (WASM-init failure, or a
+  trap that poisoned the shared instance) is now terminated and removed from the
+  pool — previously it lingered and could bypass the pool cap, leaking a worker
+  per stream. A WASM trap is escalated to a fatal worker error (the stream then
+  recovers onto a fresh worker) instead of being mishandled as a recoverable
+  per-stream error, and `free()` on a poisoned instance is guarded so teardown
+  can't throw out of the message loop.
+
+### Security
+
+- **O(n²) entity-decode DoS.** The numeric character-reference scan (`&#…`) was
+  unbounded; input like `&#&#&#…` (no terminator) re-scanned to end-of-input on
+  every `&`, freezing the single-threaded parser for seconds on a few hundred KB.
+  The scan is now bounded to the longest valid reference (7 decimal / 6 hex
+  digits), matching the already-bounded named-entity branch.
+- **Incomplete `data:` link blocklist.** Script-capable `data:` media types
+  (`image/svg+xml`, `application/xhtml+xml`, `text/xml`, `application/xml`,
+  `application/javascript`, …) could render as a live link / autolink /
+  component-attribute `href` — a browser navigating to one runs its script. They
+  are now blocked on the href path. Inert `data:image/…` raster images via
+  `![]()` are unaffected (an `<img>`-loaded SVG cannot run script).
+
+## 0.17.0 — 2026-06-27
+
+### Added
+
+- **Compiled `dist/`.** The package now ships compiled, non-minified ESM
+  (`dist/*.js` + `.d.ts`) instead of raw TypeScript source — fixing consumers that
+  don't transpile `node_modules` (e.g. Next.js no longer needs
+  `transpilePackages`) and the Socket "unusual packaging" signal. The worker and
+  WASM remain separate assets so a consumer bundler still re-emits the worker
+  chunk and fetches the `.wasm`.
+
+### Changed
+
+- WASM shadow stack reduced from 1 MB to 256 KB, cutting the WASM initial-memory
+  floor from ~1088 KB to ~320 KB (memory stays growable for large documents).
+- Worker→main wire format is now a JSON string (a string structured-clones far
+  cheaper than an object graph); dropped `serde-wasm-bindgen` (smaller binary).
+- React `useFluxStream` / `useFluxMarkdownString` default to rAF coalescing (one
+  render per frame), matching the framework-neutral DOM adapter.
+
+### Fixed
+
+- Bounded three recursive descents in the parser (block render, link-reference
+  sweep, inline-component tags) at depth 100. With the smaller shadow stack an
+  unbounded descent on deeply nested input could trap and poison the worker;
+  beyond the cap, content is preserved as escaped text.
+
 ## 0.16.2 — 2026-06-26
 
 ### Fixed

@@ -19,11 +19,19 @@ pub fn decode_entity(bytes: &[u8]) -> Option<(String, usize)> {
         } else {
             (false, 2)
         };
+        // Bound the digit scan: the longest valid reference is 7 decimal digits
+        // (1114111 = U+10FFFF) or 6 hex digits (10FFFF). Anything longer is
+        // invalid per CommonMark, so capping here keeps `decode_entity` O(1) —
+        // without the cap, input like `&#&#&#…` (which never contains a `;`)
+        // re-scans to EOF on every `&`, making the whole decode O(n²). Mirrors
+        // the named branch below, which is already bounded.
+        let budget = if hex { 6 } else { 7 };
+        let max = (start + budget).min(bytes.len());
         let mut i = start;
-        while i < bytes.len() && bytes[i] != b';' {
+        while i < max && bytes[i] != b';' {
             i += 1;
         }
-        if i >= bytes.len() || i == start {
+        if i == start || i >= bytes.len() || bytes[i] != b';' {
             return None;
         }
         let num_str = std::str::from_utf8(&bytes[start..i]).ok()?;
@@ -261,5 +269,37 @@ fn lookup_named(name: &str) -> Option<&'static str> {
         "ClockwiseContourIntegral" => Some("\u{2232}"),
         "ngE" => Some("\u{2267}\u{0338}"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_entity;
+
+    #[test]
+    fn valid_numeric_refs_decode() {
+        assert_eq!(decode_entity(b"&#65;"), Some(("A".to_string(), 5)));
+        assert_eq!(decode_entity(b"&#x41;"), Some(("A".to_string(), 6)));
+        assert_eq!(decode_entity(b"&#X41;"), Some(("A".to_string(), 6)));
+        // Longest valid forms: 7 decimal digits (U+10FFFF) / 6 hex digits.
+        assert_eq!(decode_entity(b"&#1114111;").map(|(_, n)| n), Some(10));
+        assert_eq!(decode_entity(b"&#x10FFFF;").map(|(_, n)| n), Some(10));
+        // Zero-padded but within the digit budget still decodes.
+        assert_eq!(decode_entity(b"&#0000065;"), Some(("A".to_string(), 10)));
+    }
+
+    #[test]
+    fn over_long_and_unterminated_numeric_refs_are_rejected() {
+        // The O(n²) DoS shape: `&#` with no terminator must NOT scan to EOF —
+        // it returns None after at most the digit budget. (Correctness proxy
+        // for the bound; the cap is what keeps the scan O(1) per `&`.)
+        assert_eq!(decode_entity(b"&#"), None);
+        assert_eq!(decode_entity(b"&#xZZZZZZZZZZZZZZZ"), None);
+        let long = format!("&#{}", "9".repeat(10_000));
+        assert_eq!(decode_entity(long.as_bytes()), None);
+        // 8+ digit decimal (with a terminator) is invalid per CommonMark and
+        // is now rejected at the digit budget rather than range-checked later.
+        assert_eq!(decode_entity(b"&#00000065;"), None);
+        assert_eq!(decode_entity(b"&#x1000000;"), None);
     }
 }

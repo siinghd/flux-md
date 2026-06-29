@@ -10,11 +10,23 @@ const haveWasm = existsSync(wasmUrl);
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let server: any;
+// FluxMarkdownStatic lives in the React subpath so the bare `flux-md/server`
+// stays importable with no react installed.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let serverReact: any;
 beforeAll(async () => {
   if (!haveWasm) return;
   const mod = "../src/server"; // variable specifier: resolved at runtime, not collection
   server = await import(mod);
+  serverReact = await import("../src/server-react");
   await server.initFlux(); // Node path: reads the co-located .wasm off disk
+});
+
+test.skipIf(!haveWasm)("flux-md/server is React-free: it does not re-export the React FluxMarkdownStatic", () => {
+  // The React component moved to flux-md/server/react so the core entry imports
+  // cleanly without react. (Structural react-free guard is in scripts/build.mjs.)
+  expect(server.FluxMarkdownStatic).toBeUndefined();
+  expect(typeof serverReact.FluxMarkdownStatic).toBe("function");
 });
 
 test.skipIf(!haveWasm)("renderToString: worker-free sync HTML string", () => {
@@ -41,7 +53,7 @@ test.skipIf(!haveWasm)("renderToString: a block component tag used inline does n
 
 test.skipIf(!haveWasm)("FluxMarkdownStatic: emits the flux-md root and dispatches inline components", () => {
   const out = renderToStaticMarkup(
-    createElement(server.FluxMarkdownStatic, {
+    createElement(serverReact.FluxMarkdownStatic, {
       content: 'Buy <tik symbol="AAPL">**A**</tik> now\n',
       config: { inlineComponentTags: ["tik"] },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -54,7 +66,7 @@ test.skipIf(!haveWasm)("FluxMarkdownStatic: emits the flux-md root and dispatche
 
 test.skipIf(!haveWasm)("FluxMarkdownStatic: a block component override receives parsed children (P2)", () => {
   const out = renderToStaticMarkup(
-    createElement(server.FluxMarkdownStatic, {
+    createElement(serverReact.FluxMarkdownStatic, {
       content: "<Note>\nhello **world**\n</Note>\n",
       config: { componentTags: ["Note"] },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -66,7 +78,7 @@ test.skipIf(!haveWasm)("FluxMarkdownStatic: a block component override receives 
 });
 
 test.skipIf(!haveWasm)("FluxMarkdownStatic: no components → byte-identical innerHTML wrapper", () => {
-  const out = renderToStaticMarkup(createElement(server.FluxMarkdownStatic, { content: "hi\n" }));
+  const out = renderToStaticMarkup(createElement(serverReact.FluxMarkdownStatic, { content: "hi\n" }));
   expect(out).toBe('<div class="flux-md"><div class="flux-block flux-block-paragraph"><p>hi</p></div></div>');
 });
 

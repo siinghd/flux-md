@@ -196,3 +196,75 @@ test("two streams buffered before ready each create their own parser and keep th
   expect(h.created.map((p) => p.appended).sort()).toEqual(["one", "two"]);
   expect(patches(h.posted).length).toBe(2);
 });
+
+test("emitted patches tag the terminal one with final:true and echo the stream epoch", () => {
+  const h = harness();
+  h.core.markReady();
+  h.core.handle({ type: "append", streamId: 1, chunk: "x", epoch: 3 });
+  h.core.handle({ type: "finalize", streamId: 1, epoch: 3 });
+  const ps = patches(h.posted) as Array<{ final?: boolean; epoch?: number }>;
+  expect(ps.length).toBe(2);
+  expect(ps[0].final).toBe(false); // append patch
+  expect(ps[1].final).toBe(true); // terminal patch
+  expect(ps.every((p) => p.epoch === 3)).toBe(true);
+});
+
+test("a WebAssembly trap escalates to a fatal error; a plain Error stays per-stream recoverable", () => {
+  // Plain Error from append → non-fatal.
+  const plain = harness({
+    makeParser: () =>
+      ({
+        append() {
+          throw new Error("plain boom");
+        },
+        finalize: () => JSON.stringify(EMPTY_PATCH),
+        free() {},
+        retainedBytes: () => 0,
+      }) as ParserLike,
+  });
+  plain.core.markReady();
+  plain.core.handle({ type: "append", streamId: 1, chunk: "x" });
+  const e1 = errors(plain.posted) as Array<{ fatal?: boolean }>;
+  expect(e1.length).toBe(1);
+  expect(e1[0].fatal).toBeFalsy();
+
+  // WASM trap (RuntimeError) from append → fatal (the shared instance is poisoned).
+  const trap = harness({
+    makeParser: () =>
+      ({
+        append() {
+          throw new WebAssembly.RuntimeError("unreachable");
+        },
+        finalize: () => JSON.stringify(EMPTY_PATCH),
+        free() {},
+        retainedBytes: () => 0,
+      }) as ParserLike,
+  });
+  trap.core.markReady();
+  trap.core.handle({ type: "append", streamId: 1, chunk: "x" });
+  const e2 = errors(trap.posted) as Array<{ fatal?: boolean }>;
+  expect(e2.length).toBe(1);
+  expect(e2[0].fatal).toBe(true);
+});
+
+test("free() throwing on a poisoned instance does not escape reset() or dispose()", () => {
+  const make = () =>
+    ({
+      append: () => JSON.stringify(EMPTY_PATCH),
+      finalize: () => JSON.stringify(EMPTY_PATCH),
+      free() {
+        throw new WebAssembly.RuntimeError("free on poisoned instance");
+      },
+      retainedBytes: () => 0,
+    }) as ParserLike;
+
+  const h1 = harness({ makeParser: make });
+  h1.core.markReady();
+  h1.core.handle({ type: "append", streamId: 1, chunk: "x" }); // create the parser
+  expect(() => h1.core.handle({ type: "reset", streamId: 1 })).not.toThrow();
+
+  const h2 = harness({ makeParser: make });
+  h2.core.markReady();
+  h2.core.handle({ type: "append", streamId: 1, chunk: "x" });
+  expect(() => h2.core.handle({ type: "dispose", streamId: 1 })).not.toThrow();
+});

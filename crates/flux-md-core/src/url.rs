@@ -142,6 +142,23 @@ fn is_url_safe(c: char) -> bool {
 // to navigate to it, so blocking it costs nothing there.
 const BAD_SCHEMES: &[&str] = &["javascript:", "vbscript:", "file:", "data:text/html", "data:text/javascript"];
 
+// `data:` media types a browser parses as an ACTIVE (script-capable) document
+// when navigated to. These are blocked on the LINK/href path only — `sanitize_url`,
+// URI autolinks, and component URL attributes — via `is_dangerous_href_scheme`.
+// The dedicated IMAGE path (`sanitize_image_url`) keeps its own `data:image/`
+// allowlist instead: `data:image/svg+xml` loaded through `<img src>` cannot run
+// script, so blanket-blocking it there would needlessly break inline SVG images.
+// (`data:text/html` / `data:text/javascript` are already in `BAD_SCHEMES`.)
+const SCRIPTABLE_DATA_PREFIXES: &[&str] = &[
+    "data:application/xhtml",   // application/xhtml+xml
+    "data:image/svg",           // image/svg+xml (navigated to ⇒ scripts run)
+    "data:text/xml",
+    "data:application/xml",     // XML + XSLT
+    "data:application/javascript",
+    "data:application/ecmascript",
+    "data:text/ecmascript",
+];
+
 /// Lowercased, control-character-stripped view of a URL for scheme detection.
 /// Browsers ignore tab/newline/CR (and other C0 controls) when parsing a
 /// scheme, so we must too — otherwise `java&#9;script:` slips through.
@@ -177,7 +194,7 @@ fn scheme_probe(s: &str) -> String {
 /// multiply-encoded scheme like `javascript&amp;#58;` (or `&amp;amp;#58;`) must
 /// collapse to its live form before the match. Then strip the chars browsers
 /// ignore and match.
-pub(crate) fn is_dangerous_scheme(decoded: &str) -> bool {
+fn dangerous_probe(decoded: &str) -> String {
     let mut s = decoded.to_string();
     // Bound the decode-to-fixpoint walk: a real value collapses in ≤3 passes
     // (e.g. triple-encoded `javascript&amp;amp;#58;`); the cap keeps a crafted
@@ -189,8 +206,25 @@ pub(crate) fn is_dangerous_scheme(decoded: &str) -> bool {
         }
         s = next;
     }
-    let probe = scheme_probe(&s);
+    scheme_probe(&s)
+}
+
+pub(crate) fn is_dangerous_scheme(decoded: &str) -> bool {
+    let probe = dangerous_probe(decoded);
     BAD_SCHEMES.iter().any(|b| probe.starts_with(b))
+}
+
+/// Dangerous-scheme check for the link/href path (regular links, URI autolinks,
+/// component URL attributes): everything `is_dangerous_scheme` blocks **plus**
+/// the `data:` media types a browser executes as an active document. The image
+/// path deliberately uses `is_dangerous_scheme` (+ its own `data:image/`
+/// allowlist) instead, so inline SVG/raster images keep working.
+pub(crate) fn is_dangerous_href_scheme(decoded: &str) -> bool {
+    let probe = dangerous_probe(decoded);
+    BAD_SCHEMES
+        .iter()
+        .chain(SCRIPTABLE_DATA_PREFIXES.iter())
+        .any(|b| probe.starts_with(b))
 }
 
 pub fn sanitize_url(url: &str, out: &mut String, is_email: bool) {
@@ -199,7 +233,7 @@ pub fn sanitize_url(url: &str, out: &mut String, is_email: bool) {
     // Block dangerous schemes on the decoded form. Anything else is allowed —
     // CommonMark only specifies URL normalization, not a scheme allowlist.
     // Real apps rendering untrusted content should still sanitize downstream.
-    if is_dangerous_scheme(&decoded) {
+    if is_dangerous_href_scheme(&decoded) {
         out.push('#');
         return;
     }
@@ -360,7 +394,7 @@ pub fn sanitize_attrs(open_tag: &str) -> Vec<(String, String)> {
             continue;
         }
         let decoded = decode_text(raw_value);
-        let value = if URL_ATTRS.contains(&lname.as_str()) && is_dangerous_scheme(&decoded) {
+        let value = if URL_ATTRS.contains(&lname.as_str()) && is_dangerous_href_scheme(&decoded) {
             "#".to_string()
         } else {
             decoded
