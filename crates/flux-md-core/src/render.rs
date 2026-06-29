@@ -1464,7 +1464,7 @@ fn render_list_item(item: &[u8], ordered: bool, loose: bool, opts: &RenderOpts, 
     if !body.ends_with('\n') {
         body.push('\n');
     }
-    let mut tmp = body;
+    let tmp = body;
     let sub = crate::scanner::scan(&tmp, opts.scan_ctx());
 
     // a11y: wrap a task checkbox + its text in a <label> for programmatic

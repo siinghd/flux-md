@@ -539,3 +539,36 @@ fn nested_list_does_not_flatten_when_outer_goes_loose() {
     assert_parity("1. top\n   1. nested\n   2. nested2\n\n2. second\n"); // ordered, 3-space content col
     assert_parity("- one\n  - sub a\n  - sub b\n  - sub c\n\n- two\n  - sub d\n"); // the user's shape
 }
+
+#[test]
+fn blockquote_inner_block_structure_not_flattened_mid_stream() {
+    // Regression: the container (blockquote/alert) cache rendered ALL inner
+    // content as flat paragraph text, so a list / nested quote / heading inside a
+    // streaming blockquote showed as escaped "- a" text until finalize, then
+    // snapped into a real <ul> (a structural flicker, same class as the list one).
+    // The cache now bails to the full reparse when an inner line starts a block.
+    assert_parity("> - a\n> - b\n");
+    assert_parity("> 1. x\n> 2. y\n");
+    assert_parity("> text\n> - bullet\n");
+    assert_parity("> > nested quote\n> > line2\n");
+    assert_parity("> # heading in quote\n");
+    assert_parity("> ```\n> code\n> ```\n");
+    assert_parity("> [!NOTE]\n> - a\n> - b\n"); // alert body with a list
+    assert_parity("> para\n>\n> - then a list\n");
+}
+
+#[test]
+fn blockquote_inner_all_block_types_not_flattened() {
+    // Broader regression (corpus-found): the container cache must bail to the full
+    // reparse for EVERY non-paragraph inner block — not just lists/quotes. Each of
+    // these used to render as escaped paragraph text mid-stream, then snap.
+    assert_parity("> Section Title\n> =============\n> body text\n"); // setext h1
+    assert_parity("> Heading\n> -------\n"); // setext h2
+    assert_parity("> | a | b |\n> | - | - |\n> | 1 | 2 |\n"); // table
+    assert_parity("> [!TIP]\n> | k | v |\n> | - | - |\n> | a | b |\n"); // table in alert
+    assert_parity("> intro\n>\n>     indented code\n>     more code\n"); // indented code after blank
+    assert_parity("> 5. fifth\n> 6. sixth\n"); // ordered list, start != 1
+    assert_parity("> [!IMPORTANT]\n> 3. step three\n> 4. step four\n"); // ordered list in alert
+    assert_parity("> [home]: https://example.com \"Home\"\n> See the [home] page.\n"); // ref def (no output)
+    assert_parity("> ---\n"); // thematic break
+}

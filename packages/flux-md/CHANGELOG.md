@@ -4,6 +4,28 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.18.4 — 2026-06-29
+
+### Fixed
+
+- **Blockquote / alert inner content flattened mid-stream (same flicker class as
+  0.18.3's nested lists).** The container (blockquote / GFM alert) cache rendered
+  ALL inner content as plain paragraph text while streaming, so a list, nested
+  blockquote, heading, setext heading, fenced or indented code, table, thematic
+  break, HTML block, ordered list (incl. `start ≠ 1`), or link-reference
+  definition inside a `>` block showed as escaped paragraph text until finalize,
+  then snapped into its real structure. The cache now bails to the full reparse
+  whenever an inner line is anything other than plain paragraph prose. Found by
+  fuzzing the streaming prefix-parity invariant (the streamed view must equal a
+  one-shot parse at **every** prefix) over ~15k construct interactions plus an
+  adversarial corpus; streamed output now matches one-shot at every prefix for
+  these shapes.
+
+### Internal
+
+- Removed a dead struct field and an unnecessary `mut` left by recent changes
+  (clean build, no warnings).
+
 ## 0.18.3 — 2026-06-29
 
 ### Fixed

@@ -13,10 +13,31 @@ use crate::render::{
 };
 use crate::blocks::{BlockKind, ContainerData, ListItemData, NestedBlock, TableCell, TableData};
 use crate::scanner::{
-    count_table_columns, detect_html_block_open, html_block_line_closes, is_blank_line,
+    count_table_columns, detect_html_block_open, html_block_line_closes, indent_cols, is_blank_line,
     is_setext_underline, is_table_delimiter_row, line_end, line_slice, parse_link_ref_def, scan,
     scan_marker, would_start_other_block, MarkerScan, RawBlock, RawBlockKind, ScanCtx,
 };
+
+/// True when a *stripped* container (blockquote/alert) inner line is NOT plain
+/// paragraph prose — it starts or implies a block the container cache can't
+/// render: a list / nested quote / heading / fence / thematic break / HTML /
+/// math / component (`would_start_other_block`), a setext underline (`===`/`---`),
+/// a table delimiter row (`| --- |`), or indented code (≥4 cols). Such content
+/// must bail to the full reparse — otherwise the streamed blockquote/alert shows
+/// it as escaped paragraph text until finalize (a structural flicker).
+fn container_inner_breaks_paragraph(stripped: &[u8], ctx: ScanCtx<'_>) -> bool {
+    would_start_other_block(stripped, 0, ctx)
+        // any list marker, including an ordered list starting at a number other
+        // than 1 (which `would_start_other_block` rejects because it cannot
+        // *interrupt* a paragraph — yet it starts a list at the top of a body).
+        || scan_marker(stripped).is_some()
+        || is_setext_underline(stripped, 0).is_some()
+        || is_table_delimiter_row(stripped)
+        // a link reference definition produces no visible output; the cache would
+        // otherwise render it as a literal paragraph.
+        || parse_link_ref_def(stripped, 0).is_some()
+        || indent_cols(stripped) >= 4
+}
 use crate::inline::{render_inline, render_inline_boundary};
 use crate::url::escape_html;
 
@@ -490,8 +511,6 @@ struct ListCache {
     /// Marker family + delimiter (`b'-'`/`b'*'`/`b'+'` for bullets,
     /// `b'.'`/`b')'` for ordered). A sibling must match.
     delim: u8,
-    /// `marker_indent` of the first item (the list's left edge).
-    edge: usize,
     /// `content_indent` of the first item — the column where its content starts.
     /// A later marker is a SIBLING only if `marker_indent < content_indent`; a
     /// marker at or past the content column begins a NESTED sub-list, which this
@@ -2048,6 +2067,15 @@ impl StreamParser {
                 pos = next;
                 continue;
             }
+            // This cache renders inner content as PLAIN PARAGRAPHS only. If a line
+            // would start a different block (a list, nested blockquote, heading,
+            // fence, thematic break, HTML, …), bail to the full reparse, which
+            // renders the inner block structure — otherwise the streamed
+            // blockquote/alert shows the inner list/quote as escaped paragraph
+            // text until finalize (a structural flicker).
+            if container_inner_breaks_paragraph(stripped, opts.scan_ctx()) {
+                return None;
+            }
             let stripped_str = std::str::from_utf8(stripped).ok()?;
             cache.inner_buffer.push_str(stripped_str);
             cache.inner_buffer.push('\n');
@@ -2073,6 +2101,12 @@ impl StreamParser {
                 if !stripped.is_empty()
                     && !stripped.iter().all(|&b| matches!(b, b' ' | b'\t'))
                 {
+                    // Same guard as the committed lines: a partial inner line that
+                    // already looks like a block start (e.g. `> -`) must not render
+                    // as paragraph text — bail to the full reparse.
+                    if container_inner_breaks_paragraph(stripped, opts.scan_ctx()) {
+                        return None;
+                    }
                     let stripped_str = std::str::from_utf8(stripped).ok()?;
                     cache.inner_buffer.push_str(stripped_str);
                     partial_pushed = stripped_str.len();
@@ -2904,6 +2938,27 @@ fn build_container_cache(
         }
         _ => return None,
     };
+    // Don't arm for a container whose committed inner content already has BLOCK
+    // structure (a list, nested blockquote, heading, fence, …): this cache only
+    // renders plain paragraphs, so arming would re-arm-then-bail every append.
+    // Let the full reparse own it.
+    {
+        let mut p = lines_upto;
+        while p < end {
+            let r = match bytes[p..end].iter().position(|&b| b == b'\n') {
+                None => break, // trailing partial — settled by try_incremental_container
+                Some(r) => r,
+            };
+            if let Some(stripped) = strip_blockquote_marker(&bytes[p..p + r]) {
+                if !stripped.iter().all(|&b| matches!(b, b' ' | b'\t'))
+                    && container_inner_breaks_paragraph(stripped, opts.scan_ctx())
+                {
+                    return None;
+                }
+            }
+            p += r + 1;
+        }
+    }
     Some(ContainerCache {
         start,
         id,
@@ -2974,7 +3029,6 @@ fn build_list_cache(
         ordered,
         start_num: list_start_num,
         delim: m.delim,
-        edge: m.marker_indent,
         content_indent: m.content_indent,
         opener_html,
         cached_prefix,
