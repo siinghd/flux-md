@@ -2244,8 +2244,12 @@ fn resolve_delimiters(out: &mut String, stack: &mut Vec<Delim>, mut pairs: Optio
         }
     }
 
-    edits.sort_by(|a, b| b.at.cmp(&a.at));
-    for e in edits {
+    // Apply edits from the end backwards (descending `at`) so an earlier
+    // replacement can't shift a later one's offsets; stable so same-position
+    // edits keep insertion order. (Replaces std's stable sort to slim the WASM.)
+    let order = crate::sort::stable_order(&edits, |a, b| a.at >= b.at);
+    for &oi in &order {
+        let e = &edits[oi];
         out.replace_range(e.at..e.at + e.delete, &e.insert);
     }
 }

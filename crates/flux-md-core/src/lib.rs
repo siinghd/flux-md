@@ -14,6 +14,7 @@ mod inline;
 mod parser;
 mod render;
 mod scanner;
+mod sort;
 mod url;
 
 pub use blocks::{Block, BlockKind};

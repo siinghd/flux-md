@@ -159,6 +159,12 @@ interface FluxMarkdownProps {
   deferTail?: boolean;
 }
 
+// Stable reference fed to useDeferredValue when deferral is OFF (the default):
+// passing the SAME value every render means React never schedules a low-priority
+// catch-up pass, so the default path renders exactly once per patch instead of
+// twice. (We can't conditionally call the hook, so we make its input constant.)
+const NO_DEFER_BLOCKS: Block[] = [];
+
 // The original render path: subscribe to a (required, caller- or hook-owned)
 // client and render its blocks. NEVER creates or destroys a client.
 function FluxMarkdownFromClient({
@@ -181,7 +187,9 @@ function FluxMarkdownFromClient({
   // so a burst of patches can yield. `useDeferredValue` is a no-op on the server
   // (it returns its argument during SSR) and a no-op on a single patch, so the
   // default (`deferTail` unset) path is byte- and timing-identical to before.
-  const deferred = useDeferredValue(blocks);
+  // When off, feed it a STABLE value so React schedules no deferred catch-up
+  // render — the default path then renders once per patch, not twice.
+  const deferred = useDeferredValue(deferTail ? blocks : NO_DEFER_BLOCKS);
   const rendered = deferTail ? deferred : blocks;
   const isDeferring = deferTail ? rendered !== blocks : false;
   // Normalize "no overrides" to a stable `undefined` so memo comparisons and

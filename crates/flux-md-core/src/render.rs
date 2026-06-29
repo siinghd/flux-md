@@ -422,12 +422,16 @@ pub(crate) fn slug(text: &str) -> String {
 /// clone the inner span, so the default path pays zero extra allocation
 /// (zero-cost-off, not merely byte-identical-off).
 fn render_heading_inner_trimmed(content: &str, opts: &RenderOpts, out: &mut String) -> Option<String> {
-    let mut tmp = String::with_capacity(content.len());
-    render_inline(content, opts, &mut tmp);
-    let trimmed = tmp.trim_end_matches(|c: char| c == ' ' || c == '\t' || c == '\n' || c == '\r');
-    out.push_str(trimmed);
+    // Render directly into `out` then trim in place — no temp String. (block_data
+    // off ⇒ still zero extra allocation; on ⇒ one alloc for the captured inner.)
+    let inner_start = out.len();
+    render_inline(content, opts, out);
+    let keep = out[inner_start..]
+        .trim_end_matches(|c: char| c == ' ' || c == '\t' || c == '\n' || c == '\r')
+        .len();
+    out.truncate(inner_start + keep);
     if opts.block_data {
-        Some(trimmed.to_string())
+        Some(out[inner_start..].to_string())
     } else {
         None
     }
@@ -503,11 +507,16 @@ fn render_paragraph(slice: &str, opts: &RenderOpts, out: &mut String) {
     out.push_str("<p");
     out.push_str(opts.dir());
     out.push('>');
-    let mut tmp = String::with_capacity(trimmed.len());
-    render_inline(trimmed, opts, &mut tmp);
+    // Render inline directly into `out` (no temp String / copy), then strip the
+    // trailing whitespace in place. render_inline already targets a non-empty
+    // `out` correctly (same idiom as list items / table cells).
+    let inner_start = out.len();
+    render_inline(trimmed, opts, out);
     // CommonMark: trailing whitespace at end of final line is stripped.
-    let final_text = tmp.trim_end_matches(|c: char| c == ' ' || c == '\t' || c == '\n' || c == '\r');
-    out.push_str(final_text);
+    let keep = out[inner_start..]
+        .trim_end_matches(|c: char| c == ' ' || c == '\t' || c == '\n' || c == '\r')
+        .len();
+    out.truncate(inner_start + keep);
     out.push_str("</p>");
 }
 
@@ -1159,12 +1168,15 @@ pub(crate) fn render_footnote_section(
     if nums.is_empty() {
         return String::new();
     }
-    let mut ordered: Vec<(&String, &usize)> = nums.iter().collect();
-    ordered.sort_by_key(|(_, n)| **n);
+    let ordered: Vec<(&String, &usize)> = nums.iter().collect();
+    // Ascending by reference number (unique per label). Custom stable sort keeps
+    // std's driftsort out of the WASM binary.
+    let order = crate::sort::stable_order(&ordered, |a, b| *a.1 <= *b.1);
     let mut out = String::from("<section class=\"footnotes\" role=\"doc-endnotes\">\n<ol");
     out.push_str(dir);
     out.push_str(">\n");
-    for (label, num) in ordered {
+    for &oi in &order {
+        let (label, num) = ordered[oi];
         let n = num.to_string();
         out.push_str("<li id=\"fn-");
         out.push_str(&n);
@@ -1439,16 +1451,20 @@ fn render_list_item(item: &[u8], ordered: bool, loose: bool, opts: &RenderOpts, 
     if task_state.is_some() {
         body.replace_range(0..4, "");
     }
-    let body_trimmed = body.trim_end_matches(|c: char| matches!(c, '\n' | '\r' | ' ' | '\t'));
-
     // Always scan the body; decide inline-vs-block based on the structure
     // we actually find. A nested list, code block, or quote inside a tight
     // item must still render as a block — only standalone paragraph content
     // in a tight item collapses to inline.
-    let mut tmp = body_trimmed.to_string();
-    if !tmp.ends_with('\n') {
-        tmp.push('\n');
+    // Trim + newline-terminate the OWNED body in place (no clone): `body` is
+    // moved into `tmp` below and not referenced again.
+    let keep = body
+        .trim_end_matches(|c: char| matches!(c, '\n' | '\r' | ' ' | '\t'))
+        .len();
+    body.truncate(keep);
+    if !body.ends_with('\n') {
+        body.push('\n');
     }
+    let mut tmp = body;
     let sub = crate::scanner::scan(&tmp, opts.scan_ctx());
 
     // a11y: wrap a task checkbox + its text in a <label> for programmatic

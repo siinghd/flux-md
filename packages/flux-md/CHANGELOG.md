@@ -4,6 +4,35 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.18.1 — 2026-06-29
+
+Performance + size pass. No API or output changes — CommonMark 652/652 and
+GFM 23/24 are byte-for-byte unchanged.
+
+### Changed
+
+- **WASM binary −9.6 KB (175.1 KB → 165.5 KB, −5.4%).** Three levers, measured:
+  a compact stable merge sort replaces the standard library's general-purpose
+  stable sort (driftsort) at the two sort sites (−7.3 KB incl. simpler escape
+  codegen); `wasm-opt` switches from `-O3` to `-Oz` (−2.3 KB) — and since the
+  Rust codegen is already `opt-level=z`, `-Oz` is a Pareto win (equal-or-slightly
+  faster parse, never slower, in a Node WASM A/B).
+- **Faster HTML escaping.** `escape_html` / `escape_attr` now scan bytes and copy
+  plain runs with one `push_str` (a memcpy) instead of decoding + re-encoding
+  every character. Output is byte-identical (only ASCII `< > & " '` are
+  rewritten). Measured **+9–23%** parse throughput on escape-heavy documents —
+  large fenced code, display math, and HTML/list-heavy content (the common
+  LLM-output shape); prose is unchanged.
+- **Fewer allocations on the render path.** Paragraphs, headings, and list items
+  render their inline content directly into the output buffer and trim in place,
+  dropping one temporary `String` + copy per block (helps the SSR / one-shot
+  `renderToString` / `parseToBlocks` path).
+- **One fewer React render per patch (default path).** `<FluxMarkdown>` fed a
+  changing value to `useDeferredValue` even when tail deferral was off (the
+  default), so React scheduled a throwaway low-priority catch-up render every
+  patch. It now feeds a stable value unless `deferTail` is set, so the default
+  path renders exactly once per patch.
+
 ## 0.18.0 — 2026-06-29
 
 ### Added

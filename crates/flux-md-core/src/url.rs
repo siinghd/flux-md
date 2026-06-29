@@ -10,27 +10,46 @@
 use crate::entities::decode_entity;
 
 pub fn escape_html(s: &str, out: &mut String) {
-    for c in s.chars() {
-        match c {
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '&' => out.push_str("&amp;"),
-            '"' => out.push_str("&quot;"),
-            _ => out.push(c),
-        }
-    }
+    escape_into(s, out, false);
 }
 
 pub fn escape_attr(s: &str, out: &mut String) {
-    for c in s.chars() {
-        match c {
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '&' => out.push_str("&amp;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(c),
+    escape_into(s, out, true);
+}
+
+/// Byte-scanning HTML escape: copy plain runs in one `push_str` (a memcpy)
+/// instead of decoding + re-encoding every char. Only the ASCII bytes
+/// `< > & "` (and `'` when `quote_apos`) are rewritten — all of them < 0x80, so
+/// run boundaries always land on UTF-8 char boundaries and multibyte sequences
+/// are copied verbatim. Output is byte-identical to the per-char version; this
+/// is the hot path for code/math/HTML-block rendering and the stream caches.
+#[inline]
+fn escape_into(s: &str, out: &mut String, quote_apos: bool) {
+    let bytes = s.as_bytes();
+    out.reserve(bytes.len());
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let ent: &str = match bytes[i] {
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            b'&' => "&amp;",
+            b'"' => "&quot;",
+            b'\'' if quote_apos => "&#39;",
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        if start < i {
+            out.push_str(&s[start..i]);
         }
+        out.push_str(ent);
+        i += 1;
+        start = i;
+    }
+    if start < bytes.len() {
+        out.push_str(&s[start..]);
     }
 }
 
