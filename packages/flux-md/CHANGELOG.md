@@ -4,6 +4,34 @@ Notable changes to flux-md. Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.19.0 — 2026-06-30
+
+### Added
+
+- **`decorators` — wrap/replace matched inline text while streaming.** A
+  declarative matcher list (`{ match: RegExp | string, replace: (text, groups) =>
+  node, skipInside?: string[] }`) on `<FluxMarkdown>` (React) and the DOM mount
+  options, applied to inline **text nodes only** after parsing — so it never sees
+  link URLs, code, or markup (no avoidance rules to hand-roll), and it runs once
+  per committed block, staying linear over a stream. Wrapping matched figures
+  (e.g. `$2.5B`, `10-15%`) is a one-liner. Decorator output is a **trusted**
+  surface (like `components`); `safeUrl` is now exported and `wrapLink(text, {
+  href })` ships as the safe link path. The `decorators` prop must be
+  referentially stable (hoist/memoize) — a dev-mode warning fires if it isn't,
+  since an unstable prop would re-decorate every committed block each tick.
+- **`urlTransform`** — rewrite `href`/`src`/`poster` URLs (image proxy, allowlist,
+  relative resolution). The output is re-sanitized through the same scheme filter,
+  so a transform can't introduce a dangerous URL.
+
+### Performance
+
+- **Nested lists now stream in O(n) instead of O(n²).** A loose outer list with
+  indented sub-bullets — and any list whose items have multi-line or nested-block
+  bodies — used to make the incremental list cache bail to a full reparse on every
+  appended chunk (re-scanning the whole growing list). It now renders each item's
+  full body, nested sub-lists included, through the shared item renderer, so it
+  stays linear. Streamed and one-shot output are byte-identical. (WASM −0.3 KB.)
+
 ## 0.18.5 — 2026-06-30
 
 ### Performance
