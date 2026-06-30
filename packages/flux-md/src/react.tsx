@@ -13,7 +13,7 @@ import {
 } from "react";
 import type { Align, Block, BlockComponentProps, Components, HeadingData, ListData, ListItemData, NestedBlock, TableData } from "./types";
 import { FluxClient } from "./client";
-import type { ParserConfig, RenderMetricsHook } from "./types-core";
+import type { Decorator, ParserConfig, RenderMetricsHook, UrlTransform } from "./types-core";
 import { CodeBlock } from "./renderers/CodeBlock";
 import { MathBlock } from "./renderers/Math";
 import { Mermaid } from "./renderers/Mermaid";
@@ -109,6 +109,33 @@ interface FluxMarkdownProps {
    */
   sanitize?: (html: string) => string;
   /**
+   * Wrap or replace matched inline **text** while streaming, in O(n) — e.g. to
+   * bold financial figures (`$2.5B`, `10-15%`, `FY2024`) or linkify tickers. Each
+   * {@link Decorator} runs POST-PARSE on real inline TEXT nodes only (never URLs,
+   * code, or markup), once per committed block, so a long document stays linear.
+   *
+   * **Trusted surface.** A decorator's `replace` output is spliced straight into
+   * the tree and is **NOT** sanitized (React renders a `javascript:` href without
+   * complaint). Treat this exactly like `components`: build only trusted nodes,
+   * and route any link href through the exported `safeUrl` / the `wrapLink`
+   * helper. Matching is per-text-node — a value split by inline markup like
+   * `$2.<em>5</em>B` is two text nodes and won't match across them.
+   *
+   * **HOIST / memoize this array.** A fresh identity each render busts the block
+   * memo, forcing every committed block to re-parse + re-decorate every patch
+   * (O(n²)); a one-time dev warning fires if the identity changes. Enabling
+   * decorators routes a block through the walk path (off the `innerHTML` fast
+   * path) — expected, and still O(n) per block.
+   */
+  decorators?: Decorator[];
+  /**
+   * Rewrite `href`/`src`/`poster` URLs as blocks render — proxy images, add UTM
+   * params, etc. The output is re-sanitized (`safeUrl(urlTransform(safeUrl(v)))`)
+   * so it can never introduce a `javascript:` / `data:text/html` URL. **HOIST /
+   * memoize** for the same reason as `decorators`.
+   */
+  urlTransform?: UrlTransform;
+  /**
    * Opt-in: when an OPEN (streaming) block re-renders each patch, reuse the
    * React nodes of its top-level children whose HTML is unchanged and re-parse
    * only the new trailing content, instead of re-parsing the block's whole HTML
@@ -165,6 +192,47 @@ interface FluxMarkdownProps {
 // twice. (We can't conditionally call the hook, so we make its input constant.)
 const NO_DEFER_BLOCKS: Block[] = [];
 
+// Track which prop names have already warned so the tripwire fires at most once
+// per session (a console spam guard). Module-scoped on purpose.
+const warnedUnstable = new Set<string>();
+
+// Dev-only: warn ONCE if a referentially-identity-sensitive prop (decorators /
+// urlTransform) changes identity across renders, which busts the per-block memo
+// and forces every committed block to re-parse + re-transform each patch. No-op
+// in production and when the value is undefined / stable. Always calls the hook
+// (Rules of Hooks) — the ref read is cheap and the body short-circuits.
+function useUnstablePropWarning(name: string, value: unknown): void {
+  const ref = useRef(value);
+  if (ref.current !== value) {
+    const prevDefined = ref.current !== undefined && ref.current !== null;
+    const nextDefined = value !== undefined && value !== null;
+    ref.current = value;
+    // Read NODE_ENV off globalThis (no @types/node dependency); bundlers inline
+    // `process.env.NODE_ENV`, and absence is treated as non-production (dev).
+    const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+    if (
+      prevDefined &&
+      nextDefined &&
+      !warnedUnstable.has(name) &&
+      (!env || env.NODE_ENV !== "production")
+    ) {
+      warnedUnstable.add(name);
+      // eslint-disable-next-line no-console
+      console.warn(
+        `<FluxMarkdown>: the \`${name}\` prop changed identity between renders. ` +
+          `Hoist it to module scope or wrap it in useMemo — a fresh identity each ` +
+          `render busts the per-block memo and re-parses every block on every patch.`,
+      );
+    }
+  }
+}
+
+// Test-only: reset the one-time unstable-prop warning latch so a test can assert
+// the warning fires. Not part of the public API (underscore-prefixed).
+export function __resetUnstableWarnings(): void {
+  warnedUnstable.clear();
+}
+
 // The original render path: subscribe to a (required, caller- or hook-owned)
 // client and render its blocks. NEVER creates or destroys a client.
 function FluxMarkdownFromClient({
@@ -181,8 +249,15 @@ function FluxMarkdownFromClient({
   "aria-atomic": ariaAtomic,
   onRenderMetrics,
   deferTail,
+  decorators,
+  urlTransform,
 }: FluxMarkdownProps & { client: FluxClient }) {
   const blocks = useSyncExternalStore(client.subscribe, client.getSnapshot, client.getSnapshot);
+  // Dev-only stability tripwire: an unstable `decorators` / `urlTransform`
+  // identity busts every block's memo (O(n²) re-decorate). Warn once so the
+  // user hoists/memoizes it (same trap as components/sanitize closures).
+  useUnstablePropWarning("decorators", decorators);
+  useUnstablePropWarning("urlTransform", urlTransform);
   // Opt-in (off by default): defer the tail through React's concurrent priority
   // so a burst of patches can yield. `useDeferredValue` is a no-op on the server
   // (it returns its argument during SSR) and a no-op on a single patch, so the
@@ -238,6 +313,8 @@ function FluxMarkdownFromClient({
           sanitize={sanitize}
           childMemo={childMemo}
           onRenderMetrics={onMetrics}
+          decorators={decorators}
+          urlTransform={urlTransform}
         />
       ))}
       {stickToBottom && <div aria-hidden="true" style={{ scrollSnapAlign: "end" }} className="flux-bottom-anchor" />}
@@ -545,34 +622,49 @@ function SafeHtml({
   html,
   components,
   childMemo,
+  decorators,
+  urlTransform,
 }: {
   html: string;
   components: Components;
   childMemo?: boolean;
+  decorators?: Decorator[];
+  urlTransform?: UrlTransform;
 }) {
   // One map per mounted SafeHtml instance (i.e. per block.id, since blocks are
-  // keyed in the list). Cleared when `components` changes — a cached node was
-  // built under the old map and must not leak across the swap.
+  // keyed in the list). Cleared when `components` OR the decorators/urlTransform
+  // identity changes — a cached node was built under the old transforms and must
+  // not leak across the swap.
   const memoRef = useRef<Map<string, ReactNode> | null>(null);
   const compRef = useRef<Components | null>(null);
+  const decoRef = useRef<Decorator[] | undefined>(undefined);
+  const urlRef = useRef<UrlTransform | undefined>(undefined);
   // `ReactElement` (not the global `JSX.Element`) so the source type-checks under
   // both @types/react 18 and 19 — React 19 removed the global `JSX` namespace,
   // and a consumer's `next build` type-checks this shipped source.
   return useMemo(() => {
+    const opts = { decorators, urlTransform };
     if (!childMemo) {
       // Free the map once a block closes (childMemo flips off) so a long doc
       // doesn't retain per-block caches after streaming finishes.
       memoRef.current = null;
-      return htmlToReact(html, components) as ReactElement;
+      return htmlToReact(html, components, undefined, opts) as ReactElement;
     }
-    if (memoRef.current === null || compRef.current !== components) {
+    if (
+      memoRef.current === null ||
+      compRef.current !== components ||
+      decoRef.current !== decorators ||
+      urlRef.current !== urlTransform
+    ) {
       memoRef.current = new Map();
       compRef.current = components;
+      decoRef.current = decorators;
+      urlRef.current = urlTransform;
     }
     const map = memoRef.current;
     if (map.size > CHILD_MEMO_CAP) map.clear();
-    return htmlToReact(html, components, map) as ReactElement;
-  }, [html, components, childMemo]) as ReactElement;
+    return htmlToReact(html, components, map, opts) as ReactElement;
+  }, [html, components, childMemo, decorators, urlTransform]) as ReactElement;
 }
 
 // One `<li>` of the keyed list renderer. Memoized on its inner `html` (+ the
@@ -834,6 +926,8 @@ function BlockViewImpl(props: {
   sanitize?: (html: string) => string;
   childMemo?: boolean;
   onRenderMetrics?: RenderMetricsHook;
+  decorators?: Decorator[];
+  urlTransform?: UrlTransform;
 }) {
   const { block, virtualize, onRenderMetrics } = props;
   // Render-churn probe (only when a hook is wired — refs are cheap, but the
@@ -884,13 +978,24 @@ function renderBlockContent({
   components,
   sanitize,
   childMemo,
+  decorators,
+  urlTransform,
 }: {
   block: Block;
   components?: Components;
   sanitize?: (html: string) => string;
   childMemo?: boolean;
+  decorators?: Decorator[];
+  urlTransform?: UrlTransform;
 }) {
   const kind = block.kind.type;
+  // Decorators / urlTransform run on the post-parse node tree, so a block that
+  // uses either must take the walk path (htmlToReact via SafeHtml). They also
+  // disable the keyed table/list/container streaming fast paths below (those
+  // build sub-trees from the data channel, bypassing the text/URL transforms) —
+  // the block falls through to the whole-block walk, which is still O(n) per
+  // block (committed blocks stay memo-skipped).
+  const hasInlineTransforms = !!decorators || !!urlTransform;
 
   // Block-kind override replaces the entire renderer for this block. A
   // `Component` block also dispatches on its tag name, so `components.Thinking`
@@ -935,7 +1040,7 @@ function renderBlockContent({
   // re-tokenizing instead of the whole table re-parsing every patch. Closed
   // tables stay on the memo/full-HTML path below (committed blocks are already
   // free). Falls through when the data channel is absent (blockData off).
-  if (kind === "Table" && block.open) {
+  if (kind === "Table" && block.open && !hasInlineTransforms) {
     const data = block.kind.data as TableData | undefined;
     if (data && Array.isArray(data.rows)) {
       return (
@@ -954,7 +1059,7 @@ function renderBlockContent({
   // tail item that actually grew. Closed lists fall through (committed = free).
   // Skipped when a tag-level `ul`/`ol`/`li` override is present so those keep
   // controlling the wrappers via the whole-block path.
-  if (block.open && kind === "List") {
+  if (block.open && kind === "List" && !hasInlineTransforms) {
     const ld = block.kind.data as ListData | undefined;
     const items = ld?.items;
     const tagOverride =
@@ -982,14 +1087,15 @@ function renderBlockContent({
   // every block — closing the gap where a component-rendered block previously
   // bypassed the user sanitizer. The no-`components` fast path is untouched
   // (byte-identical innerHTML).
-  if (components) {
+  if (components || hasInlineTransforms) {
     // Streaming-tail fast path: an OPEN Blockquote / Alert with structured
     // `nested` data (blockData on) renders its inner sub-blocks KEYED, so only
     // the open last child re-parses each tick instead of the whole wrapper. A
-    // `sanitize` hook disables it (it must run over the full wrapper string) and
-    // it falls through to the opaque-html path below. Closed blocks also fall
+    // `sanitize` hook disables it (it must run over the full wrapper string), and
+    // decorators/urlTransform disable it (they must walk the full subtree) — both
+    // fall through to the opaque-html path below. Closed blocks also fall
     // through — their HTML is stable, so the whole-wrapper memo already holds.
-    if (block.open && !sanitize && (kind === "Blockquote" || kind === "Alert")) {
+    if (components && !hasInlineTransforms && block.open && !sanitize && (kind === "Blockquote" || kind === "Alert")) {
       const nested = (block.kind.data as { nested?: NestedBlock[] } | undefined)?.nested;
       if (Array.isArray(nested)) {
         return (
@@ -1004,8 +1110,16 @@ function renderBlockContent({
       <div className={className}>
         {/* Child-memo only pays off on the OPEN tail (closed blocks are already
             wholesale memo-skipped by blocksEqual); gate it on block.open so a
-            closed block frees its per-block map and parses in one pass. */}
-        <SafeHtml html={safe} components={components} childMemo={childMemo && block.open} />
+            closed block frees its per-block map and parses in one pass. The
+            components map may be absent (decorators-only) — pass the stable
+            frozen empty map so SafeHtml's identity checks don't churn. */}
+        <SafeHtml
+          html={safe}
+          components={components ?? NO_COMPONENTS}
+          childMemo={childMemo && block.open}
+          decorators={decorators}
+          urlTransform={urlTransform}
+        />
       </div>
     );
   }
@@ -1023,8 +1137,8 @@ function renderBlockContent({
 // is what stops a committed block from re-rendering (and thus re-parsing) on
 // every streaming patch.
 export function blocksEqual(
-  prev: { block: Block; components?: Components; virtualize?: boolean; sanitize?: (html: string) => string; childMemo?: boolean; onRenderMetrics?: RenderMetricsHook },
-  next: { block: Block; components?: Components; virtualize?: boolean; sanitize?: (html: string) => string; childMemo?: boolean; onRenderMetrics?: RenderMetricsHook },
+  prev: { block: Block; components?: Components; virtualize?: boolean; sanitize?: (html: string) => string; childMemo?: boolean; onRenderMetrics?: RenderMetricsHook; decorators?: Decorator[]; urlTransform?: UrlTransform },
+  next: { block: Block; components?: Components; virtualize?: boolean; sanitize?: (html: string) => string; childMemo?: boolean; onRenderMetrics?: RenderMetricsHook; decorators?: Decorator[]; urlTransform?: UrlTransform },
 ): boolean {
   return (
     prev.block.id === next.block.id &&
@@ -1035,7 +1149,12 @@ export function blocksEqual(
     prev.virtualize === next.virtualize &&
     prev.sanitize === next.sanitize &&
     prev.childMemo === next.childMemo &&
-    prev.onRenderMetrics === next.onRenderMetrics
+    prev.onRenderMetrics === next.onRenderMetrics &&
+    // Identity compare: an unstable decorators/urlTransform (fresh each render)
+    // busts the memo so every committed block re-decorates — the O(n²) footgun
+    // the dev warning calls out. A hoisted/memoized value keeps the memo holding.
+    prev.decorators === next.decorators &&
+    prev.urlTransform === next.urlTransform
   );
 }
 

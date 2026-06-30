@@ -17,6 +17,54 @@ export interface BlockKind {
   data?: unknown;
 }
 
+/**
+ * The node type a {@link Decorator} (or `wrapLink`) builds. Kept `unknown` here
+ * so this framework-neutral types module stays React-free: the React binding
+ * treats it as `ReactNode`, the DOM binding (`flux-md/dom`) as `Node | string`.
+ */
+export type FluxNode = unknown;
+
+/**
+ * Wrap or replace matched inline **text** while streaming, in O(n). A decorator
+ * runs POST-PARSE on real inline TEXT nodes only (after the core renders a block
+ * to HTML and the walker parses it), once per committed block — so it never sees
+ * URLs, code, or markup, and a value split by inline markup (e.g.
+ * `$2.<em>5</em>B`) is two text nodes and won't match across them.
+ *
+ * **Trusted surface (read this).** A decorator's `replace` output is spliced
+ * directly into the render tree and does **NOT** pass through flux's attribute
+ * sanitizer (that only runs on attributes the trusted core emitted). React and
+ * the DOM both happily render a `javascript:` href. Treat `decorators` exactly
+ * like `components`: only build trusted nodes, and route any link href through
+ * the exported `safeUrl` (or use the `wrapLink` helper, which does it for you).
+ *
+ * **Stability matters (the #1 footgun).** Pass a HOISTED / memoized array — a
+ * fresh `decorators` identity every render busts the per-block memo, so every
+ * committed block re-parses and re-decorates on every patch (O(n²)). The React
+ * binding emits a one-time dev warning if the identity changes.
+ */
+export interface Decorator {
+  /** Tested against each inline TEXT node's string only (never URLs/code/markup). */
+  match: RegExp | string;
+  /** PURE fn building the replacement for ONE match. Returns framework nodes. */
+  replace: (matchText: string, groups: string[]) => FluxNode;
+  /** Ancestor tags to skip. Default `['a','code','pre','kbd']`. */
+  skipInside?: string[];
+}
+
+/**
+ * Rewrite a URL attribute (`href`/`src`/`poster`) as a block renders — e.g. to
+ * proxy images or add UTM params. Applied O(1) per attribute. The renderer
+ * re-sanitizes the OUTPUT (`safeUrl(urlTransform(safeUrl(value)))`), so a buggy
+ * or hostile transform can never emit a `javascript:` / `data:text/html` URL
+ * that reaches the DOM. Like `decorators`, pass a HOISTED / memoized function so
+ * the per-block memo holds.
+ */
+export type UrlTransform = (
+  url: string,
+  ctx: { tag: string; attr: "href" | "src" | "poster" },
+) => string;
+
 /** Column alignment from the `|:--|:-:|--:|` delimiter row; `null` = unset. */
 export type Align = "left" | "center" | "right" | null;
 

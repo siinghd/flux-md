@@ -1,8 +1,10 @@
 import type { FluxClient } from "./client";
 import { highlight } from "./hi";
 import { morph } from "./morph";
-import type { Align, Block, BlockComponentProps, BlockKindTag, ListData, RenderMetricsHook, TableData } from "./types-core";
+import type { Align, Block, BlockComponentProps, BlockKindTag, Decorator, ListData, RenderMetricsHook, TableData, UrlTransform } from "./types-core";
 import { blockProps, extractLang } from "./block-props";
+import { decorateSegments } from "./decorate";
+import { safeUrl } from "./url-safety";
 
 /**
  * Framework-neutral DOM renderer for a {@link FluxClient}. Mounts the streaming
@@ -84,6 +86,26 @@ export interface MountOptions {
    * fast path (not code/math/mermaid/component overrides). The morphed subtree is
    * equivalent to the rebuilt one. */
   morphOpenBlocks?: boolean;
+  /**
+   * Wrap or replace matched inline **text** while streaming (parity with the
+   * React `decorators` prop). Each {@link Decorator} runs POST-render over the
+   * block's real TEXT nodes via a `TreeWalker` (after `innerHTML`), once per
+   * committed block, honoring `skipInside` (default `a`/`code`/`pre`/`kbd`).
+   *
+   * **Trusted surface.** A decorator's `replace` may return a `Node` or a string;
+   * a returned Node is inserted as-is and is NOT sanitized (a `javascript:` href
+   * on a user-built `<a>` reaches the DOM). Route hrefs through the exported
+   * {@link safeUrl}. Enabling decorators moves a block onto the walk path (off the
+   * `innerHTML`/prefix-append/morph fast paths) — still O(n) per block.
+   */
+  decorators?: Decorator[];
+  /**
+   * Rewrite `href`/`src`/`poster` URLs as blocks render (parity with the React
+   * `urlTransform` prop). The output is re-sanitized
+   * (`safeUrl(urlTransform(safeUrl(v)))`) so it can never introduce a dangerous
+   * scheme. O(1) per attribute.
+   */
+  urlTransform?: UrlTransform;
   /** Appended to the root's `className` (the `flux-md` class is always present). */
   className?: string;
   /** Set on the root element. */
@@ -167,6 +189,12 @@ export function mountFluxMarkdown(
   const components =
     options.components && Object.keys(options.components).length > 0 ? options.components : undefined;
   const { sanitize, virtualize, stickToBottom, onRenderMetrics } = options;
+  // Normalize "no decorators" to undefined so an empty array doesn't take the
+  // walk path; both transforms move a block off the innerHTML fast path.
+  const decorators =
+    options.decorators && options.decorators.length > 0 ? options.decorators : undefined;
+  const urlTransform = options.urlTransform;
+  const hasInlineTransforms = !!decorators || !!urlTransform;
   const hasPerf = typeof performance !== "undefined";
   const highlightCode = options.highlightCode !== false && !components?.CodeBlock;
   const batch = options.batch !== false && typeof requestAnimationFrame === "function";
@@ -408,7 +436,11 @@ export function mountFluxMarkdown(
     // frozen, so a later patch updates only the growing trailing row. Closed
     // tables (and blockData-off tables) take the generic full-HTML path below
     // (closed nodes are frozen by the fingerprint check, already free).
-    if (kind === "Table" && b.open) {
+    // Decorators / urlTransform disable the keyed streaming fast paths (they
+    // build sub-trees from the data channel, bypassing the post-render text/URL
+    // walk) — the block falls through to the generic full-HTML path, which is
+    // then walked once. Still O(n) per block (committed blocks stay frozen).
+    if (kind === "Table" && b.open && !hasInlineTransforms) {
       const data = tableData(b);
       if (data) return buildKeyedTable(b, data, mb);
     }
@@ -419,7 +451,7 @@ export function mountFluxMarkdown(
     // path the generic innerHTML branch uses — so the rebuilt list tracks the
     // structured items instead of re-parsing the whole `<ul>`/`<ol>` HTML. Closed
     // lists fall through (their node is reused untouched, never rebuilt).
-    if (b.open && kind === "List") {
+    if (b.open && kind === "List" && !hasInlineTransforms) {
       const keyed = renderKeyedList(b);
       if (keyed) return keyed;
     }
@@ -434,7 +466,7 @@ export function mountFluxMarkdown(
     // slice of `b.html` (no new innerHTML hole). A `sanitize` hook disables it
     // (it must run over the full wrapper string). Closed blocks fall through —
     // their node fingerprint is stable, so they are never rebuilt anyway.
-    if (b.open && !sanitize && (kind === "Blockquote" || kind === "Alert")) {
+    if (b.open && !sanitize && !hasInlineTransforms && (kind === "Blockquote" || kind === "Alert")) {
       const wrapper = renderKeyedContainer(b);
       if (wrapper) {
         node.appendChild(wrapper);
@@ -442,9 +474,18 @@ export function mountFluxMarkdown(
       }
     }
     node.innerHTML = sanitize ? sanitize(b.html) : b.html;
-    // Eligible for the prefix-append fast path only when no sanitizer rewrote
-    // the html (the stored `html` must equal the node's actual innerHTML source).
-    lastRenderGeneric = !sanitize;
+    // Post-render inline transforms: walk the just-built subtree's TEXT nodes for
+    // decorators and rewrite URL attributes for urlTransform. This runs on the
+    // trusted core HTML AFTER it is parsed into nodes — the same model as the
+    // React walker — so the security posture is unchanged (decorator output is a
+    // trusted, un-sanitized surface; urlTransform output is re-sanitized).
+    if (decorators) decorateDomSubtree(node, decorators);
+    if (urlTransform) applyUrlTransformDom(node, urlTransform);
+    // Eligible for the prefix-append fast path only when no sanitizer rewrote the
+    // html AND no inline transform mutated the subtree (the stored `html` must
+    // equal the node's actual innerHTML source for the byte-faithful append). A
+    // transformed block therefore fully rebuilds + re-walks on each open patch.
+    lastRenderGeneric = !sanitize && !hasInlineTransforms;
     return node;
   }
 
@@ -943,4 +984,72 @@ function applyOpenTagAttrs(el: HTMLElement, html: string): void {
 function alertTitleHtml(html: string): string {
   const m = html.match(/<p class="markdown-alert-title"[^>]*>[\s\S]*?<\/p>/);
   return m ? m[0] : "";
+}
+
+// The chain of enclosing element tag names for a text node, from its immediate
+// parent up to (but excluding) the block-root `root`. Matches the React walker's
+// ancestor set (the block's own elements, not the outer flux-block wrapper) so
+// `skipInside` behaves identically across the two renderers. Order is irrelevant
+// (the skip check is a membership test).
+function ancestorTags(node: Node, root: HTMLElement): string[] {
+  const out: string[] = [];
+  let p = node.parentNode as HTMLElement | null;
+  while (p && p !== root) {
+    if (p.tagName) out.push(p.tagName.toLowerCase());
+    p = p.parentNode as HTMLElement | null;
+  }
+  return out;
+}
+
+// Walk `root`'s real TEXT nodes (a `TreeWalker`) and splice in each decorator's
+// replacement. Text nodes are collected FIRST, then mutated — a live TreeWalker
+// would be invalidated by replacing the node it is parked on. The matcher feeds
+// each ORIGINAL text-node string via the SHARED `decorateSegments` helper
+// (identical behavior to the React walker), so a decorator never re-matches
+// inside another decorator's replacement.
+//
+// NOTE: we request `SHOW_ALL` and select TEXT nodes (`nodeType === 3`) ourselves
+// rather than relying on `SHOW_TEXT`'s `whatToShow` filtering — some DOM
+// implementations (happy-dom) mishandle the bitmask and drop every text node.
+// Real browsers behave identically either way; this keeps the walk portable.
+const SHOW_ALL = 0xffffffff;
+function decorateDomSubtree(root: HTMLElement, decorators: Decorator[]): void {
+  const walker = document.createTreeWalker(root, SHOW_ALL);
+  const texts: Text[] = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if (n.nodeType === 3) texts.push(n as Text);
+  }
+  for (const t of texts) {
+    const segs = decorateSegments(t.data, decorators, ancestorTags(t, root));
+    if (segs === null) continue; // nothing matched — leave the text node untouched
+    const frag = document.createDocumentFragment();
+    for (const s of segs) {
+      if (s.type === "text") {
+        frag.appendChild(document.createTextNode(s.text));
+        continue;
+      }
+      // Trusted surface: a returned Node is inserted verbatim (NOT sanitized);
+      // a string becomes a text node. `replace` is pure, so streamed == one-shot.
+      const replacement = s.decorator.replace(s.matchText, s.groups) as Node | string | null | undefined;
+      if (replacement == null) continue;
+      frag.appendChild(typeof replacement === "string" ? document.createTextNode(replacement) : replacement);
+    }
+    t.parentNode?.replaceChild(frag, t);
+  }
+}
+
+// Rewrite every `href`/`src`/`poster` in `root` through `urlTransform`,
+// re-sanitizing the OUTPUT so a buggy/hostile transform can't reach the DOM with
+// a dangerous scheme: `safeUrl(urlTransform(safeUrl(value)))`. O(1) per attr.
+function applyUrlTransformDom(root: HTMLElement, urlTransform: UrlTransform): void {
+  const els = root.querySelectorAll("[href],[src],[poster]");
+  const attrs: Array<"href" | "src" | "poster"> = ["href", "src", "poster"];
+  els.forEach((el) => {
+    for (const attr of attrs) {
+      if (!el.hasAttribute(attr)) continue;
+      const cur = el.getAttribute(attr) ?? "";
+      const next = safeUrl(urlTransform(safeUrl(cur), { tag: el.tagName.toLowerCase(), attr }));
+      el.setAttribute(attr, next);
+    }
+  });
 }

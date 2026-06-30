@@ -1,5 +1,15 @@
-import { createElement, type ReactNode } from "react";
+import { createElement, Fragment, type ReactElement, type ReactNode } from "react";
 import type { Components } from "./types";
+import type { Decorator, UrlTransform } from "./types-core";
+import { decorateSegments } from "./decorate";
+import { decodeEntities, safeUrl } from "./url-safety";
+
+// `decodeEntities` + `safeUrl` now live in the framework-neutral ./url-safety so
+// the DOM renderer can share the EXACT scheme filter; re-exported here for the
+// existing public/test import sites. `safeUrl` is part of the public surface so
+// users of `decorators` can build XSS-safe links (React does not block
+// `javascript:` hrefs — decorator output is a TRUSTED, un-sanitized surface).
+export { decodeEntities, safeUrl };
 
 // HTML void elements: no closing tag, never have children.
 const VOID = new Set([
@@ -50,62 +60,9 @@ const PROP_DENY = new Set([
 // explicit ATTR_MAP renames and `xlink:href` are allowed past this gate.
 const SAFE_ATTR_NAME = /^[a-z][a-z0-9-]*$/i;
 
-/** Replace a dangerous-scheme URL with "#". Mirrors the Rust `is_dangerous_scheme`:
- *  strip control chars (C0, DEL, C1 — matching Rust char::is_control),
- *  lowercase, then match. The strip affects only the probe, never output. */
-function safeUrl(value: string): string {
-  // Decode-STABLE probe: a value can be entity-decoded more than once before it
-  // reaches the DOM, so peel layers to a fixpoint before the scheme check —
-  // catches `javascript&#58;` and double-encoded `javascript&amp;#58;`. Only the
-  // probe is decoded; the returned value is untouched (safe URLs stay verbatim).
-  // Cap at 8 iterations: far beyond any legit URL (browsers entity-decode an
-  // href once), and bounds the loop so a hostile value can't make it quadratic.
-  let decoded = value;
-  for (let i = 0, prev = ""; i < 8 && decoded !== prev; i++) {
-    prev = decoded;
-    decoded = decodeEntities(decoded);
-  }
-  // eslint-disable-next-line no-control-regex
-  const probe = decoded.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").replace(/^\s+/, "").toLowerCase();
-  if (
-    probe.startsWith("javascript:") ||
-    probe.startsWith("vbscript:") ||
-    probe.startsWith("data:text/html") ||
-    probe.startsWith("data:text/javascript")
-  ) {
-    return "#";
-  }
-  return value;
-}
-
 type HNode =
   | { kind: "text"; text: string }
   | { kind: "el"; tag: string; attrs: Record<string, string | true>; children: HNode[] };
-
-const NAMED_ENTITIES: Record<string, string> = {
-  amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
-  copy: "©", reg: "®", hellip: "…", mdash: "—", ndash: "–",
-};
-
-/** Decode the (small, known) set of entities the core emits, plus numeric refs. */
-export function decodeEntities(s: string): string {
-  if (s.indexOf("&") === -1) return s;
-  return s.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z][a-zA-Z0-9]*);/g, (m, body: string) => {
-    if (body[0] === "#") {
-      const code = body[1] === "x" || body[1] === "X"
-        ? parseInt(body.slice(2), 16)
-        : parseInt(body.slice(1), 10);
-      if (Number.isNaN(code) || code < 0 || code > 0x10ffff) return m;
-      try {
-        return String.fromCodePoint(code);
-      } catch {
-        return m;
-      }
-    }
-    const named = NAMED_ENTITIES[body];
-    return named === undefined ? m : named;
-  });
-}
 
 /**
  * Parse an inline CSS string (`"text-align:left;color:red"`) into the object
@@ -282,7 +239,19 @@ export function parseTrustedHtml(html: string): HNode[] {
   return root;
 }
 
-function attrsToProps(tag: string, attrs: Record<string, string | true>, key: string): Record<string, unknown> {
+// Threaded through the walk so the text branch can decorate and the URL sites
+// can apply an opt-in `urlTransform`. Both default off (identity-unchanged).
+interface WalkCtx {
+  decorators?: Decorator[];
+  urlTransform?: UrlTransform;
+}
+
+function attrsToProps(
+  tag: string,
+  attrs: Record<string, string | true>,
+  key: string,
+  urlTransform?: UrlTransform,
+): Record<string, unknown> {
   const props: Record<string, unknown> = { key };
   for (const name in attrs) {
     const value = attrs[name];
@@ -299,8 +268,15 @@ function attrsToProps(tag: string, attrs: Record<string, string | true>, key: st
       continue;
     }
     // Neutralize dangerous-scheme URLs (javascript:, vbscript:, data:text/html).
+    // An opt-in `urlTransform` may rewrite href/src/poster — its OUTPUT is
+    // re-sanitized (`safeUrl(urlTransform(safeUrl(value)))`) so a buggy/hostile
+    // transform can't reintroduce a dangerous scheme that reaches the DOM.
     if (URL_ATTRS.has(lower) && typeof value === "string") {
-      props[ATTR_MAP[lower] ?? name] = safeUrl(value);
+      let url = safeUrl(value);
+      if (urlTransform && (lower === "href" || lower === "src" || lower === "poster")) {
+        url = safeUrl(urlTransform(url, { tag: tag.toLowerCase(), attr: lower }));
+      }
+      props[ATTR_MAP[lower] ?? name] = url;
       continue;
     }
     // A static checkbox carries `checked` with no handler; render it
@@ -318,21 +294,64 @@ function attrsToProps(tag: string, attrs: Record<string, string | true>, key: st
   return props;
 }
 
-function nodesToReact(nodes: HNode[], components: Components, keyPrefix: string): ReactNode {
+// Split one trusted (already escaped) text node into the decorator output and
+// push it onto `out`. The matcher feeds the ORIGINAL text string (never a prior
+// decorator's replacement), so there is no `<mark><mark>` double-wrap; each
+// match is wrapped in a keyed Fragment so React reconciles the mixed
+// string/element children without a missing-key warning. `replace` is treated as
+// pure, so a streamed-in node decorates identically to a one-shot render.
+function pushDecoratedText(
+  out: ReactNode[],
+  text: string,
+  decorators: Decorator[],
+  ancestors: string[],
+  keyBase: string,
+): void {
+  const segs = decorateSegments(text, decorators, ancestors);
+  if (segs === null) {
+    out.push(text); // nothing matched — original text node, byte-identical
+    return;
+  }
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    if (s.type === "text") {
+      out.push(s.text);
+      continue;
+    }
+    const replacement = s.decorator.replace(s.matchText, s.groups) as ReactNode;
+    out.push(createElement(Fragment, { key: keyBase + ":" + i }, replacement));
+  }
+}
+
+function nodesToReact(
+  nodes: HNode[],
+  components: Components,
+  keyPrefix: string,
+  ctx: WalkCtx | undefined,
+  ancestors: string[],
+): ReactNode {
   const out: ReactNode[] = [];
   for (let idx = 0; idx < nodes.length; idx++) {
     const n = nodes[idx];
     if (n.kind === "text") {
-      out.push(n.text);
+      if (ctx && ctx.decorators) {
+        pushDecoratedText(out, n.text, ctx.decorators, ancestors, keyPrefix + idx);
+      } else {
+        out.push(n.text);
+      }
       continue;
     }
     const key = keyPrefix + idx;
     const type = components[n.tag] ?? n.tag;
-    const props = attrsToProps(n.tag, n.attrs, key);
+    const props = attrsToProps(n.tag, n.attrs, key, ctx?.urlTransform);
     if (VOID.has(n.tag.toLowerCase())) {
       out.push(createElement(type, props));
     } else {
-      out.push(createElement(type, props, nodesToReact(n.children, components, key + ".")));
+      // Track the enclosing tag chain (mutated push/pop, no per-node alloc) so a
+      // decorator's `skipInside` (default a/code/pre/kbd) can be honored.
+      ancestors.push(n.tag);
+      out.push(createElement(type, props, nodesToReact(n.children, components, key + ".", ctx, ancestors)));
+      ancestors.pop();
     }
   }
   // `null` (not an empty array) for no children, so a self-closing / empty inline
@@ -431,8 +450,15 @@ export function htmlToReact(
   html: string,
   components: Components,
   childMemoMap?: Map<string, ReactNode>,
+  opts?: { decorators?: Decorator[]; urlTransform?: UrlTransform },
 ): ReactNode {
-  if (!childMemoMap) return nodesToReact(parseTrustedHtml(html), components, "");
+  // Build the walk context once (off when neither transform is supplied → the
+  // text/URL branches behave byte-identically to before).
+  const ctx: WalkCtx | undefined =
+    opts && (opts.decorators || opts.urlTransform)
+      ? { decorators: opts.decorators, urlTransform: opts.urlTransform }
+      : undefined;
+  if (!childMemoMap) return nodesToReact(parseTrustedHtml(html), components, "", ctx, []);
   const segs = topLevelSegments(html);
   const out: ReactNode[] = [];
   for (let idx = 0; idx < segs.length; idx++) {
@@ -447,9 +473,33 @@ export function htmlToReact(
       out.push(hit);
       continue;
     }
-    const node = nodesToReact(parseTrustedHtml(seg), components, idx + ".");
+    // Each top-level segment starts a fresh ancestor chain (its own root nodes).
+    const node = nodesToReact(parseTrustedHtml(seg), components, idx + ".", ctx, []);
     childMemoMap.set(cacheKey, node);
     out.push(node);
   }
   return out.length === 0 ? null : out.length === 1 ? out[0] : out;
+}
+
+/**
+ * Build a SAFE `<a>` for use inside a {@link Decorator}'s `replace`. Decorator
+ * output is a TRUSTED surface that does NOT pass through flux's attribute
+ * sanitizer, and React renders a `javascript:` href without complaint — so this
+ * runs `href` through {@link safeUrl} (the same scheme filter the core uses) and
+ * spreads the remaining attributes verbatim. Prefer this over a hand-built
+ * `<a>` whenever the href can come from model output.
+ *
+ * ```tsx
+ * const decorators = [{
+ *   match: /\$[\d.]+[BMK]/g,
+ *   replace: (t) => wrapLink(t, { href: "/figures/" + t, className: "fig" }),
+ * }];
+ * ```
+ */
+export function wrapLink(
+  text: ReactNode,
+  attrs: { href: string } & Record<string, unknown>,
+): ReactElement {
+  const { href, ...rest } = attrs;
+  return createElement("a", { ...rest, href: safeUrl(String(href)) }, text);
 }

@@ -18,7 +18,7 @@
 export { FluxClient, FluxPool, getDefaultPool } from "./client";
 export { FluxMarkdown, useFluxStream, useFluxMarkdownString } from "./react";
 export { highlight, supportedLangs } from "./hi";
-export { htmlToReact, parseTrustedHtml } from "./html-to-react";
+export { htmlToReact, parseTrustedHtml, safeUrl, wrapLink } from "./html-to-react";
 export type {
   Block,
   BlockKind,
@@ -39,4 +39,7 @@ export type {
   ListData,
   NestedBlock,
   ContainerData,
+  Decorator,
+  UrlTransform,
+  FluxNode,
 } from "./types";

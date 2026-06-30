@@ -723,6 +723,46 @@ Rules worth knowing:
   (so your override wins) when you pass `components.CodeBlock`, `components.pre`,
   or `components.code`.
 
+#### Inline text decorators
+
+Wrap or replace matched inline **text** while streaming — e.g. bold financial
+figures — without writing your own HTML re-parser. A `decorators` entry runs
+POST-parse on real inline **text nodes only** (never URLs, code, or markup), once
+per committed block, so a long document stays **O(n)**.
+
+```tsx
+import { FluxMarkdown, wrapLink } from "flux-md";
+
+// HOIST it (module scope) or memoize — a fresh identity each render busts the
+// per-block memo and re-decorates every block on every patch (a dev warning fires).
+const decorators = [
+  { match: /\$[\d.]+[BMK]|FY\d{4}|\d+(?:[-–]\d+)?%/g, replace: (t) => <mark>{t}</mark> },
+  // Linkify a ticker — route the href through the safe helper (see below):
+  { match: /\$[A-Z]{1,5}\b/g, replace: (t) => wrapLink(t, { href: `/sym/${t.slice(1)}` }) },
+];
+
+<FluxMarkdown client={client} decorators={decorators} />;
+```
+
+- **Trusted surface — not sanitized.** A decorator's `replace` output is spliced
+  straight into the tree and does **not** pass through flux's attribute sanitizer
+  (React renders a `javascript:` href without complaint). Treat `decorators`
+  exactly like `components`: build only trusted nodes, and route any link href
+  through `wrapLink` or the exported `safeUrl`.
+- **`skipInside`** defaults to `['a','code','pre','kbd']`; override per decorator.
+- **Per-text-node.** A value split by inline markup (e.g. `$2.<em>5</em>B`) is two
+  text nodes and won't match across them — match against settled, contiguous text.
+- Matching is pure and stateless, so a value streamed char-by-char decorates
+  **identically** to a one-shot render. Same API on `flux-md/dom`
+  (`mountFluxMarkdown(client, el, { decorators })`); a decorator there returns a
+  `Node` or string.
+
+`urlTransform?: (url, { tag, attr }) => string` rewrites `href`/`src`/`poster`
+URLs as blocks render (proxy images, add UTM params). Its output is re-sanitized
+(`safeUrl(urlTransform(safeUrl(value)))`), so a buggy transform can never emit a
+`javascript:` / `data:text/html` URL. Hoist/memoize it for the same reason as
+`decorators`.
+
 ### Structured block data (`setBlockData`)
 
 Set `blockData: true` in the per-stream config and each block carries typed
