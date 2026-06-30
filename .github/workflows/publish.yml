@@ -1,8 +1,19 @@
 name: Publish to npm
 
-# Release automation: tag a release (vX.Y.Z) to build, gate on the full test
-# suite, and publish to npm with SLSA provenance. Provenance attestations can
-# only be produced from a CI workflow with id-token, never from a local publish.
+# Release automation: push a tag (vX.Y.Z) to build, gate on the full test suite,
+# and publish to npm via OIDC TRUSTED PUBLISHING — no NPM_TOKEN secret, ever.
+#
+# ── ONE-TIME SETUP (npmjs.com) ──────────────────────────────────────────────
+# On npmjs.com → the `flux-md` package → Settings → Trusted Publishers → add a
+# GitHub Actions publisher:
+#     Organization or user: siinghd
+#     Repository:           flux-md
+#     Workflow filename:    publish.yml     (filename only, with .yml)
+#     Allowed actions:      npm publish
+# After that, every `git tag vX.Y.Z && git push --tags` publishes automatically.
+# No token is generated, stored, or pasted — the workflow authenticates with a
+# short-lived GitHub OIDC token (the `id-token: write` permission below), and npm
+# generates SLSA provenance automatically. This replaces the old NPM_TOKEN secret.
 on:
   push:
     tags: ["v*"]
@@ -15,11 +26,11 @@ on:
 
 permissions:
   contents: read
-  id-token: write # required for `npm publish --provenance`
+  id-token: write # OIDC: lets npm authenticate to the registry + attach provenance
 
 jobs:
   publish:
-    name: Build, gate, publish (provenance)
+    name: Build, gate, publish (OIDC trusted publishing + provenance)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,12 +50,17 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Trusted publishing requires Node >= 22.14.0 and npm >= 11.5.1.
+          node-version: "22"
           registry-url: "https://registry.npmjs.org"
+      - name: Upgrade npm to a trusted-publishing-capable version (>= 11.5.1)
+        run: |
+          npm install -g npm@latest
+          npm --version
       - run: bun install --frozen-lockfile
 
-      # Gate the release on the same checks CI enforces, so a tag can never ship
-      # a broken build.
+      # Gate the release on the SAME checks CI enforces, so a tag can never ship a
+      # broken build.
       - name: Build WASM
         run: bun run build:wasm
       - name: Typecheck the package
@@ -55,11 +71,17 @@ jobs:
       - name: SSR cold-import (fresh process, no browser globals)
         working-directory: packages/flux-md
         run: bun run test:ssr-cold
+      - name: Consumer smoke (Vite output — separate worker chunk, non-inlined wasm)
+        working-directory: packages/flux-md
+        run: bun run test:consumer-smoke
       - name: Rust core (CommonMark + GFM floors)
         env:
           CMARK_MIN_PASS: "652"
           GFM_MIN_PASS: "23"
         run: bun run test:rust
+      - name: Complexity-scaling gate (streaming stays sub-quadratic)
+        working-directory: crates/flux-md-core
+        run: cargo test --release --features perf_counters --test scaling
       - name: Assert the tarball ships a non-empty WASM artifact
         working-directory: packages/flux-md
         # wasm-pack emits a nested src/wasm/.gitignore ("*"); build:wasm deletes
@@ -79,14 +101,13 @@ jobs:
           echo "OK: tarball ships WASM (${size} bytes)"
           rm -rf "$dest"
 
-      # Decide whether to actually publish — so a tag for an already-published
-      # version, a dry-run, or a repo without NPM_TOKEN set SKIPS (green) instead
-      # of failing red. The build + tarball checks above still gate the release.
+      # Skip (green) for a dry-run or a tag whose version is already on npm, so
+      # re-running a tag is a safe no-op. Otherwise publish via OIDC. (Auth needs
+      # NO secret — see the one-time npmjs.com Trusted Publisher setup at the top.)
       - name: Decide whether to publish
         id: gate
         working-directory: packages/flux-md
         env:
-          HAS_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
           set -euo pipefail
@@ -95,19 +116,18 @@ jobs:
             echo "::notice::dry_run requested — skipping publish (build + checks ran)."
             echo "publish=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          if [ "${HAS_TOKEN}" != "true" ]; then
-            echo "::notice::NPM_TOKEN secret not set — skipping publish. Set it to enable provenance publishing from a tag."
-            echo "publish=false" >> "$GITHUB_OUTPUT"; exit 0
-          fi
           if npm view "flux-md@${ver}" version >/dev/null 2>&1; then
             echo "::notice::flux-md@${ver} is already published — skipping (no-op)."
             echo "publish=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
           echo "publish=true" >> "$GITHUB_OUTPUT"
 
-      - name: Publish to npm (with provenance)
+      - name: Publish to npm (OIDC trusted publishing, automatic provenance)
         if: ${{ steps.gate.outputs.publish == 'true' }}
         working-directory: packages/flux-md
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # No NODE_AUTH_TOKEN: npm >= 11.5.1 authenticates via the GitHub OIDC token
+        # (id-token: write) against the package's configured Trusted Publisher, and
+        # attaches SLSA provenance automatically. If this step errors with an auth
+        # failure, the Trusted Publisher hasn't been configured on npmjs.com yet
+        # (see the one-time setup block at the top of this file).
+        run: npm publish --access public
