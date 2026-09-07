@@ -41,6 +41,7 @@ export function mountSolid(
     sanitize: p.sanitize,
     virtualize: p.virtualize,
     stickToBottom: p.stickToBottom,
+    onLinkClick: p.onLinkClick,
     highlightCode: p.highlightCode,
     batch: p.batch,
   });

@@ -2,11 +2,12 @@ import { test, expect, beforeAll, spyOn } from "bun:test";
 import { GlobalWindow } from "happy-dom";
 import { BrookClient, BrookPool, __resetDefaultPool } from "../src/client";
 import { defineBrookMarkdown, parseTriBool } from "../src/element";
-import type { Block, FromWorker, ToWorker, WorkerLike } from "../src/types";
+import type { Block, FromWorker, LinkClickInfo, ToWorker, WorkerLike } from "../src/types";
 
 // The `<brook-markdown>` custom element's public surface (not on lib.dom's HTMLElement).
 type BrookEl = HTMLElement & {
   client?: BrookClient;
+  onLinkClick?: (event: MouseEvent, link: LinkClickInfo) => void;
   finalize(): void;
   getClient(): BrookClient | null;
 };
@@ -45,6 +46,9 @@ beforeAll(() => {
   g.HTMLElement = win.HTMLElement;
   g.Node = win.Node;
   g.navigator = win.navigator;
+  // Constructible click events for the delegated `onLinkClick` tests (bun has
+  // no MouseEvent of its own).
+  g.MouseEvent = win.MouseEvent;
   // Custom-element registry (dom.test.ts omits this; the element needs it).
   g.customElements = win.customElements;
   // Self-owned clients build on getDefaultPool() → new Worker(...). Capture
@@ -403,5 +407,128 @@ test("config attribute change while a caller-owned client is set is ignored (war
   el.setAttribute("gfm-math", "true"); // config change with external client
   expect(warnSpy).toHaveBeenCalled();
   warnSpy.mockRestore();
+  el.remove();
+});
+
+// ---------------------------------------------------------------------------
+// Renderer (MountOption) attributes + the delegated onLinkClick property
+// ---------------------------------------------------------------------------
+
+// A settled link, and the shape the core emits while a link's URL is still
+// streaming (`data-brook-pending`, no href) — see test/pending-link.test.ts.
+const LINK_HTML =
+  '<p>See the <a href="https://example.com/q3" target="_blank" rel="noopener noreferrer nofollow">Earnings Call</a> today.</p>';
+
+function clickIt(el: Element): boolean {
+  const ev = new MouseEvent("click", { bubbles: true, cancelable: true });
+  el.dispatchEvent(ev);
+  return ev.defaultPrevented;
+}
+
+test("stick-to-bottom / virtualize attributes reach the renderer's mount options", () => {
+  const { client, worker } = makeExternalClient();
+  client.append("");
+  const sid = worker().sent[0].streamId;
+
+  const el = document.createElement("brook-markdown") as BrookEl;
+  el.setAttribute("stick-to-bottom", "");
+  el.setAttribute("virtualize", "");
+  el.client = client;
+  document.body.appendChild(el); // connect → mount reads both attributes
+
+  worker().fire(patch([para(1, "<p>closed</p>")], [para(2, "<p>tail", true)], sid));
+  const root = el.querySelector(".brook-md")!;
+
+  // stick-to-bottom: the scroll-snap sentinel is pinned last.
+  const last = root.children[root.children.length - 1] as HTMLElement;
+  expect(last.className).toContain("brook-bottom-anchor");
+  expect(last.style.scrollSnapAlign).toBe("end");
+
+  // virtualize: the CLOSED block gets content-visibility, the open tail never does.
+  expect((root.children[0] as HTMLElement).style.contentVisibility).toBe("auto");
+  expect((root.children[1] as HTMLElement).style.contentVisibility).toBe("");
+
+  el.remove();
+});
+
+test("no stick-to-bottom / virtualize attributes → renderer defaults (no sentinel, no deferral)", () => {
+  const { client, worker } = makeExternalClient();
+  client.append("");
+  const sid = worker().sent[0].streamId;
+
+  const el = document.createElement("brook-markdown") as BrookEl;
+  el.client = client;
+  document.body.appendChild(el);
+
+  worker().fire(patch([para(1, "<p>closed</p>")], [], sid));
+  const root = el.querySelector(".brook-md")!;
+  expect(root.querySelector(".brook-bottom-anchor")).toBeNull();
+  expect((root.children[0] as HTMLElement).style.contentVisibility).toBe("");
+
+  el.remove();
+});
+
+test("toggling stick-to-bottom AFTER mount applies, with no config-immutability warning", () => {
+  // A renderer option touches no ParserConfig, so it is honoured even with a
+  // CALLER-owned client — where a config attribute would warn and be ignored.
+  const { client, worker } = makeExternalClient();
+  client.append("");
+  const sid = worker().sent[0].streamId;
+
+  const el = document.createElement("brook-markdown") as BrookEl;
+  el.client = client;
+  document.body.appendChild(el);
+  worker().fire(patch([para(1, "<p>body</p>")], [], sid));
+  expect(el.querySelector(".brook-bottom-anchor")).toBeNull();
+
+  const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+  el.setAttribute("stick-to-bottom", "");
+  expect(warnSpy).not.toHaveBeenCalled();
+  warnSpy.mockRestore();
+
+  // Remounted with the option on, and the committed document is redrawn.
+  const root = el.querySelector(".brook-md")!;
+  expect(root.querySelector(".brook-bottom-anchor")).not.toBeNull();
+  expect(root.textContent).toContain("body");
+
+  // ...and removing the attribute takes it back off.
+  el.removeAttribute("stick-to-bottom");
+  expect(el.querySelector(".brook-bottom-anchor")).toBeNull();
+
+  el.remove();
+});
+
+test("the .onLinkClick property is forwarded to the mount and fires on a link click", () => {
+  const { client, worker } = makeExternalClient();
+  client.append("");
+  const sid = worker().sent[0].streamId;
+
+  const calls: LinkClickInfo[] = [];
+  const el = document.createElement("brook-markdown") as BrookEl;
+  el.onLinkClick = (_e, link) => {
+    calls.push(link);
+  };
+  el.client = client;
+  document.body.appendChild(el);
+
+  worker().fire(patch([para(1, LINK_HTML)], [], sid));
+  const a = el.querySelector("a[href]") as HTMLAnchorElement;
+  clickIt(a);
+
+  expect(calls.length).toBe(1);
+  expect(calls[0].href).toBe("https://example.com/q3");
+  expect(calls[0].text).toBe("Earnings Call");
+  expect(calls[0].element).toBe(a);
+
+  // Re-assigning the property while connected remounts against the new handler.
+  const later: LinkClickInfo[] = [];
+  el.onLinkClick = (e, link) => {
+    later.push(link);
+    e.preventDefault();
+  };
+  expect(clickIt(el.querySelector("a[href]")!)).toBe(true);
+  expect(later.length).toBe(1);
+  expect(calls.length).toBe(1); // the replaced handler is gone
+
   el.remove();
 });

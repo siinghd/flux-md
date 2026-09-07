@@ -111,3 +111,35 @@ fn pipe_lines_that_are_not_tables_converge() {
         assert_eq!(streamed(md), one_shot(md), "non-table pipe content diverged: {md:?}");
     }
 }
+
+/// Regression (fuzz `parity`, artifact `crash-c78767333f…`): a delimiter row
+/// that is still being TYPED must not freeze a split the finalized parse never
+/// makes. Mid-line, `|:-` is a one-column delimiter under the one-column header
+/// `value |`, so a table forms and the paragraph above it looks closed — but the
+/// completed `|:-----|--` has two columns, the counts stop matching, the table
+/// dissolves, and all three lines are one paragraph (a delimiter row must
+/// immediately follow its header, and here line 2 is a paragraph continuation).
+/// The streamed parse used to commit `<p>| name | value |</p>` at the transient
+/// and could never take it back.
+#[test]
+fn provisional_delimiter_row_does_not_commit_early() {
+    let cases = [
+        "| name | value |\nvalue |\n|:-----|--\n",
+        "| name | value |\nvalue |\n|:-----|--", // no trailing newline
+        "para\n| a | b |\n| - | - | -\n",        // widening delimiter dissolves the table
+        "para\n| a | b |\n| --- |\n",            // narrowing delimiter dissolves it
+        "- item\n| a | b |\n| - | - | -\n",      // …under a resumable container
+        "para\n\n| a | b |\n| - | -\n",          // blank line before: table is real, para commits
+    ];
+    for md in cases {
+        assert_eq!(streamed(md), one_shot(md), "char-stream != one-shot for {md:?}");
+        for n in 1..=8 {
+            assert_eq!(chunked(md, n), one_shot(md), "chunk={n} != one-shot for {md:?}");
+        }
+    }
+    // The one-shot (spec-conformant) reading is unchanged: one paragraph.
+    assert_eq!(
+        one_shot("| name | value |\nvalue |\n|:-----|--\n"),
+        "<p>| name | value |\nvalue |\n|:-----|--</p>"
+    );
+}

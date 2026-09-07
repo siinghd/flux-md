@@ -1,4 +1,4 @@
-import { escapeHtml, stepHighlight, type HighlightState, type TokenSink } from "./hi";
+import { escapeHtml, hasLang, isRegisteredLang, stepHighlight, type HighlightState, type TokenSink } from "./hi";
 
 /**
  * Incremental syntax highlighting for an OPEN (streaming) code block.
@@ -182,6 +182,13 @@ const CSS_OPENERS: Opener[] = [
   { re: /'/y, cls: "str", end: "'", pred: { k: "char", ch: "'" } },
 ];
 
+// java / c / c++ / c# / swift / kotlin / php. Their strings are all line-bounded
+// (`[^"\\\n]`), so the block comment is the only form that can run to EOF.
+const C_OPENERS: Opener[] = [BLOCK_COMMENT];
+
+/** Nothing in the table can run past a newline (yaml, toml, diff, ruby, …). */
+const NO_OPENERS: Opener[] = [];
+
 // Mirrors the LANGS table in hi.ts — every entry there needs one here (a test
 // asserts the two stay in step, so a new language cannot silently stream wrong).
 const OPENERS: Record<string, Opener[]> = {
@@ -204,6 +211,23 @@ const OPENERS: Record<string, Opener[]> = {
   html: HTML_OPENERS,
   xml: HTML_OPENERS,
   css: CSS_OPENERS,
+  java: C_OPENERS,
+  c: C_OPENERS,
+  cpp: C_OPENERS,
+  "c++": C_OPENERS,
+  cs: C_OPENERS,
+  csharp: C_OPENERS,
+  swift: C_OPENERS,
+  kt: C_OPENERS,
+  kotlin: C_OPENERS,
+  php: C_OPENERS,
+  rb: NO_OPENERS,
+  ruby: NO_OPENERS,
+  yaml: NO_OPENERS,
+  yml: NO_OPENERS,
+  toml: NO_OPENERS,
+  diff: NO_OPENERS,
+  dockerfile: NO_OPENERS,
 };
 
 /** Languages whose checkpoint goes after a `>` instead of after a `\n` (no `ws` pattern). */
@@ -213,6 +237,19 @@ const GT_CHECKPOINT = new Set(["html", "xml"]);
 export interface IncState {
   /** The language key this state's tables were chosen for. */
   readonly lang: string;
+  /** The unbounded openers of `lang` — resolved once, at {@link createInc}. */
+  readonly openers: Opener[];
+  /**
+   * May this state freeze a prefix at all?
+   *
+   * False for a language added through `registerLanguage`: the checkpoint rule
+   * is derived from knowing which of a table's forms can run past a newline, and
+   * a caller-supplied table does not say. Such a block is re-tokenized from the
+   * top on each patch (the {@link CAP} bound still applies) and freezes nothing,
+   * which is the one setting that is safe for ANY pattern list — with `c` at 0
+   * there is no frozen byte to be wrong, and the close-time run is unseeded.
+   */
+  readonly freeze: boolean;
   /** Settled through here: `[0, c)` of the source will never re-tokenize. */
   c: number;
   /** Markup for `[0, c)`. Always a byte-prefix of the block's final markup. */
@@ -283,9 +320,19 @@ export interface IncState {
  */
 export function createInc(lang: string): IncState | null {
   const key = lang.toLowerCase();
-  if (!Object.prototype.hasOwnProperty.call(OPENERS, key)) return null;
+  // A built-in name the caller REPLACED through registerLanguage must not keep
+  // the built-in opener table: that table describes the original patterns'
+  // unbounded forms, and freezing on it against a different table would pin
+  // wrong markup for the rest of the stream.
+  const known = Object.prototype.hasOwnProperty.call(OPENERS, key) && !isRegisteredLang(key);
+  // A registered language has a tokenizer table but no opener table, so it runs
+  // in the conservative never-freeze mode above. A language with neither has no
+  // token boundaries at all and opts out entirely.
+  if (!known && !hasLang(key)) return null;
   return {
     lang: key,
+    openers: known ? OPENERS[key] : NO_OPENERS,
+    freeze: known,
     c: 0,
     frozenHtml: "",
     frozenRev: 0,
@@ -488,7 +535,7 @@ function plainTail(st: IncState, text: string): string {
  * the markup for the WHOLE block (frozen prefix as it was on entry + the tail).
  */
 function rescan(st: IncState, text: string): string {
-  const openers = OPENERS[st.lang];
+  const openers = st.openers;
   const gt = GT_CHECKPOINT.has(st.lang);
   const limit = text.length - GAP;
   // The best checkpoint so far, and the tail-output length that goes with it.
@@ -502,6 +549,7 @@ function rescan(st: IncState, text: string): string {
 
   const sink: TokenSink = (cls, start, end, outLen) => {
     if (liveAt >= 0) return;
+    if (!st.freeze) return; // never-freeze mode: no checkpoint, no opener to pin
     for (let i = 0; i < openers.length; i++) {
       const op = openers[i];
       op.re.lastIndex = start;

@@ -122,3 +122,61 @@ test("CE-8 (html): txt spans newlines and emits a span, so `\\n` is not a cut po
     ["txt", "hello\nworld\nmore"],
   ]);
 });
+
+// CE-9 — diff's context-line catch-all must not be able to start on whitespace.
+// The checkpoint rule cuts a `ws` run in two just after a newline and re-matches
+// `\s+` from the cut, which is only byte-safe while `ws` is the pattern that WINS
+// on whitespace. `[^\n]+` would swallow a line's indentation, so it is ordered
+// after `ws` — a run that stopped at the cut and one that never stopped have to
+// agree on where the token starts.
+test("CE-9 (diff): a context line's indentation is raw whitespace, not part of txt", () => {
+  expect(spans("@@ -1 +1 @@\n  ctx\n-gone\n+new\n", "diff")).toEqual([
+    ["com", "@@ -1 +1 @@"],
+    ["txt", "ctx"],
+    ["kw", "-gone"],
+    ["str", "+new"],
+  ]);
+  // The two spaces are emitted raw, outside every span.
+  expect(unspanned("@@ -1 +1 @@\n  ctx\n", "diff")).toBe("\n  \n");
+});
+
+// CE-10 — a yaml key is decided by a TWO-character lookahead, and one more byte
+// can take it away: `key:` at EOF is a key, `key:x` is not. Bounded on purpose —
+// the frozen prefix reserves GAP bytes behind every checkpoint, so a token may
+// only ever consult that far past its own end.
+test("CE-10 (yaml): the key lookahead reaches exactly one byte past the colon", () => {
+  const pun: [string, string] = ["pun", ":"];
+  expect(spans("key: v\n", "yaml")).toEqual([["attr", "key"], pun]);
+  expect(spans("key:", "yaml")).toEqual([["attr", "key"], pun]); // the `$` branch
+  expect(spans("key:x", "yaml")).toEqual([pun]); // …and one byte later it is gone
+  expect(spans("key", "yaml")).toEqual([]);
+});
+
+// CE-11 — the C preprocessor line is `#[ \t]*`, never `#\s*`. A `\s` there could
+// match a newline, which would make `#include` an unbounded form that the
+// incremental opener table does not list.
+test("CE-11 (c): a preprocessor directive cannot span a newline", () => {
+  expect(spans("#include <stdio.h>\n", "c")).toEqual([
+    ["mac", "#include"],
+    ["pun", "&lt;"],
+    ["pun", "."],
+    ["pun", "&gt;"],
+  ]);
+  expect(highlight("#\n\ninclude\n", "c")).not.toContain('class="t-mac"');
+});
+
+// CE-12 — toml table headers are anchored at the start of a line, so an
+// arbitrary `[…]` in a value stays punctuation and cannot be rewritten into a
+// header by anything a later byte does.
+test("CE-12 (toml): only a line-initial [x] is a table header", () => {
+  expect(spans("[a.b]\nk = [1, 2]\n", "toml")).toEqual([
+    ["sel", "[a.b]"],
+    ["attr", "k"],
+    ["pun", "="],
+    ["pun", "["],
+    ["num", "1"],
+    ["pun", ","],
+    ["num", "2"],
+    ["pun", "]"],
+  ]);
+});

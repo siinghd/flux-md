@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "brookmd",
+  "displayName": "brookmd",
+  "description": "Streaming markdown for the browser — Rust→WASM core in a Web Worker, incremental parse with speculative closure, stable block identities. Teaches setup, framework bindings, components/decorators, math, highlighting, security, styling, performance and troubleshooting.",
+  "version": "0.30.0",
+  "author": {
+    "name": "siinghd",
+    "url": "https://github.com/siinghd"
+  },
+  "homepage": "https://md.hsingh.app/",
+  "repository": "https://github.com/siinghd/brookmd",
+  "license": "MIT",
+  "keywords": [
+    "markdown",
+    "streaming",
+    "llm",
+    "chat-ui",
+    "react",
+    "vue",
+    "svelte",
+    "solid",
+    "web-component",
+    "wasm",
+    "rust",
+    "ssr"
+  ],
+  "skills": "./skills"
+}

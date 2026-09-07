@@ -28,6 +28,30 @@ import { BrookMarkdown } from "brookmd/react";
 <BrookMarkdown stream={stream} />;
 ```
 
+## Agent skill
+
+Teach your coding agent brookmd in one command — setup, framework bindings,
+`components` overrides, math, highlighting, security, styling and troubleshooting,
+with typechecked examples:
+
+```bash
+npx skills add siinghd/brookmd        # installs into every detected agent
+npx skills add siinghd/brookmd -a claude-code   # …or pick one
+```
+
+In Claude Code you can install it as a plugin instead:
+
+```
+/plugin marketplace add siinghd/brookmd
+/plugin install brookmd@brookmd
+```
+
+Agents that read the repo or the site directly can start from
+[`llms.txt`](llms.txt) — also served at
+[md.hsingh.app/llms.txt](https://md.hsingh.app/llms.txt), with the whole
+documentation set concatenated at
+[md.hsingh.app/llms-full.txt](https://md.hsingh.app/llms-full.txt).
+
 ## Highlights
 
 - **Off the main thread** — a pooled Web Worker per stream; the parser re-parses

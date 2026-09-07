@@ -434,6 +434,46 @@ fn component_paras(target: usize, body: fn(usize) -> String) -> String {
     s // close tag never arrives
 }
 
+/// The SETTLED-BODY-PREFIX shape: a `<Chart>` that never closes whose body is
+/// thousands of TINY paragraphs, so the nested parser commits one sub-block per
+/// four source bytes. `component_multi_para` has the same failure mode but at
+/// CHUNK-sized paragraphs, where the open block's own per-append `Block.html`
+/// re-emit (the documented O(n²/chunk) memcpy floor — see the `emitted` column)
+/// swamps the signal; here the sub-block COUNT, not the byte count, dominates,
+/// so re-walking the committed sub-blocks per append stands out against that
+/// floor instead of hiding under it.
+///
+/// What it pins: the wrapper assembler must fold each committed sub-block into
+/// its settled prefix exactly ONCE and re-emit that prefix as a single
+/// contiguous copy. Rebuilding the body from `all_blocks()` instead measured
+/// 7.5x this shape's wall time at 256 KB (1671 ms vs 222 ms) while both work
+/// counters stayed flat and green — the assembler scans nothing and inline-
+/// renders nothing, it only allocates and memcpys.
+fn component_tiny_paras(target: usize) -> String {
+    let mut s = String::from("<Chart>\n");
+    let mut i = 0usize;
+    while s.len() < target {
+        s.push_str(&format!("w{i}\n\n"));
+        i += 1;
+    }
+    s // close tag never arrives
+}
+
+/// The LINEAR control twin of [`component_tiny_paras`]: byte-for-byte the same
+/// paragraphs, minus the `<Chart>` opener line. Without the wrapper each
+/// paragraph is an ordinary top-level block that commits and is emitted exactly
+/// once, so the same bytes, the same block count and the same rendered html
+/// stream in O(new bytes) — the runner's weather hits both twins identically.
+fn tiny_paras_toplevel(target: usize) -> String {
+    let mut s = String::new();
+    let mut i = 0usize;
+    while s.len() < target {
+        s.push_str(&format!("w{i}\n\n"));
+        i += 1;
+    }
+    s
+}
+
 /// A single giant ATX heading line, still growing (no newline) — streams via
 /// HeadingCache (the paragraph cache's settled-prefix scheme in `<hN>`).
 fn heading_words(target: usize) -> String {
@@ -2063,6 +2103,82 @@ fn block_html_sanitize_is_wall_linear() {
          The HtmlBlockCache token fold must consume each token exactly once — re-sanitizing the \
          growing block per append measured 247x on both work counters and 121x this control's \
          wall time.",
+        r.vs_control,
+        limits.vs_control,
+    );
+}
+
+/// The open WRAPPER BODY's settled prefix, gated on WALL time — deliberately,
+/// for the same reason the fence-opener guard is: no counter here can see the
+/// failure mode. A container / component cache that re-derives its already
+/// committed sub-blocks every append scans nothing extra and inline-renders
+/// nothing extra (the nested parser froze that html once, at commit); it only
+/// walks the block list and memcpys each fragment out of its own allocation.
+/// `scanned` and `rendered` stay flat and green while wall goes O(n²/chunk) in
+/// the SUB-BLOCK COUNT — a second, independent quadratic riding on top of the
+/// re-emit floor.
+///
+/// [`component_tiny_paras`] maximises that count per byte (one committed
+/// paragraph per four source bytes) and [`tiny_paras_toplevel`] is the same
+/// paragraphs unwrapped, which stream linearly — the SAME document minus the
+/// single property under test, so the runner's weather cancels.
+///
+/// The PRIMARY gate is `growth_vs_control`: the shape's growth across the 8x
+/// span divided by the linear control's growth across it. Limit 3x sits 2.5x
+/// above the quiet value (1.2x with the prefix folded once) and 1.6x below the
+/// re-walking one (4.7x). `vs_control` backs it up at 12x (quiet 3.6x, broken
+/// 26.5x) — note that ratio legitimately CLIMBS with size even when correct,
+/// because the shape still pays the open block's per-append `Block.html`
+/// re-emit and the control does not; it is a bound on the constant, not a
+/// linearity claim. Raw `growth` stays ungated for that same reason: the floor
+/// alone makes it superlinear on a healthy tree.
+#[test]
+fn wrapper_body_prefix_is_wall_linear() {
+    const SIZES: [usize; 4] = [32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024];
+    let opts = Opts { component_tags: &["Chart"], ..Opts::default() };
+    let limits =
+        WallRatios { vs_control: 12.0, growth_vs_control: 3.0, growth: f64::INFINITY };
+    let r = WallGuard {
+        label: "component_tiny_paras",
+        control_label: "unwrapped",
+        sizes: &SIZES,
+        runs: 3,
+        shape: component_tiny_paras,
+        control: tiny_paras_toplevel,
+        // Identical parser config on both twins — only the `<Chart>` line differs.
+        opts,
+        control_opts: opts,
+        limits,
+    }
+    .measure();
+    let span = (SIZES[SIZES.len() - 1] / SIZES[0]) as f64; // 8x
+    println!(
+        "component_tiny_paras growth {:.1}x vs the linear control's growth = {:.1}x (limit \
+         {:.0}); worst per-size cost vs control {:.1}x (limit {:.0}); raw wall growth {:.1}x \
+         (span x{span:.0}, ungated — the open block's per-append re-emit is an \
+         O(n\u{b2}/chunk) memcpy floor only this twin pays)",
+        r.growth,
+        r.growth_vs_control,
+        limits.growth_vs_control,
+        r.vs_control,
+        limits.vs_control,
+        r.growth,
+    );
+    assert!(
+        r.growth_vs_control < limits.growth_vs_control,
+        "an open component's body grew {:.1}x its LINEAR control's growth across the same \
+         {span:.0}x span (limit {:.0}x). The wrapper assembler must fold each COMMITTED inner \
+         sub-block into its settled prefix exactly once — rebuilding the body from \
+         `all_blocks()` every append measured 4.7x here with both work counters flat.",
+        r.growth_vs_control,
+        limits.growth_vs_control,
+    );
+    assert!(
+        r.vs_control < limits.vs_control,
+        "an open component's body of tiny paragraphs costs {:.1}x what the SAME paragraphs cost \
+         unwrapped (limit {:.0}x). The wrapper assembler must fold each COMMITTED inner \
+         sub-block into its settled prefix exactly once — re-walking them per append measured \
+         26.5x this control.",
         r.vs_control,
         limits.vs_control,
     );

@@ -149,6 +149,41 @@ const CORPUS: Record<string, string[]> = {
     "/* unterminated\nmore\n",
     'a { content: "multi\nline"; }\n',
   ],
+  java: [
+    "// head <&>\npublic class Foo extends Bar {\n  /* block & comment */\n  private final String s = \"a<b\";\n  int n = 0x1f_ff;\n  char c = 'x';\n}\n",
+    "/* never closed\nstill going\n",
+    "String s = \"unterminated\nint n = 1;\n",
+  ],
+  c: [
+    "#include <stdio.h>\n#define WIDE(x) ((x) * 2)\n// c <&>\nint main(void) {\n  /* block */\n  return 0;\n}\n",
+    "/* open\nmore\n",
+    "#\n\ninclude <stdio.h>\n",
+  ],
+  php: [
+    "<?php\n// c\n$x = 'a';\n/* block\nspanning\n*/\necho \"<b>$x</b>\";\n?>\n",
+    "<?php /* never closed\nmore\n",
+  ],
+  rb: [
+    "# c <&>\nclass A < B\n  attr_reader :x\n  def b!(v = 1.5)\n    @c = :sym\n    \"a<b\"\n  end\nend\n",
+    "s = \"unterminated\nt = 1\n",
+  ],
+  swift: ["@objc final class A {\n  let n: Int = 0x1f\n  /* open\n  and open\n"],
+  yaml: [
+    "# c <&>\nkey: value\nnum: 1.5\nok: true\nq: \"a & b\"\ns: 'it''s'\nlist:\n  - one\n  - two\nref: *base\n",
+    "key: \"unterminated\nnext: 1\n",
+    "key\n",
+  ],
+  toml: [
+    "# c <&>\n[a.b]\nkey = \"v\"\nn = 1.5\nok = true\n\n[[c]]\nd = 'e'\n",
+    "key = \"unterminated\nnext = 1\n",
+  ],
+  diff: [
+    "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,3 @@\n ctx & <more>\n-gone\n+new\n",
+    "  indented context\n-  removed\n",
+  ],
+  dockerfile: [
+    "# c <&>\nFROM alpine:3 AS b\nENV X=\"y\"\nRUN a && b\nCMD [\"x\"]\n",
+  ],
 };
 
 test("every language in supportedLangs() has an incremental table", () => {

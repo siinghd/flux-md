@@ -2,7 +2,7 @@ import { test, expect, beforeAll, spyOn } from "bun:test";
 import { GlobalWindow } from "happy-dom";
 import { BrookClient, BrookPool } from "../src/client";
 import type { Block, FromWorker, ToWorker, WorkerLike } from "../src/types";
-import type { DomComponents } from "../src/dom";
+import type { DomComponents, LinkClickInfo } from "../src/dom";
 
 // `@vue/runtime-dom` captures `const doc = typeof document !== "undefined" ?
 // document : null` at MODULE LOAD. Static imports are hoisted above beforeAll,
@@ -30,6 +30,8 @@ beforeAll(async () => {
   for (const k of [
     "document", "HTMLElement", "Element", "Node", "Text", "Comment",
     "DocumentFragment", "ShadowRoot", "SVGElement", "MathMLElement",
+    // Constructible click events for the delegated onLinkClick test.
+    "MouseEvent",
   ]) {
     g[k] = (win as unknown as Record<string, unknown>)[k];
   }
@@ -87,6 +89,11 @@ function patch(committed: Block[], active: Block[], streamId = 1): FromWorker {
 const para = (id: number, html: string, open = false): Block => ({
   id, kind: { type: "Paragraph" }, start: 0, end: html.length, html, open, speculative: false,
 });
+
+// A settled link (the `data-brook-pending` streaming shape is covered in
+// test/link-click.test.tsx, which owns the hook's filtering rules).
+const LINK_HTML =
+  '<p>See the <a href="https://example.com/q3" target="_blank" rel="noopener noreferrer nofollow">Earnings Call</a> today.</p>';
 
 function drive(worker: () => FakeWorker, msg: FromWorker) {
   worker().fire(msg);
@@ -279,4 +286,29 @@ test("useBrookMarkdownString does NOT feed during SSR (setContent untouched on t
   expect(setContentSpy).not.toHaveBeenCalled();
 
   setContentSpy.mockRestore();
+});
+
+test("forwards onLinkClick: a link click in the rendered document reaches the prop", () => {
+  const { client, worker } = makeClient();
+  client.append(""); // force worker creation so we can fire at it
+  const host = document.createElement("div");
+  const calls: LinkClickInfo[] = [];
+  const app = vue.createApp(adapter.BrookMarkdown, {
+    client,
+    onLinkClick: (_e: MouseEvent, link: LinkClickInfo) => {
+      calls.push(link);
+    },
+  });
+  app.mount(host);
+
+  drive(worker, patch([para(1, LINK_HTML)], []));
+  const a = host.querySelector("a[href]") as HTMLAnchorElement;
+  a.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+  expect(calls.length).toBe(1);
+  expect(calls[0].href).toBe("https://example.com/q3");
+  expect(calls[0].text).toBe("Earnings Call");
+  expect(calls[0].element).toBe(a);
+
+  app.unmount();
 });

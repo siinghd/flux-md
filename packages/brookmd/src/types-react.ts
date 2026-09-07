@@ -3,7 +3,7 @@ import type { BlockComponentProps, BlockKindTag } from "./types-core";
 
 /**
  * Override map for {@link BrookMarkdown}. Keys are either lowercase HTML tag
- * names (`table`, `a`, `code`, `h1`… — react-markdown style, applied inside a
+ * names (`table`, `a`, `code`, `h1`… — applied inside a
  * block's HTML) or capitalized block-kind names (`BlockKindTag`, e.g.
  * `CodeBlock`, `Table` — replace the whole block renderer). Values are a React
  * component or an HTML tag string.

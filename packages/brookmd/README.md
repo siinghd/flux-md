@@ -132,6 +132,37 @@ export function ChatMessage({ stream }: { stream: AsyncIterable<string> }) {
 }
 ```
 
+### Chat UI defaults
+
+Five flags an LLM chat UI almost always wants — each off by default because the
+library's default is strict CommonMark, not because it is the better choice here:
+
+```tsx
+import { getDefaultPool } from "brookmd";
+import { BrookMarkdown, useBrookStream } from "brookmd/react";
+import { useEffect } from "react";
+
+// Hoist the config and the overrides — a fresh object each render busts the
+// per-block memo, so every block re-renders on every patch.
+const chatConfig = {
+  softBreaks: true, // a lone \n renders as <br> — models write chat prose, not CommonMark
+  dirAuto: true,    // per-block dir="auto", so an Arabic answer renders RTL beside an English one
+  a11y: true,       // task-list <label>s + <th scope="col">
+  blockData: true,  // typed props.table / heading / code — toolbars from data, not HTML re-parsing
+  gfmMath: true,    // $…$ / $$…$$ / \(…\) / \[…\] (only if your model emits LaTeX)
+};
+
+export function Answer({ stream }: { stream: AsyncIterable<string> }) {
+  // Hide the one-time WASM init behind the user's typing, not the first token.
+  useEffect(() => { getDefaultPool().warm(); }, []);
+  const client = useBrookStream(stream, { config: chatConfig });
+  return <BrookMarkdown client={client} className="brook-caret" stickToBottom />;
+}
+```
+
+`className="brook-caret"` opts into the theme's [streaming
+caret](#streaming-caret); drop it if you draw your own.
+
 ### Already holding a growing string? — `useBrookMarkdownString`
 
 Many apps keep the streaming message as a **single growing string prop** (it
@@ -168,6 +199,48 @@ use it from any binding.
 > content is unchanged keep their identity (and React keys), so only genuinely
 > changed blocks re-render. (`setContent("")` is an explicit clear and resets
 > immediately.)
+
+### With the Vercel AI SDK (`useChat`)
+
+`useChat` hands you each message as `parts`, and the assistant's text part grows
+token by token — exactly the controlled-string shape above. Join the text parts
+and pass the result straight in:
+
+```tsx
+import { useChat } from "@ai-sdk/react";
+import { BrookMarkdown, useBrookMarkdownString } from "brookmd/react";
+
+// Hoisted — see the memoization note in `components`.
+const components = { a: (p: any) => <a {...p} /> };
+
+export function Thread() {
+  const { messages, status } = useChat();
+  // `status` describes the LAST message only — earlier ones are finished.
+  return messages.map((m, i) => (
+    <Answer key={m.id} message={m} streaming={status === "streaming" && i === messages.length - 1} />
+  ));
+}
+
+function Answer(props: {
+  message: { parts: Array<{ type: string; text?: string }> };
+  streaming: boolean;
+}) {
+  const text = props.message.parts.map((p) => (p.type === "text" ? p.text ?? "" : "")).join("");
+  const client = useBrookMarkdownString(text, { streaming: props.streaming });
+  return <BrookMarkdown client={client} components={components} />;
+}
+```
+
+> **Pass `streaming: false` when the message finishes — it is not inferred.**
+> Omit it (or leave it `true`) and the stream stays OPEN forever: the last block
+> never commits, so a finished code fence never highlights and never shows its
+> copy button, and a streaming caret never stops blinking. brookmd deliberately
+> refuses to infer "done" from an unchanged string — a caller who grows the text
+> without the flag would re-finalize on every token, an O(n²) reparse trap.
+
+One client per message, so re-rendering the thread never re-parses history, and
+`getDefaultPool().warm()` in the chat shell (see [Chat UI
+defaults](#chat-ui-defaults)) keeps WASM init off the first answer.
 
 <details>
 <summary>Full manual control (caller-owned client)</summary>
@@ -246,8 +319,15 @@ so just call **`client.setContent(fullString, { done })`** instead of the
 finalizes on `done`. That's the same primitive the React/Vue/Svelte/Solid
 controlled-string helpers wrap; in vanilla you call it directly.
 
-`mountBrookMarkdown(client, container, options?)` returns `{ destroy(), refresh() }`.
-Options: `components`, `sanitize`, `virtualize`, `stickToBottom`, `highlightCode`
+`mountBrookMarkdown(client, container, options?)` returns
+`{ destroy(), refresh(), openBlockId() }` — `openBlockId()` is the id of the
+streaming **tail** block (the only one that can still re-render), or `null` when
+nothing is open.
+Options: `components`, `sanitize`, `virtualize`, `stickToBottom`, `className`,
+`id`, `role`, `ariaLive`, `ariaAtomic`, `decorators`, `urlTransform`,
+`onRenderMetrics`, `onLinkClick` (*since 0.30.0* — same delegated hook as React,
+called with the native `MouseEvent`; see [Intercepting link
+clicks](#intercepting-link-clicks--onlinkclick)), `highlightCode`
 (default true), `streamingHighlight` (`boolean | "wavefront" | "eager"`, default
 true — highlight a code fence while it is still streaming; see
 [Streaming syntax highlighting](#streaming-syntax-highlighting)),
@@ -295,6 +375,21 @@ light DOM so your markdown CSS applies, and `defineBrookMarkdown` is a no-op und
 SSR (no `customElements`). A self-owned element (`src` / `markdown` / inline
 text / `append()`) is torn down on disconnect; a caller-supplied `client` is left
 alone.
+
+**The full attribute surface:**
+
+| Attributes | |
+|---|---|
+| content | `markdown`, `src` |
+| renderer | `stick-to-bottom`, `virtualize` *(both since 0.30.0)* |
+| config (tri-state) | `gfm-autolinks`, `gfm-alerts`, `gfm-tagfilter`, `gfm-footnotes`, `gfm-math`, `dir-auto`, `lenient-lists`, `soft-breaks`, `a11y`, `unsafe-html`, `block-html`, `retain-committed-html` |
+| config (lists) | `component-tags`, `allow-schemes` — comma- or space-separated |
+
+Properties (set them in JS, not as attributes): `client`, `components`,
+`sanitize`, `onLinkClick` *(since 0.30.0)*. Methods: `append()`, `finalize()`,
+`reset()`, `getClient()`. Config flags with no attribute of their own
+(`inlineComponentTags`, `htmlAllowlist`, `dropHtmlTags`, `blockData`) are set by
+assigning a caller-owned `client` you constructed with that config.
 
 **Angular** consumes the same element — no separate package:
 
@@ -558,7 +653,117 @@ dark automatically via `prefers-color-scheme` (force a mode with
 }
 ```
 
+### What the theme covers
+
+Document elements, the highlighter's token colours (`.t-kw`, `.t-str`, …), the
+pending-link marker — and *(since 0.30.0)* block spacing via `.brook-block` plus
+the chrome the renderers emit: the code-block header and its controls
+(`.brook-code-header`, `.brook-code-lang`, `.brook-code-copy`,
+`.brook-code-streaming-pill`, `.brook-code-body`), the math and mermaid slots
+(`.brook-math-*`, `.brook-mermaid-*`), GitHub-style alerts (`.markdown-alert*`),
+and the footnote section. Writing your own CSS instead? Those are the class names
+to target.
+
+### Block-state classes
+
+Every block the generic renderer emits is wrapped in a state-carrying element,
+and these names are a **stable styling contract** — React, the DOM mount, and
+the server renderer all emit the same ones:
+
+| Class | Where | Means |
+|---|---|---|
+| `brook-md` | root | always present; `className` is appended to it |
+| `brook-block` | every block wrapper | — |
+| `brook-block-<kind>` | every block wrapper | the lowercased block kind: `brook-block-paragraph`, `brook-block-codeblock`, `brook-block-table`, `brook-block-mathblock`, … |
+| `brook-open` | the streaming tail block | still growing — its HTML may change on the next patch |
+| `brook-speculative` | a block closed by inference | may still be revised |
+| `brook-streaming` | the code / math / mermaid slot | that renderer's own still-arriving state |
+| `brook-bottom-anchor` | the `stickToBottom` sentinel | — |
+| `brook-deferred` | root, while `deferTail` is deferring | — |
+
+Use them to gate anything that must not run on half-arrived content — a KaTeX or
+Mermaid pass skips `.brook-open` / `.brook-streaming` (see the [KaTeX
+recipe](#math-with-katex)) — and to style the tail differently from settled text.
+
+### Streaming caret
+
+The theme ships an **opt-in** caret that follows the streaming tail. Add the
+`brook-caret` class to the root; nothing else changes, and the rendered HTML is
+identical with or without it:
+
+```tsx
+<BrookMarkdown client={client} className="brook-caret" />
+```
+
+```ts
+mountBrookMarkdown(client, el, { className: "brook-caret" });
+```
+
+It is a `::after` bar on the last text element inside the `brook-open` block, so
+exactly one caret is on screen. Code, math, and mermaid fences don't get one —
+they already show a "streaming" pill. Retint it with `--brook-caret`, and it
+stops blinking under `prefers-reduced-motion`. Bringing your own CSS? The
+[block-state classes](#block-state-classes) are all it is built from.
+
+### Tailwind / design systems
+
+Two hooks, no wrapper components: `className` on the root, and the **element
+path** of the [`components`](#custom-components--overrides) map for everything
+inside a block. Overrides apply to the OPEN (streaming) block too, so the tail is
+styled the whole way down instead of popping into place when it settles:
+
+```tsx
+import { BrookMarkdown, type Components } from "brookmd";
+
+// HOIST it (module scope) or memoize. A fresh object each render busts the
+// per-block memo, so every block re-parses on every patch — the single most
+// expensive mistake you can make with this API.
+const components: Components = {
+  p: (p) => <p className="my-3 leading-7" {...p} />,
+  ul: (p) => <ul className="my-3 list-disc pl-6" {...p} />,
+  ol: (p) => <ol className="my-3 list-decimal pl-6" {...p} />,
+  li: (p) => <li className="my-1" {...p} />,
+  a: (p) => <a className="text-sky-600 underline underline-offset-2" {...p} />,
+  h1: (p) => <h1 className="mt-6 text-2xl font-semibold" {...p} />,
+  h2: (p) => <h2 className="mt-5 text-xl font-semibold" {...p} />,
+  h3: (p) => <h3 className="mt-4 text-lg font-semibold" {...p} />,
+  table: (p) => <table className="w-full border-collapse text-sm" {...p} />,
+  code: (p) => <code className="rounded bg-slate-100 px-1 py-0.5" {...p} />,
+  blockquote: (p) => <blockquote className="border-l-4 pl-4 italic" {...p} />,
+};
+
+<BrookMarkdown client={client} components={components} className="text-slate-900" />;
+```
+
+> **Using `@tailwindcss/typography`? Skip the theme import.** `.brook-md` is a
+> plain `<div>`, so `class="prose brook-md"` works — but `brookmd/styles.css`
+> resets `.brook-md > *` margins and sets its own type scale, which fights
+> `prose`'s spacing. Pick one: the theme, or `prose` plus the token-colour
+> variables (`--brook-t-kw`, …) if you still want the built-in highlighter's
+> colours.
+
 ## Public API
+
+### All entry points
+
+Every subpath is independently importable; you pay only for what you import.
+
+| Entry | What it is |
+|---|---|
+| `brookmd` | the common surface: `BrookClient`, `BrookPool`, `getDefaultPool`, `sourceFingerprint`, `BrookMarkdown`, `useBrookStream`, `useBrookMarkdownString`, `highlight`, `supportedLangs`, `htmlToReact`, `parseTrustedHtml`, `safeUrl`, `wrapLink` + the types (re-exports React, so it pulls `react`) |
+| `brookmd/client` | framework-free core — `BrookClient`, `BrookPool`, `getDefaultPool`, `applyPatch`, `emptyBlockStore` |
+| `brookmd/react` | `BrookMarkdown`, `useBrookStream`, `useBrookMarkdownString`, `blockKindProps` |
+| `brookmd/server` | worker-free, **React-free** one-shot: `initBrook`, `initBrookSync`, `isBrookReady`, `renderToString`, `parseToBlocks` |
+| `brookmd/server/react` | `BrookMarkdownStatic` — hookless, RSC-safe |
+| `brookmd/dom` | `mountBrookMarkdown`, `tailOpenBlockId` |
+| `brookmd/element` | `defineBrookMarkdown` (the `<brook-markdown>` Web Component) |
+| `brookmd/vue` · `/svelte` · `/solid` | the framework bindings |
+| `brookmd/highlight` | `highlight`, `supportedLangs`, `registerLanguage` *(since 0.30.0)* |
+| `brookmd/html-to-react` | `htmlToReact`, `parseTrustedHtml`, `wrapLink`, `safeUrl` — render one block's HTML to a React tree yourself |
+| `brookmd/block-props` | `blockProps`, `extractLang`, `htmlAttrs` — the framework-neutral block→props mapping the DOM renderer uses |
+| `brookmd/worker-core` | `WorkerCore` — the worker's state machine, for hosting the parser in your own worker/runtime |
+| `brookmd/types` | every type, value-free (`Block`, `ParserConfig`, `RenderMetrics`, `ListItemData`, `LinkClickInfo`, the wire types, …) |
+| `brookmd/styles.css` | the optional theme |
 
 ### `BrookClient`
 
@@ -569,6 +774,7 @@ class BrookClient {
     config?: ParserConfig;
     onError?: (err: { message: string; fatal?: boolean }) => void; // worker/parse + WASM-init errors
     onBlock?: (block: Block) => void;                 // fires once per block as it commits
+    coalesce?: boolean;                               // one rAF-scheduled notify per frame (default false)
     recovery?: boolean;                               // auto-heal a transient worker death (default true)
   });
   get failed(): Error | null;                       // terminal worker failure, else null (null through heals)
@@ -584,6 +790,7 @@ class BrookClient {
   ): void;                                          // done:true → finalize
   reset(): void;                                    // wipe and reuse
   destroy(): void;                                  // free this stream's parser
+  reattach(): void;                                 // re-register after destroy() (StrictMode double-mount)
   whenReady(): Promise<void>;                       // resolves once WASM loaded; rejects on init failure
   subscribe(listener: () => void): () => void;      // React-friendly store
   getSnapshot(): Block[];                           // ordered current blocks
@@ -612,6 +819,21 @@ failure (`{ fatal: true }`); without it, errors are only `console.error`'d and a
 load failure surfaces as a rejected `whenReady()`. Pass `onBlock` to run a side
 effect each time a block commits (e.g. lazy-highlight a finished code block).
 
+Pass **`coalesce: true`** to collapse every patch that lands inside one frame
+into a single `requestAnimationFrame`-scheduled notification, so a
+`useSyncExternalStore` consumer renders at most once per frame instead of once
+per patch. It is lossless (committed blocks are reference-stable, so only
+superseded tail renders are skipped), the finalize patch always flushes
+synchronously, and it degrades to synchronous emits where `requestAnimationFrame`
+is unavailable (SSR, tests). The React hooks that own a client
+(`useBrookStream` / `useBrookMarkdownString`) already set it; a client you
+construct yourself defaults to `false`.
+
+**`reattach()`** re-registers a client with the pool after `destroy()`. It exists
+for React StrictMode's dev double-mount (destroy on the simulated unmount, then
+the SAME instance remounts) — apps don't normally call it, and it is a no-op
+while still attached.
+
 A **transient worker death** heals invisibly by default: if a worker dies
 mid-stream (e.g. a stale hashed worker URL 404s after a redeploy), the client
 buffers the driven document, re-acquires a fresh worker, and re-feeds it once —
@@ -633,7 +855,7 @@ const client = new BrookClient({
     gfmFootnotes: true,   // [^1] + [^1]: → footnote section (default false)
     gfmMath: true,        // $…$ / \(…\) inline + $$…$$ / \[…\] display math (default false)
     dirAuto: true,        // per-block dir="auto" for RTL/bidi text (default false)
-    softBreaks: true,     // a single \n renders as <br> (remark-breaks / chat convention; default false)
+    softBreaks: true,     // a single \n renders as <br> (the chat convention; default false)
     lenientLists: true,   // marker + 6+ SPACES → item text, not indented code (default false)
     a11y: true,           // task-list <label> + <th scope="col"> a11y markup (default false)
     unsafeHtml: false,    // pass raw HTML through (default false — keep it false for untrusted input)
@@ -644,6 +866,7 @@ const client = new BrookClient({
     blockHtml: true,                         // extend the sanitizer to BLOCK raw HTML (<details>…); needs a list above (default false)
     allowSchemes: ["file"],                  // un-block a default-blocked URL scheme (default none — see "Security")
     blockData: true,      // opt-in structured kind.data per block (default false — see "Structured block data")
+    retainCommittedHtml: false, // keep committed HTML inside the parser too (default false on the streaming path)
   },
 });
 ```
@@ -722,6 +945,14 @@ When to enable each flag:
   for privileged hosts (Electron, extensions) that intercept link clicks instead
   of navigating. Script-executing schemes can never be re-enabled. See
   [Un-blocking a scheme](#un-blocking-a-scheme--allowschemes).
+- `retainCommittedHtml: true` — keep every committed block's rendered HTML
+  **inside the parser** as well. Off on the streaming path, which is what you
+  want: the client receives each committed block exactly once and stores it
+  itself, so a second copy in WASM serves nobody — dropping it roughly halves a
+  long stream's `getMetrics().retainedBytes`, and the wire is byte-identical
+  either way. Turn it on only if something reads the whole rendered document back
+  out of the parser. The server renderers (`renderToString` / `parseToBlocks`) do
+  exactly that and pin it on regardless of what you pass.
 
 **Footnotes** (`gfmFootnotes`) work in streaming with one honest caveat: a
 `[^1]` reference renders speculatively the moment it's seen (committed blocks
@@ -739,7 +970,7 @@ nested footnotes. The section uses GitHub-style markup
 `<span class="math math-inline">…</span>`, display math to
 `<div class="math math-display">…</div>` (and inline display to a `math-display`
 span), each carrying the **HTML-escaped LaTeX as its text content** — exactly
-what [KaTeX](https://katex.org)'s auto-render / `rehype-katex` consume. brookmd
+what [KaTeX](https://katex.org)'s auto-render expects. brookmd
 stays **zero-dep**: it produces the KaTeX-ready markup and never processes the
 body as markdown; you bring the KaTeX pass (or override `components.MathBlock`,
 which receives the raw LaTeX as `text`). Single `$` uses the **pandoc rule** so
@@ -767,12 +998,57 @@ Subscribes to a `BrookClient`, renders each block keyed by its stable parser-ass
 <BrookMarkdown client={client} />
 ```
 
-The root element accepts opt-in `className` (appended to `brookmd`), `id`,
-`role`, and `aria-live` / `aria-atomic`. Set `aria-live="polite"` to make the
-output a live region so screen readers announce streamed content as it settles —
-`polite` coalesces rapid updates and does **not** read every token. The same
-options exist on the DOM mount (`mountBrookMarkdown(client, el, { ariaLive: "polite" })`),
-covering the Web Component and the Vue/Svelte/Solid adapters.
+The root element accepts opt-in `className` (appended to the always-present
+`brook-md` root class), `id`, `role`, and `aria-live` / `aria-atomic`. Set
+`aria-live="polite"` to make the output a live region so screen readers announce
+streamed content as it settles — `polite` coalesces rapid updates and does **not**
+read every token. The same options exist on the DOM mount
+(`mountBrookMarkdown(client, el, { ariaLive: "polite" })`), covering the Web
+Component and the Vue/Svelte/Solid adapters.
+
+#### Props
+
+| Prop | Type | Default | What it does |
+|---|---|---|---|
+| `client` | `BrookClient` | — | A client you own and drive; the component never destroys it. |
+| `stream` | `AsyncIterable<string> \| ReadableStream<Uint8Array> \| Response` | — | 1-line mode: the component owns an internal client. Exactly one of `client` / `stream` is required (neither → throws); `client` wins if both are given. |
+| `streamConfig` | `ParserConfig` | — | [Per-stream config](#per-stream-config) for that internally created client (stream mode only). |
+| `onStreamError` | `(err: Error) => void` | — | The `stream` source rejected. Worker/parse errors go to the client's `onError` instead. |
+| `components` | `Components` | — | [Overrides](#custom-components--overrides). **Hoist it.** |
+| `decorators` | `Decorator[]` | — | [Inline text decorators](#inline-text-decorators). **Hoist it.** |
+| `urlTransform` | `UrlTransform` | — | Rewrite `href`/`src`/`poster`; the output is re-sanitized. **Hoist it.** |
+| `sanitize` | `(html: string) => string` | — | Runs on every block's HTML **including the open tail**. **Hoist it.** |
+| `streamingHighlight` | `boolean \| "wavefront" \| "eager"` | `"wavefront"` | [Where the colour front sits](#where-the-colour-front-sits-wavefront-default-vs-eager). |
+| `virtualize` | `boolean` | `false` | `content-visibility: auto` on closed blocks — [long documents](#long-documents--virtualize). |
+| `stickToBottom` | `boolean` | `false` | Emits the scroll-snap anchor — [stick to bottom](#stick-to-bottom-while-streaming--sticktobottom). |
+| `deferTail` | `boolean` | `false` | Route the block list through React's `useDeferredValue`, so a burst of patches can yield to higher-priority updates; the root carries `brook-deferred` while a deferred render is in flight. Commit timing only — output is unchanged. rAF coalescing (`coalesce`) is the preferred way to absorb patch bursts. |
+| `childMemo` | `boolean` | `false` | On an OPEN block, reuse the React nodes of top-level children whose HTML hasn't changed and re-parse only the new trailing content. Applies only when `components`/`sanitize` route the block off the `innerHTML` fast path; byte-identical either way. Worth it for a long, slowly growing streamed block under a custom map. |
+| `className` / `id` / `role` | `string` | — | Set on the root; `className` is appended to `brook-md`. |
+| `aria-live` / `aria-atomic` | `"off" \| "polite" \| "assertive"` / `boolean` | off | Live-region attributes — see [Accessible chat](#accessible-chat). |
+| `onLinkClick` | `(event, link) => void` | — | Delegated link clicks — see [Intercepting link clicks](#intercepting-link-clicks--onlinkclick). *(since 0.30.0)* |
+| `onRenderMetrics` | `RenderMetricsHook` | — | Fires once per ACTUAL block render with `{ renderCount, speculativeToggleCount, lastRenderMs, kind }` — render-churn instrumentation; a committed block that memo-skips never fires. Zero cost when omitted. **Hoist it.** |
+| `onBlockError` | `(error, info) => void` | — | Per-block error boundary hook — see [`onBlockError`](#onblockerror). **Hoist it.** |
+
+#### Accessible chat
+
+Make the assistant's message a polite live region and mark it busy while it
+streams:
+
+```tsx
+<div role="log" aria-live="polite" aria-busy={streaming}>
+  <BrookMarkdown client={client} />
+</div>
+```
+
+- `aria-live="polite"` announces content as it settles rather than reading every
+  token. Put it on the container you own (as above) or on the root via the
+  `aria-live` prop — one live region, not both.
+- Turn on `a11y: true` in the [per-stream config](#per-stream-config): task-list
+  checkboxes get a `<label>` (so the checkbox and its text are associated) and
+  table headers get `scope="col"`.
+- Flip `aria-busy` back to `false` when the stream finalizes, so assistive tech
+  knows the message is complete. Where focus goes when a message lands is your
+  app shell's decision, not the renderer's.
 
 #### Custom components / overrides
 
@@ -854,7 +1130,7 @@ filename header (the alert type is at `block.kind.data.kind`).
 
 Rules worth knowing:
 
-- **There is no `node` prop / no hast tree.** Introspect via `className` /
+- **There is no `node` prop / no syntax tree.** Introspect via `className` /
   `data-*`, or — better — opt into the typed **[structured-data
   channel](#structured-block-data-setblockdata)** (`blockData: true`) and read
   `block.kind.data` (and the typed `props.table` / `heading` / `code` / `math` /
@@ -912,13 +1188,160 @@ URLs as blocks render (proxy images, add UTM params). Its output is re-sanitized
 `javascript:` / `data:text/html` URL. Hoist/memoize it for the same reason as
 `decorators`.
 
+#### Math with KaTeX
+
+With `gfmMath: true` brookmd emits KaTeX-ready markup and stays zero-dep — you
+run the typesetting pass. Typeset each `.math` element **once its block has
+closed**: an open block holds partial LaTeX, and feeding KaTeX a half-typed
+formula throws on every patch. One observer over the scroller covers every
+message in the thread:
+
+```tsx
+import { useEffect, useRef, type ReactNode } from "react";
+import katex from "katex";
+
+export function MathPass({ children }: { children: ReactNode }) {
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = root.current;
+    if (!el) return;
+    const pass = () => {
+      el.querySelectorAll<HTMLElement>(".math:not([data-tex])").forEach((node) => {
+        if (node.closest(".brook-streaming, .brook-open")) return; // still streaming
+        node.setAttribute("data-tex", "1");                        // idempotence marker
+        try {
+          katex.render(node.textContent ?? "", node, {
+            displayMode: node.classList.contains("math-display"),
+            throwOnError: false,
+          });
+        } catch {
+          /* leave the raw LaTeX in place */
+        }
+      });
+    };
+    const obs = new MutationObserver(pass);
+    obs.observe(el, { childList: true, subtree: true });
+    pass();
+    return () => obs.disconnect();
+  }, []);
+  return <div ref={root}>{children}</div>;
+}
+```
+
+The two non-obvious parts are the `.brook-streaming, .brook-open` skip (see
+[block-state classes](#block-state-classes)) and the `data-tex` marker, which
+stops the observer re-typesetting what it already rendered. Prefer per-block
+control? `components.MathBlock` receives the decoded LaTeX as `props.text`.
+
+#### Mermaid diagrams
+
+`Mermaid` is a block **slot**: brookmd renders the diagram source and never calls
+a renderer. Render it as plain text while the fence is open and call
+`mermaid.render` only once it closes — a half-arrived diagram throws on every
+patch. The slot carries the fence's rendered `<pre><code>`, so the source is its
+text content:
+
+```tsx
+import { useEffect, useState } from "react";
+import mermaid from "mermaid";
+import type { BlockComponentProps, Components } from "brookmd";
+
+// brookmd's own escaped output — the text content IS the diagram source.
+function mermaidSource(html: string): string {
+  const el = document.createElement("div");
+  el.innerHTML = html;
+  return el.textContent ?? "";
+}
+
+const components: Components = {
+  Mermaid: ({ html, open, block }: BlockComponentProps) => {
+    const [svg, setSvg] = useState("");
+    const source = mermaidSource(html);
+    useEffect(() => {
+      if (open || !source) return;
+      let live = true;
+      mermaid
+        .render("brook-mermaid-" + block.id, source)
+        .then((r: { svg: string }) => { if (live) setSvg(r.svg); })
+        .catch(() => { /* keep the source on screen */ });
+      return () => { live = false; };
+    }, [open, source, block.id]);
+    if (open || !svg) return <pre className="brook-mermaid-body">{source}</pre>;
+    return <div dangerouslySetInnerHTML={{ __html: svg }} />;
+  },
+};
+```
+
+#### Bring your own highlighter
+
+`components.CodeBlock` (or `components.pre` / `components.code`) bypasses the
+built-in highlighter entirely. If yours is async, render plain while the fence is
+open and highlight once on close — never per patch:
+
+```tsx
+import { useEffect, useState } from "react";
+import type { BlockComponentProps, Components } from "brookmd";
+import { highlightToHtml } from "./my-highlighter"; // (code, lang) => Promise<string>
+
+const components: Components = {
+  CodeBlock: ({ text = "", language, open }: BlockComponentProps) => {
+    const [html, setHtml] = useState<string | null>(null);
+    useEffect(() => {
+      if (open) return;
+      let live = true;
+      highlightToHtml(text, language || "text").then((h) => { if (live) setHtml(h); });
+      return () => { live = false; };
+    }, [open, text, language]);
+    if (open || html === null) return <pre><code>{text}</code></pre>;
+    return <pre dangerouslySetInnerHTML={{ __html: html }} />;
+  },
+};
+```
+
+An override gives up the incremental streaming highlighter (the fence stays plain
+until it closes). If all you need is one more language, keep the fast path and
+register it instead — see [`registerLanguage`](#highlightcode-lang).
+
+#### Interactive task lists
+
+GFM task-list checkboxes are emitted `disabled` (`<input checked="" disabled=""
+type="checkbox">`) because that is GFM's byte-exact output. Override the `input`
+tag to make them live:
+
+```tsx
+import type { Components } from "brookmd";
+
+const components: Components = {
+  input: (p: { type?: string; checked?: boolean }) =>
+    p.type === "checkbox" ? (
+      <input type="checkbox" checked={!!p.checked} onChange={onToggle} />
+    ) : (
+      <input {...p} />
+    ),
+};
+```
+
+The rendered markup is a **view** of the markdown: to persist a toggle, flip
+`[ ]` ⇄ `[x]` in your source string and re-feed it with `setContent`. With
+`blockData: true`, a `List` block's `props.list.items[i].start` is the
+document-absolute offset of that item's marker, which is enough to locate the
+checkbox to rewrite (nested items carry no offset).
+
+#### Lazy images
+
+```tsx
+const components = { img: (p: any) => <img loading="lazy" decoding="async" {...p} /> };
+```
+
+Pair it with `urlTransform` if you also proxy or resize remote image URLs.
+
 ### Structured block data (`setBlockData`)
 
 Set `blockData: true` in the per-stream config and each block carries typed
 structured data on `block.kind.data`, also surfaced as typed fields on the
 component props — so you build toolbars, tables of contents, charts, copy
-buttons, etc. from **data**, never by re-parsing the rendered HTML (no hast tree,
-no rehype). Off by default; when off, output and CommonMark/GFM conformance are
+buttons, etc. from **data**, never by re-parsing the rendered HTML or walking
+a syntax tree. Off by default; when off, output and CommonMark/GFM conformance are
 byte-identical, so non-users pay nothing.
 
 | Kind | `block.kind.data` | prop | use |
@@ -927,7 +1350,8 @@ byte-identical, so non-users pay nothing.
 | `Heading` | `{ level, text, id }` | `props.heading` | table of contents with anchors |
 | `CodeBlock` | `{ lang, meta?, code }` | `props.code` | decoded source (copy / run) |
 | `MathBlock` | `{ latex }` | `props.math` | LaTeX source (re-render) |
-| `List` | `{ ordered, start }` | `props.list` | ordered-list numbering |
+| `List` | `{ ordered, start?, items? }`, items `{ html, start? }` | `props.list` | ordered-list numbering; `items[i].start` is the document-absolute offset of that top-level item's marker (absent for nested items) |
+| `Blockquote` / `Alert` | `{ nested }` (Alert also `{ kind }`), each `{ html }` | `props.container` | render inner sub-blocks KEYED, so a streaming quote re-renders only its open last child |
 
 Each cell's `text` is inline-stripped plaintext (for sort/filter/CSV/logic);
 `html` is the inline-rendered display HTML. The data **streams** with the
@@ -940,6 +1364,41 @@ const toc = client.getSnapshot()
   .filter((b) => b.kind.type === "Heading" && b.kind.data)
   .map((b) => b.kind.data as { level: number; text: string; id: string });
 ```
+
+#### Table toolbar (CSV / copy)
+
+`props.table` is the whole table as data, so a toolbar is a pure function of it —
+no HTML re-parse — and it keeps working **while the table streams**, because the
+override is invoked on open blocks too and `rows` grows as they arrive:
+
+```tsx
+import type { BlockComponentProps, Components, TableData } from "brookmd";
+
+// RFC 4180: quote any field containing a comma, quote, or newline, and double
+// internal quotes. Built from each cell's plaintext `text` — never the display HTML.
+function toCsv(table: TableData): string {
+  const quote = (v: string) => (/[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v);
+  const line = (cells: { text: string }[]) => cells.map((c) => quote(c.text)).join(",");
+  return [line(table.headers), ...table.rows.map(line)].join("\n");
+}
+
+const components: Components = {
+  Table: ({ table, html, open }: BlockComponentProps) => (
+    <figure className="table-card">
+      {table && (
+        <button onClick={() => navigator.clipboard.writeText(toCsv(table))}>
+          {open ? "Copy CSV (so far)" : "Copy CSV"}
+        </button>
+      )}
+      <div dangerouslySetInnerHTML={{ __html: html }} />
+    </figure>
+  ),
+};
+```
+
+Needs `blockData: true` (with it off `props.table` is `undefined` — guard as
+above). The same data drives sort, filter, transpose and charts: `text` is the
+plaintext to compute on, `html` the markup to display.
 
 ### Component tags
 
@@ -1132,8 +1591,8 @@ new BrookClient({ config: { htmlAllowlist: ["details", "summary"], blockHtml: tr
   propagated: `<b><i></b>` emits `<b><i></i></b>`, and a close tag matching
   nothing open is dropped. A type-6/7 block ends at a blank line even with tags
   open — the closers land there.
-- **Markdown inside the HTML is not parsed** (the body is text + tags). That —
-  full `rehype-raw` semantics — is a later stage.
+- **Markdown inside the HTML is not parsed** (the body is text + tags).
+  Re-entering markdown inside a raw block is a later stage.
 
 ### Types
 
@@ -1148,32 +1607,110 @@ interface Block {
   end: number;
 }
 
-// Override map for <BrookMarkdown components={...} />
-type Components = Record<string, React.ComponentType<any> | string>;
+type BlockKindTag =
+  | "Paragraph" | "Heading" | "CodeBlock" | "MathBlock" | "Mermaid" | "List"
+  | "Blockquote" | "Alert" | "Table" | "Rule" | "Html" | "Component";
+
+// Override map for <BrookMarkdown components={...} />. Block-kind keys are typed
+// to BlockComponentProps; every other key is an ELEMENT override and receives
+// that element's attributes + children — no `block`. (See "two prop contracts".)
+type Components = {
+  [K in BlockKindTag]?: React.ComponentType<BlockComponentProps> | string;
+} & {
+  [tag: string]: React.ComponentType<any> | string | undefined;
+};
 
 // Props a block-kind override receives (e.g. components.CodeBlock)
 interface BlockComponentProps {
   block: Block;
-  html: string;
+  html: string;        // this block's rendered HTML (for `Component`: the INNER html)
+  children?: unknown;  // React only: that inner content already parsed to a node tree
   open: boolean;
   speculative: boolean;
-  text?: string;      // decoded source — CodeBlock / MathBlock
-  language?: string;  // info string, first word — CodeBlock
-  meta?: string;      // info string, the rest (`title="src/main.ts"`) — CodeBlock
+  text?: string;       // decoded source — CodeBlock / MathBlock
+  language?: string;   // info string, first word — CodeBlock
+  meta?: string;       // info string, the rest (`title="src/main.ts"`) — CodeBlock
+  tag?: string;        // component-tag name — Component
+  attrs?: Record<string, string>; // sanitized attrs, React name-form — Component
+  // Typed structured data — present only with `blockData: true`:
+  table?: TableData;          // { headers, rows, aligns }, cells { text, html }
+  heading?: HeadingData;      // { level, text, id }
+  code?: CodeBlockData;       // { lang, meta?, code }
+  math?: MathBlockData;       // { latex }
+  list?: ListData;            // { ordered, start?, items? }
+  container?: ContainerData;  // { nested } — Blockquote / Alert
 }
 ```
 
 `htmlToReact(html, components)` and `parseTrustedHtml(html)` are also exported
 for advanced use (e.g. rendering a single block's HTML to a React tree yourself).
+Every type above also lives in the value-free `brookmd/types` entry — see [all
+entry points](#all-entry-points).
 
 ### `highlight(code, lang)`
 
-Optional. Tiny native-RegExp tokenizer covering js/ts/tsx/jsx, rust, python, go, bash, sql, json, html, css. Unknown languages fall through to plain escaped text.
+Optional. A tiny native-RegExp tokenizer that emits `<span class="t-…">` spans
+(coloured by `brookmd/styles.css`, or by your own rules for those classes). The
+language name is matched case-insensitively; an unknown language — or a block over
+50 000 characters — falls through to plain escaped text.
 
 ```ts
-import { highlight } from "brookmd/highlight";
+import { highlight, supportedLangs } from "brookmd/highlight";
 const html = highlight("const x = 1;", "ts");
+supportedLangs(); // every info-string name currently registered
 ```
+
+| Language | Info-string names |
+|---|---|
+| JavaScript / TypeScript | `js`, `javascript`, `jsx`, `ts`, `typescript`, `tsx` |
+| Rust | `rust`, `rs` |
+| Python | `python`, `py` |
+| Go | `go` |
+| Shell | `bash`, `sh`, `shell` |
+| JSON / SQL | `json`, `sql` |
+| HTML / XML / CSS | `html`, `xml`, `css` |
+| *(since 0.30.0)* YAML, TOML, diff, Java, C, C++, C#, PHP, Ruby, Swift, Kotlin, Dockerfile | `yaml`, `yml`, `toml`, `diff`, `java`, `c`, `cpp`, `c++`, `cs`, `csharp`, `php`, `rb`, `ruby`, `swift`, `kt`, `kotlin`, `dockerfile` |
+
+#### Adding a language — `registerLanguage` *(since 0.30.0)*
+
+Register your own and it joins the **incremental streaming** highlighter — a
+`components.CodeBlock` override would replace that machinery, this extends it:
+
+```ts
+import { registerLanguage } from "brookmd/highlight";
+
+registerLanguage(["ini", "conf"], {
+  // Tried in order at the cursor; every regex MUST be sticky (`/…/y`).
+  pats: [
+    ["com", /[#;][^\n]*/y],
+    ["sel", /\[[^\]\n]*\]/y],
+    ["attr", /[A-Za-z_][\w.-]*(?=\s*=)/y],
+    ["str", /"(?:[^"\\]|\\.)*"/y],
+    ["num", /-?\d+(?:\.\d+)?/y],
+    ["pun", /[=,]/y],
+    ["ws", /\s+/y],       // catch-all: unmatched characters emit as plain text
+  ],
+  kw: ["true", "false", "null"],
+});
+```
+
+```ts
+registerLanguage(names: string | string[], def: {
+  pats: Array<[token: string, re: RegExp]>;
+  kw?: Iterable<string>;
+}): void
+```
+
+- **Token names** are the classes the theme already colours: `kw`, `str`, `rx`,
+  `num`, `lt`, `com`, `fn`, `ty`, `mac`, `dec`, `attr`, `sel`, `tag`, `var`,
+  `pun`, `txt`, plus `ws` (emitted verbatim, no span).
+- **`ident` is the keyword hook.** A pattern classed `ident` (e.g.
+  `["ident", /[A-Za-z_$][\w$]*/y]`) resolves per match: a name in `kw` becomes
+  `kw`, a name followed by `(` becomes `fn`, a Capitalized name becomes `ty`, and
+  anything else is emitted as plain text. `kw` on its own does nothing without an
+  `ident` pattern.
+- Registering an existing name **replaces** it, built-ins included. Names are
+  lowercased; register at module scope, before the first fence renders.
 
 ### Streaming syntax highlighting
 
@@ -1286,7 +1823,9 @@ By design, not yet, or only partially:
 - **KaTeX / Mermaid rendering** — brookmd emits KaTeX-ready math markup
   (`<span>`/`<div class="math …">` with `gfmMath` on) and a `Mermaid` slot, but
   stays zero-dep: bring your own KaTeX / mermaid pass (or a `components.MathBlock`
-  / `components.Mermaid` override) for the actual SVG/MathML output.
+  / `components.Mermaid` override) for the actual SVG/MathML output. Both are
+  ~20 lines — see the [KaTeX](#math-with-katex) and
+  [Mermaid](#mermaid-diagrams) recipes.
 
 ## Performance
 
@@ -1481,6 +2020,44 @@ navigation happen**, and treat the path as untrusted input at the point you act
 on it. In a privileged host, whether a model-authored `file:///…` is allowed to
 reach a real file is the embedder's decision, not brookmd's.
 
+### Intercepting link clicks — `onLinkClick`
+
+*(since 0.30.0)* Model-authored links go wherever the model decided. If your
+product wants an interstitial, an allowlist prompt, or in-app routing instead of
+a bare new tab, take the click:
+
+```tsx
+<BrookMarkdown
+  client={client}
+  onLinkClick={(event, link) => {
+    if (isInternal(link.href)) {
+      event.preventDefault();                       // cancel the navigation
+      router.push(new URL(link.href).pathname);     // route in-app instead
+    } else if (!isTrusted(link.href)) {
+      event.preventDefault();
+      showInterstitial(link.href, link.text);
+    }
+  }}
+/>
+```
+
+- **Delegated:** exactly one listener sits on the `.brook-md` root and resolves
+  the anchor from the event target. No per-anchor prop, so links cost nothing
+  extra and no block leaves its fast path.
+- `link` is `{ href, text, element }` — `element` is the `<a>` itself.
+- `event.preventDefault()` cancels navigation; do nothing and the default
+  `target="_blank" rel="noopener noreferrer nofollow"` behaviour stands.
+- A **streaming link with no URL yet** (`<a data-brook-pending>`, see [Streaming
+  links](#streaming-links)) never fires it — there is no `href` to hand you.
+- Hoist / memoize the handler, as with the other callbacks.
+- Same hook on the DOM mount (`{ onLinkClick }`, with the native `MouseEvent`),
+  forwarded by the Vue / Svelte / Solid bindings, and available as the
+  `<brook-markdown>` element's `.onLinkClick` property.
+
+This is also the piece that makes [`allowSchemes`](#un-blocking-a-scheme--allowschemes)
+usable: a privileged host that un-blocks `file:` should intercept the click and
+decide for itself, rather than letting navigation happen.
+
 ### Rendering untrusted / LLM HTML safely
 
 If you enable `unsafeHtml` to render HTML from an untrusted source (e.g. an LLM
@@ -1587,9 +2164,11 @@ doesn't oversubscribe OS threads. Worker creation is lazy and load-aware:
   run on ≤8 workers (~6 each)**, not 50 threads.
 
 `destroy()` frees a stream's parser and keeps the worker warm for its siblings;
-the workers persist for the life of the page. Need isolation or manual
-teardown? Construct your own `new BrookPool(factory, cap)` and pass it to
-`new BrookClient(pool)`, or call `pool.disposeAll()`.
+the workers persist for the life of the page. Need isolation or manual teardown?
+Construct your own `new BrookPool(factory, cap, { bootTimeoutMs })` and pass it as
+an **option object** — `new BrookClient({ pool })` — or call `pool.disposeAll()`.
+`bootTimeoutMs` (default 20 000) is how long a freshly spawned worker has to
+report ready before it is failed; `0` disables the deadline.
 
 `getDefaultPool()` is **browser-only** (it constructs `Worker`s) and is a
 **per-page singleton** — don't rely on it in SSR/RSC. For isolation between

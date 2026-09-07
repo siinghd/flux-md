@@ -143,6 +143,13 @@ jobs:
       - name: Typecheck the tests
         working-directory: packages/brookmd
         run: bunx tsc --noEmit -p tsconfig.test.json
+      - name: Typecheck the agent-skill examples
+        # `skills/brookmd/` is what `npx skills add siinghd/brookmd` installs.
+        # Its examples are real TS files resolved against packages/brookmd/src,
+        # so an API rename that the docs don't follow fails here, not in a
+        # user's agent session. (test/skill-docs.test.ts covers what tsc can't:
+        # frontmatter, links, subpath names, the no-other-libraries rule.)
+        run: bunx tsc -p skills/brookmd/assets/examples/tsconfig.json
       - name: Component / pool / store tests
         run: bun run test:components
       - name: SSR cold-import (fresh process, no browser globals)

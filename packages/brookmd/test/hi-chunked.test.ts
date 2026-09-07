@@ -1,5 +1,11 @@
 import { test, expect, afterEach } from "bun:test";
-import { highlight, stepHighlight, supportedLangs, type HighlightState } from "../src/hi";
+import {
+  __builtinLangs,
+  highlight,
+  stepHighlight,
+  supportedLangs,
+  type HighlightState,
+} from "../src/hi";
 import { highlightDeferred, highlightWithin, __setSliceMs } from "../src/hi-defer";
 
 /**
@@ -41,6 +47,23 @@ const CORPUS: Record<string, string> = {
   html: `<!-- page & such -->\n<div class="wrap" data-n='1'>\n  <p>Text &amp; more &lt;here&gt;</p>\n  <img src="a.png" alt="a > b"/>\n</div>\n`,
   xml: `<?xml version="1.0"?>\n<root><item id="1">a &amp; b</item></root>\n`,
   css: `/* theme & vars */\n:root { --gap: 8px; }\n.brook-md > pre[data-lang="ts"]::after {\n  content: "a<b";\n  margin: 0 auto -1.5rem;\n  transition: all 120ms ease-in-out;\n}\n`,
+  java: "// head <&>\npackage com.example;\n\nimport java.util.List;\n\n@Override\npublic class Foo extends Bar {\n  private static final int N = 0x1f_ff;\n  private final String s = \"a<b\";\n  public List<String> run(char c) {\n    /* block & comment */\n    double d = 1.25e3;\n    if (N < 10 && N > 2) return List.of(s, \"&\");\n    return null;\n  }\n}\n",
+  c: "#include <stdio.h>\n#define N 10\n// head <&>\nstatic const char *msg = \"a & b <c>\";\n\nint main(void) {\n  /* block */\n  for (int i = 0; i < N; i++) {\n    printf(\"%d %c\\n\", i, 'x');\n  }\n  return 0;\n}\n",
+  cpp: "#include <vector>\n// head <&>\nnamespace ns {\ntemplate <typename T>\nclass Vec {\n public:\n  explicit Vec(T v) : x(v) {}\n  T x = 1.5f;\n};\n}  // namespace ns\nauto *p = new ns::Vec<int>(0xff);\n",
+  "c++": "// c++ <&>\nauto f = [](int x) -> int { return x * 2; };\nstd::string s = \"a<b & c\";\n",
+  cs: "// head <&>\nusing System;\n\nnamespace App {\n  public class Svc {\n    private const int N = 42;\n    public string Name { get; set; } = \"a<b\";\n    public async Task<int> RunAsync(double d = 1.5) {\n      /* block & */\n      await Task.Delay(10);\n      return N;\n    }\n  }\n}\n",
+  csharp: "var xs = new List<int> { 1, 2, 3 };\nConsole.WriteLine(\"n & <more>\");\n",
+  swift: "// head <&>\nimport Foundation\n\n@objc final class Store: NSObject {\n  let limit: Int = 0x20\n  private var items: [String] = [\"a<b\", \"&\"]\n\n  func add(_ s: String) throws -> Bool {\n    /* block & comment */\n    guard !s.isEmpty else { return false }\n    items.append(s)\n    return items.count < limit\n  }\n}\n",
+  kt: "// head <&>\npackage com.example\n\nimport kotlin.math.max\n\ndata class Point(val x: Int = 0, val y: Double = 1.5) {\n  fun norm(): Double {\n    /* block & */\n    return max(x.toDouble(), y)\n  }\n}\n\nval label = \"a<b & c\"\n",
+  kotlin: "fun main() {\n  val xs = listOf(1, 2, 3)\n  println(\"hi & <there>\")\n}\n",
+  php: "<?php\n// head <&>\n# hash comment\nnamespace App;\n\n/* block & comment */\nfunction render(array $rows): string {\n    $out = '';\n    foreach ($rows as $k => $v) {\n        $out .= \"<li>{$k} & {$v}</li>\";\n    }\n    return $out;\n}\n?>\n",
+  rb: "# head <&>\nrequire 'json'\n\nclass Point < Base\n  attr_reader :x\n\n  def initialize(x = 0, y = 1.5)\n    @x = x\n    @@count = 0\n    $global = nil\n  end\n\n  def to_s\n    \"a<b & more\"\n  end\nend\n",
+  ruby: "puts [1, 2, 3].map { |n| n * 2 }.inspect\nsym = :name\n",
+  yaml: "# head <&>\nname: brookmd\nversion: 1.2\nenabled: true\nempty: null\nquoted: \"a & b <c>\"\nsingle: 'it''s'\nlist:\n  - one\n  - two\nnested:\n  key: value\nanchor: &base\n  a: 1\nref: *base\n",
+  yml: "a: 1\nb: \"two & <three>\"\n",
+  toml: "# head <&>\ntitle = \"brookmd & co\"\nversion = 1\nratio = 1.5\nok = true\n\n[server]\nhost = 'localhost'\nports = [8000, 8001]\n\n[[bin]]\nname = \"cli\"\n",
+  diff: "diff --git a/src/hi.ts b/src/hi.ts\nindex 1234567..89abcde 100644\n--- a/src/hi.ts\n+++ b/src/hi.ts\n@@ -1,6 +1,7 @@\n context line & <more>\n-const old = \"a\";\n+const now = \"b\";\n+const extra = 1;\n unchanged\n",
+  dockerfile: "# head <&>\nFROM node:20-alpine AS build\nWORKDIR /app\nENV NODE_ENV=\"production\" PORT=3000\nCOPY package.json ./\nRUN npm ci && npm run build\nEXPOSE 3000\nCMD [\"node\", \"dist/index.js\"]\n",
 };
 
 // Inputs that are not "a language sample": the fallbacks, the pathological
@@ -74,9 +97,12 @@ const CHUNK_SIZES = [1, 2, 3, 7, 64, 997, 4096];
 afterEach(() => __setSliceMs());
 
 test("chunked stepHighlight === one-shot highlight for every supported language", () => {
-  const langs = supportedLangs();
-  // The corpus covers the whole LANGS table — a new language must add a sample.
+  // The BUILT-IN table, not supportedLangs(): another suite may have called
+  // registerLanguage() into the same module registry, and a caller's language is
+  // not this corpus's business. Every language that SHIPS must have a sample.
+  const langs = __builtinLangs();
   expect(langs.filter((l) => !(l in CORPUS))).toEqual([]);
+  expect(supportedLangs()).toEqual(expect.arrayContaining(langs));
   for (const lang of langs) {
     const code = CORPUS[lang];
     const oneShot = highlight(code, lang);

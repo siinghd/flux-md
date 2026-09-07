@@ -1,0 +1,58 @@
+{
+  "//": "Typecheck-only project for the skill's examples. Run from the repo root: packages/brookmd/node_modules/.bin/tsc -p skills/brookmd/assets/examples/tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+    "types": [],
+    "paths": {
+      "brookmd": ["../../../../packages/brookmd/src/index.ts"],
+      "brookmd/client": ["../../../../packages/brookmd/src/client.ts"],
+      "brookmd/react": ["../../../../packages/brookmd/src/react.tsx"],
+      "brookmd/server": ["../../../../packages/brookmd/src/server.tsx"],
+      "brookmd/server/react": ["../../../../packages/brookmd/src/server-react.tsx"],
+      "brookmd/dom": ["../../../../packages/brookmd/src/dom.ts"],
+      "brookmd/element": ["../../../../packages/brookmd/src/element.ts"],
+      "brookmd/vue": ["../../../../packages/brookmd/src/vue.ts"],
+      "brookmd/svelte": ["../../../../packages/brookmd/src/svelte.ts"],
+      "brookmd/solid": ["../../../../packages/brookmd/src/solid.tsx"],
+      "brookmd/highlight": ["../../../../packages/brookmd/src/hi.ts"],
+      "brookmd/html-to-react": ["../../../../packages/brookmd/src/html-to-react.ts"],
+      "brookmd/block-props": ["../../../../packages/brookmd/src/block-props.ts"],
+      "brookmd/worker-core": ["../../../../packages/brookmd/src/worker-core.ts"],
+      "brookmd/types": ["../../../../packages/brookmd/src/types.ts"],
+      "react": [
+        "../../../../node_modules/@types/react/index.d.ts",
+        "../../../../packages/brookmd/node_modules/@types/react/index.d.ts"
+      ],
+      "react/jsx-runtime": [
+        "../../../../node_modules/@types/react/jsx-runtime.d.ts",
+        "../../../../packages/brookmd/node_modules/@types/react/jsx-runtime.d.ts"
+      ],
+      "react/jsx-dev-runtime": [
+        "../../../../node_modules/@types/react/jsx-dev-runtime.d.ts",
+        "../../../../packages/brookmd/node_modules/@types/react/jsx-dev-runtime.d.ts"
+      ],
+      "react-dom": [
+        "../../../../node_modules/@types/react-dom/index.d.ts",
+        "../../../../packages/brookmd/node_modules/@types/react-dom/index.d.ts"
+      ],
+      "react-dom/client": [
+        "../../../../node_modules/@types/react-dom/client.d.ts",
+        "../../../../packages/brookmd/node_modules/@types/react-dom/client.d.ts"
+      ]
+    }
+  },
+  "include": ["*.ts", "*.tsx"]
+}

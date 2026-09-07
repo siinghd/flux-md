@@ -8,7 +8,7 @@ import {
   setupTailBlockId,
   type BrookMarkdownProps,
 } from "../src/solid";
-import type { Block, FromWorker, ToWorker, WorkerLike } from "../src/types";
+import type { Block, FromWorker, LinkClickInfo, ToWorker, WorkerLike } from "../src/types";
 
 // Register a DOM the same way test/dom.test.ts does (no GlobalRegistrator subpath
 // in happy-dom 15.x). We deliberately do NOT install requestAnimationFrame, so
@@ -21,6 +21,8 @@ beforeAll(() => {
   g.HTMLElement = win.HTMLElement;
   g.Node = win.Node;
   g.navigator = win.navigator;
+  // Constructible click events for the delegated onLinkClick test.
+  g.MouseEvent = win.MouseEvent;
 });
 
 // Synchronous fake worker (same pattern as pool.test.ts / dom.test.ts): records
@@ -331,4 +333,37 @@ test("createBrookMarkdownString (public) wires Solid's createEffect/onCleanup", 
   expect(client.getSnapshot()).toEqual([]); // no patches, no Worker
   expect(client.ready).toBe(false); // never acquired a pool slot
   setContentSpy.mockRestore();
+});
+
+// A settled link (the `data-brook-pending` streaming shape is covered in
+// test/link-click.test.tsx, which owns the hook's filtering rules).
+const LINK_HTML =
+  '<p>See the <a href="https://example.com/q3" target="_blank" rel="noopener noreferrer nofollow">Earnings Call</a> today.</p>';
+
+test("forwards onLinkClick: a link click in the rendered document reaches the prop", () => {
+  const { client, worker } = makeClient();
+  client.append("");
+  const container = document.createElement("div");
+  const cleanups = makeCleanups();
+
+  const calls: LinkClickInfo[] = [];
+  const props: BrookMarkdownProps = {
+    client,
+    batch: false,
+    onLinkClick: (_e, link) => {
+      calls.push(link);
+    },
+  };
+  mountSolid(() => props, container, cleanups.register);
+
+  worker().fire(patch([para(1, LINK_HTML)], []));
+  const a = container.querySelector("a[href]") as HTMLAnchorElement;
+  a.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+  expect(calls.length).toBe(1);
+  expect(calls[0].href).toBe("https://example.com/q3");
+  expect(calls[0].text).toBe("Earnings Call");
+  expect(calls[0].element).toBe(a);
+
+  cleanups.run();
 });

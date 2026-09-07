@@ -11,9 +11,9 @@ credentials/accounts — they are intentionally not automated.
   WASM-build + JS package job (typecheck, component/pool/store tests, web build)
 - ✅ `packages/brookmd/package.json`: `publishConfig.access=public`,
   `prepublishOnly` (rebuilds WASM), `repository`/`homepage`/`bugs`
-- ✅ `npm pack --dry-run` verified: tarball includes `src/` **and the compiled
-  `src/wasm/`** (an empty `src/wasm/.npmignore` overrides the build-artifact
-  `.gitignore` so the WASM ships). 17 files, ~150 KB WASM.
+- ✅ `npm pack --dry-run` verified: the tarball is `dist/` (compiled ESM + `.d.ts`)
+  including `dist/wasm/`, `dist/worker.js` and `dist/styles.css`, plus
+  `README.md` / `CHANGELOG.md` — see `files` in `packages/brookmd/package.json`.
 - ✅ npm name `brookmd` is **available** (registry returns 404).
 
 ## 1–2. Repo + push — ✅ DONE
@@ -32,10 +32,18 @@ npm publish               # prepublishOnly rebuilds the WASM first
 
 ## Distribution note (not a blocker)
 
-The package is distributed as **source** (`main`/`exports` point at `.ts`/`.tsx`).
+Since 0.17.0 the package is distributed as **compiled, non-minified ESM** —
+`main`/`exports` point at `dist/*.js` with `.d.ts` types beside them, plus the
+compiled `dist/wasm/`; no raw `.ts`/`.tsx` ships. That is what removed the
+`transpilePackages` requirement on Next.js, which is now verified (App Router,
+Turbopack *and* webpack, dev and build).
+
 The worker + WASM use the web-standard `new URL(asset, import.meta.url)` pattern,
 so they resolve in any bundler with asset-module support (Vite, webpack 5,
-Rollup, Parcel) — not just Vite. Next.js is untested. If a real consumer hits a
-bundler without `new URL` asset support (e.g. raw no-bundler ESM, or older
-esbuild used directly), the fallback is an inline-everything `dist/` build
+Rollup, Parcel) — not just Vite. Vite additionally needs
+`optimizeDeps: { exclude: ["brookmd"] }` (its pre-bundler hoists the wasm-bindgen
+glue and breaks the relative `.wasm` lookup). Nothing is inlined and the worker is
+never a Blob URL — the consumer smoke test fails the build if either changes. If a
+real consumer hits a bundler without `new URL` asset support (e.g. raw no-bundler
+ESM, or older esbuild used directly), the fallback is an inline-everything build
 (base64 WASM + Blob-URL worker) — kept on the shelf, not built speculatively.

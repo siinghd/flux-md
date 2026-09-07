@@ -85,7 +85,7 @@ pub struct RenderOpts {
     /// (strict CommonMark). Purely a scanner rule — see [`ScanCtx::lenient_lists`].
     pub lenient_lists: bool,
     /// Render a CommonMark SOFT line break (a bare `\n` inside inline content)
-    /// as a `<br>` instead of a literal newline — the `remark-breaks` /
+    /// as a `<br>` instead of a literal newline — the
     /// "GitHub comment" convention, where a single Enter starts a new visual
     /// line. Off by default (strict CommonMark: a soft break is whitespace).
     /// Chat UIs that stream model output usually want this on, since models

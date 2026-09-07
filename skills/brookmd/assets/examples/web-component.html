@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>brookmd &lt;brook-markdown&gt;</title>
+
+    <!-- Optional default theme. Skip it to bring your own .brook-md CSS. -->
+    <link rel="stylesheet" href="/node_modules/brookmd/dist/styles.css" />
+
+    <style>
+      /* stickToBottom is CSS-only: the element emits a snap sentinel, you add
+         the snap axis to the scroll container. */
+      .thread {
+        height: 70vh;
+        overflow-y: auto;
+        scroll-snap-type: y proximity;
+      }
+    </style>
+  </head>
+
+  <body>
+    <!--
+      Register the element from browser code. `defineBrookMarkdown` is a no-op
+      where `customElements` is undefined, so importing it under SSR is safe.
+    -->
+    <script type="module">
+      import { defineBrookMarkdown } from "brookmd/element";
+      defineBrookMarkdown(); // defines <brook-markdown>; pass a tag name to rename it
+    </script>
+
+    <!--
+      Zero-JS streaming straight from a URL. Config flags are TRI-STATE
+      attributes: absent = library default, `gfm-math` / `="true"` / `="1"` = on,
+      `="false"` / `="0"` = off (the only way to disable a default-on flag such
+      as gfm-alerts). Content priority is src > markdown > text content.
+    -->
+    <div class="thread">
+      <brook-markdown
+        src="/api/post.md"
+        gfm-math
+        soft-breaks
+        dir-auto
+        a11y
+        stick-to-bottom
+        class="brook-caret"
+      ></brook-markdown>
+    </div>
+
+    <!-- One-shot from inline text. -->
+    <brook-markdown># Hello **world**</brook-markdown>
+
+    <!-- One-shot from an attribute (re-parses the whole document on change —
+         do NOT point it at a per-token-growing string). -->
+    <brook-markdown markdown="## Release notes" gfm-alerts="false"></brook-markdown>
+
+    <script type="module">
+      import { BrookClient } from "brookmd/client";
+
+      // Caller-owned client: the element subscribes and renders but NEVER
+      // destroys it — you own the worker/stream lifecycle. A self-owned element
+      // (src / markdown / inline text / el.append()) is torn down on disconnect.
+      const el = document.querySelector("brook-markdown");
+      const client = new BrookClient({ config: { softBreaks: true, blockData: true } });
+      el.client = client;
+
+      // Objects and functions can't be attributes — they are properties.
+      el.components = {
+        Mermaid: (props) => {
+          const pre = document.createElement("pre");
+          pre.textContent = props.text ?? "";
+          return pre;
+        },
+      };
+      el.sanitize = (html) => window.DOMPurify.sanitize(html);
+
+      // Holding a growing string rather than a stream? Drive setContent.
+      // client.setContent(fullTextSoFar, { done: false });
+
+      for await (const delta of yourDeltas()) client.append(delta);
+      client.finalize();
+    </script>
+  </body>
+</html>

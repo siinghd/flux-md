@@ -1,6 +1,6 @@
 //! brookmd-core: zero-dep streaming markdown parser.
 //!
-//! No `pulldown-cmark`, no other parsers — block scanning, inline tokenizing,
+//! No third-party parser — block scanning, inline tokenizing,
 //! and HTML rendering are all in-house. The library exposes a `StreamParser`
 //! you `append(chunk)` repeatedly. Each call returns a `Patch` describing
 //! which blocks just became permanent ("committed") and which blocks are
@@ -231,7 +231,7 @@ impl BrookParser {
     }
 
     /// Render a CommonMark SOFT line break (a bare `\n` in inline content) as a
-    /// `<br>` — the `remark-breaks` convention, where one Enter is one visual
+    /// `<br>` — the "GitHub comment" convention, where one Enter is one visual
     /// line. Off by default (strict CommonMark: a soft break is whitespace).
     /// Hard breaks (two trailing spaces / trailing `\`) are `<br>` either way,
     /// so turning this on only ADDS breaks; it never removes one.

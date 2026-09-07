@@ -274,7 +274,9 @@ pub struct StreamParser {
     ///
     /// NEVER propagated to a NESTED parser ([`Self::make_nested_parser`] and the
     /// component cache's inline twin): the container / open-item assemblers read
-    /// their inner parser's COMMITTED html on every append.
+    /// their inner parser's COMMITTED html AFTER the commit — the open-item one
+    /// on every append, the wrapper one exactly once per block (into its
+    /// [`WrappedBodyCache`]) — so the html has to survive the commit either way.
     retain_committed_html: bool,
     active_blocks: Vec<Block>,
     next_id: u64,
@@ -313,7 +315,7 @@ pub struct StreamParser {
     /// Treat a list marker followed by 6+ columns of SPACE padding as the item's
     /// text instead of an indented code block. Off by default (strict CommonMark).
     lenient_lists: bool,
-    /// Render a soft line break as `<br>` (`remark-breaks` parity). Off by
+    /// Render a soft line break as `<br>` (the "GitHub comment" convention). Off by
     /// default (strict CommonMark: a soft break is whitespace).
     soft_breaks: bool,
     a11y: bool,
@@ -1072,6 +1074,44 @@ enum ContainerCacheKind {
     Alert(crate::blocks::AlertKind),
 }
 
+/// Settled prefix of one wrapper's assembled body (see [`assemble_wrapped_body`]).
+///
+/// The two wrapper caches ([`ContainerBlockCache`], [`ComponentBlockCache`]) rebuild
+/// their open block's HTML every append. Without this the rebuild walked the nested
+/// parser's whole block list and re-`push_str`'d every already-COMMITTED sub-block's
+/// html out of its own heap allocation — O(body) of scattered small copies per
+/// append, i.e. O(n²/chunk) over a body that commits many sub-blocks (a component
+/// whose body is paragraphs commits one per blank line).
+///
+/// A nested parser's `committed_blocks` is append-only and its html is frozen at
+/// commit, so the wrapper opener plus every committed sub-block is a stable PREFIX:
+/// folded here exactly once, then re-emitted as ONE contiguous copy. Only the
+/// speculative `active_blocks` tail is rebuilt per append.
+///
+/// NOTHING speculative ever enters `settled` — the active tail and the wrapper
+/// closer are appended to the freshly returned `String` instead — so there is no
+/// truncate-back mark to keep, and the buffer's capacity is reused across appends.
+///
+/// One of these belongs to each nested parser: the component cache alternates
+/// between `inner` and its `force_open_tail`-off SETTLED twin, whose committed html
+/// deliberately differs, so a single shared prefix would be wrong.
+struct WrappedBodyCache {
+    /// `wrapper_open`, then the body-leading `cr()` and each committed sub-block's
+    /// html followed by its own `cr()` — byte-identical to the prefix
+    /// [`assemble_wrapped_body`] used to rebuild from scratch.
+    settled: String,
+    /// How many of the nested parser's `committed_blocks` are already folded in.
+    /// Also the "has a block been emitted yet" flag the body-leading `cr()` needs.
+    blocks: usize,
+}
+
+impl WrappedBodyCache {
+    /// Seed the prefix with the (immutable, never-empty) wrapper opener.
+    fn new(wrapper_open: &str) -> Self {
+        WrappedBodyCache { settled: String::from(wrapper_open), blocks: 0 }
+    }
+}
+
 /// Incremental render state for an open blockquote / alert whose inner content
 /// has BLOCK STRUCTURE (a list, nested quote, heading, table, fence, …) — the
 /// shape the plain-paragraph [`ContainerCache`] bails on. The whole container is
@@ -1104,9 +1144,6 @@ struct ContainerBlockCache {
     id: u64,
     /// Container variant — only drives which wrapper strings were precomputed.
     kind: ContainerCacheKind,
-    /// Wrapper opener WITHOUT the conditional body-leading `\n`: `<blockquote dir?>`
-    /// for a blockquote, or the full `<div …>\n<p …title>Title</p>\n` for an alert.
-    wrapper_open: String,
     /// Wrapper closer: `</blockquote>` or `</div>`.
     wrapper_close: String,
     /// `assemble_wrapped_body`'s `lead_when_empty`: true for a blockquote, whose
@@ -1117,6 +1154,12 @@ struct ContainerBlockCache {
     /// The recursive parser rendering the `>`-stripped inner markdown. Fed only
     /// the per-append delta; its `all_blocks()` are the inner sub-blocks.
     inner: Box<StreamParser>,
+    /// Settled prefix of `inner`'s assembled body (see [`WrappedBodyCache`]), so
+    /// an append re-emits the committed sub-blocks as one contiguous copy instead
+    /// of walking them. SEEDED with the wrapper opener WITHOUT the conditional
+    /// body-leading `\n`: `<blockquote dir?>` for a blockquote, or the full
+    /// `<div …>\n<p …title>Title</p>\n` for an alert.
+    body: WrappedBodyCache,
     /// Absolute outer-buffer offset already turned into fed inner content.
     fed_outer: usize,
     /// True when mid inner-line: the current line's `>` prefix was already
@@ -1551,14 +1594,15 @@ struct ComponentBlockCache {
     /// Frozen `BlockKind::Component { tag, attrs }` from arm time — the open tag
     /// line is complete, so the sanitized attrs can never change.
     kind: BlockKind,
-    /// Wrapper opener `<Tag attrs>`, built with the same `sanitize_attrs` +
-    /// `escape_attr` as `render_component`.
-    wrapper_open: String,
     /// Wrapper closer `</Tag>`.
     wrapper_close: String,
     /// The recursive parser rendering the raw body markdown. Fed only the
     /// per-append delta; its `all_blocks()` are the inner sub-blocks.
     inner: Box<StreamParser>,
+    /// Settled prefix of `inner`'s assembled body (see [`WrappedBodyCache`]),
+    /// seeded with the wrapper opener `<Tag attrs>` (built with the same
+    /// `sanitize_attrs` + `escape_attr` as `render_component`).
+    body: WrappedBodyCache,
     /// Absolute outer-buffer offset already fed to `inner` (everything past the
     /// open tag's `>` feeds raw — the body IS the inner markdown).
     fed_upto: usize,
@@ -1587,6 +1631,10 @@ struct ComponentBlockCache {
     /// blank-ending append and the pair costs O(body) over the whole stream.
     /// Stays `None` for a body that never contains a blank line.
     settled: Option<Box<StreamParser>>,
+    /// The SETTLED twin's own body prefix. Kept separate from `body` because the
+    /// two twins' committed html deliberately differs (`force_open_tail`), so one
+    /// shared prefix would emit the wrong bytes on the append after a swap.
+    settled_body: WrappedBodyCache,
     /// Absolute outer-buffer offset already fed to `settled`. Starts at the body
     /// start, like `fed_upto`, and lags it between blank-ending appends.
     settled_fed: usize,
@@ -1842,7 +1890,7 @@ impl StreamParser {
     }
 
     /// Render a CommonMark SOFT line break (a bare `\n` in inline content) as a
-    /// `<br>` — the `remark-breaks` convention, where one Enter is one visual
+    /// `<br>` — the "GitHub comment" convention, where one Enter is one visual
     /// line. Off by default (strict CommonMark treats a soft break as
     /// whitespace). Hard breaks (two trailing spaces / trailing `\`) are `<br>`
     /// either way, so turning this on only ADDS breaks; it never removes one.
@@ -2536,17 +2584,50 @@ impl StreamParser {
         // final line can actually be a lazy continuation of it. A blank line
         // closes the previous block (`para\n\n#x` is two real paragraphs), and
         // holding `para` back across it would re-scan it every append — O(n²).
-        let prev_line_nonblank = final_line_start > 0 && {
-            let before = &tail[..final_line_start - 1];
-            let prev_start = before.rfind('\n').map_or(0, |i| i + 1);
-            // CommonMark blank is ASCII-only (space/tab); `str::trim` is
-            // Unicode-aware and would treat a line of only form feed (U+000C)
-            // or vertical tab (U+000B) as blank, prematurely committing a
-            // paragraph the one-shot parse keeps open for a lazy continuation.
-            !before[prev_start..]
-                .bytes()
-                .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        // True when the line immediately preceding the line starting at
+        // `line_start` exists and is non-blank. CommonMark blank is ASCII-only
+        // (space/tab); `str::trim` is Unicode-aware and would treat a line of
+        // only form feed (U+000C) or vertical tab (U+000B) as blank,
+        // prematurely committing a paragraph the one-shot parse keeps open for
+        // a lazy continuation.
+        let line_before_nonblank = |line_start: usize| {
+            line_start > 0 && {
+                let before = &tail[..line_start - 1];
+                let prev_start = before.rfind('\n').map_or(0, |i| i + 1);
+                !before[prev_start..]
+                    .bytes()
+                    .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+            }
         };
+        let prev_line_nonblank = line_before_nonblank(final_line_start);
+        // The SAME provisional-classification hazard one line further up: a GFM
+        // table whose DELIMITER row is the still-growing final line. Mid-line,
+        // `|:-` is a one-column delimiter and the line above it a one-column
+        // header, so the table forms and the block before it looks closed — but
+        // once the line completes as `|:-----|--` the column counts no longer
+        // match, the table dissolves, and its header line falls back to a lazy
+        // continuation of the paragraph above (the finalized one-shot parse
+        // makes ONE paragraph of all three lines). The table block STARTS on the
+        // header line, so `last_starts_final_line` — which keys off the block
+        // start — misses it; key off the delimiter row instead. Also bounded:
+        // it clears the moment the delimiter row's `\n` arrives.
+        let last_is_provisional_table = !finalizing
+            && n >= 2
+            && matches!(renderable[n - 1].kind, RawBlockKind::Table)
+            && tail_start + renderable[n - 1].range.end == self.buffer.len()
+            && !self.buffer.ends_with('\n')
+            && !self.buffer.ends_with('\r')
+            && {
+                // the block's SECOND line — its delimiter row — is the final line
+                let hdr = renderable[n - 1].range.start;
+                hdr < final_line_start
+                    && tail[hdr..].find('\n').map_or(false, |i| hdr + i + 1 == final_line_start)
+                    // …and no blank line separates the header from the block
+                    // before it, so dissolving really does merge them (across a
+                    // blank the leftovers form their own paragraph instead, and
+                    // holding the predecessor back would re-scan it every append).
+                    && line_before_nonblank(hdr)
+            };
         let to_commit = if produced.is_empty() {
             0
         } else if commit_all {
@@ -2563,7 +2644,7 @@ impl StreamParser {
         } else if n >= 2
             && ((matches!(renderable[n - 1].kind, RawBlockKind::Paragraph)
                 && is_resumable(&renderable[n - 2].kind))
-                || (last_starts_final_line
+                || ((last_starts_final_line || last_is_provisional_table)
                     && prev_line_nonblank
                     && (matches!(renderable[n - 2].kind, RawBlockKind::Paragraph)
                         || is_resumable(&renderable[n - 2].kind))))
@@ -4636,7 +4717,7 @@ impl StreamParser {
         cache.mid_line = mid_line;
         cache.last_fed = last_fed;
 
-        let html = assemble_container_block(&cache);
+        let html = assemble_container_block(&mut cache);
         // Opt-in structured channel: one `NestedBlock` per inner sub-block —
         // byte-identical to `render_blockquote` / `render_alert`, whose `nested`
         // fragments are captured at exactly these per-block boundaries. Committed
@@ -4871,8 +4952,10 @@ impl StreamParser {
     /// propagates the open outer block's `open_tail` to ALL inner sub-blocks.
     ///
     /// `retain_committed_html` is deliberately NOT propagated (it stays at the
-    /// `new()` default, on): the container / open-item assemblers re-read this
-    /// inner parser's COMMITTED block html on every append, so dropping it here
+    /// `new()` default, on): the container / open-item assemblers read this inner
+    /// parser's COMMITTED block html after the commit — the wrapper assembler
+    /// folds each block into its [`WrappedBodyCache`] exactly once, but that read
+    /// still happens on a LATER append than the commit — so dropping it here
     /// would silently blank the outer block's output. Do not add it below.
     fn make_nested_parser(&self) -> Box<StreamParser> {
         let mut inner = Box::new(StreamParser::new());
@@ -5011,7 +5094,7 @@ impl StreamParser {
             start,
             id,
             kind,
-            wrapper_open,
+            body: WrappedBodyCache::new(&wrapper_open),
             wrapper_close,
             body_leading_nl,
             inner,
@@ -5074,20 +5157,24 @@ impl StreamParser {
         // appends that actually read it: O(bytes since the previous blank-ending
         // append), not O(body). Feeding it one gulp rather than per-append is
         // safe because a nested parser's `all_blocks()` is chunk-independent.
-        let body: &StreamParser = if ends_blank {
+        //
+        // Each twin assembles through its OWN settled body prefix: the two
+        // disagree on `force_open_tail`, so their committed html differs and a
+        // shared prefix would emit the losing twin's bytes after a swap.
+        //
+        // `false`: a component keeps `render_component`'s `!sub.is_empty()`
+        // guard, so an empty body stays `<Tag></Tag>` (only `<blockquote>` opens
+        // unconditionally).
+        let html = if ends_blank {
             let settled = cache.settled.get_or_insert_with(|| self.make_nested_parser_settled());
             if end > cache.settled_fed {
                 settled.append(&self.buffer[cache.settled_fed..end]);
                 cache.settled_fed = end;
             }
-            settled
+            assemble_wrapped_body(&mut cache.settled_body, false, settled, &cache.wrapper_close)
         } else {
-            &cache.inner
+            assemble_wrapped_body(&mut cache.body, false, &cache.inner, &cache.wrapper_close)
         };
-        // `false`: a component keeps `render_component`'s `!sub.is_empty()`
-        // guard, so an empty body stays `<Tag></Tag>` (only `<blockquote>` opens
-        // unconditionally).
-        let html = assemble_wrapped_body(&cache.wrapper_open, false, body, &cache.wrapper_close);
         let block = Block {
             id: cache.id,
             kind: cache.kind.clone(),
@@ -5147,7 +5234,7 @@ impl StreamParser {
         // force_open_tail matching `render_component`'s opts propagation to all
         // inner sub-blocks; depth-bounded by the caller). `retain_committed_html`
         // is NOT propagated, for the reason spelled out on `make_nested_parser`:
-        // the assembler re-reads inner COMMITTED html on every append.
+        // the assembler reads inner COMMITTED html after the commit.
         let mut inner = Box::new(StreamParser::new());
         inner.unsafe_html = self.unsafe_html;
         inner.gfm_autolinks = self.gfm_autolinks;
@@ -5179,7 +5266,8 @@ impl StreamParser {
             id,
             tag: tag.to_string(),
             kind,
-            wrapper_open,
+            body: WrappedBodyCache::new(&wrapper_open),
+            settled_body: WrappedBodyCache::new(&wrapper_open),
             wrapper_close,
             inner,
             fed_upto: start + open_end_rel,
@@ -6073,9 +6161,9 @@ fn strip_container_delta(
 /// exactly `render_block`'s output — usually with no trailing `\n`, though a raw
 /// HTML block carries its own, which `cr()` must not double), and the wrapper
 /// closer — byte-identical to `render_blockquote` / `render_alert`.
-fn assemble_container_block(cache: &ContainerBlockCache) -> String {
+fn assemble_container_block(cache: &mut ContainerBlockCache) -> String {
     assemble_wrapped_body(
-        &cache.wrapper_open,
+        &mut cache.body,
         cache.body_leading_nl,
         &cache.inner,
         &cache.wrapper_close,
@@ -6128,21 +6216,39 @@ fn assemble_deep_quote(cache: &DeepQuoteCache) -> String {
 /// for an empty quote), while `render_component` keeps its `!sub.is_empty()`
 /// guard (`<Tag></Tag>`). An alert passes either — its opener is the title line,
 /// which already ends in `\n`, so the `cr()` is a no-op.
+///
+/// `body` holds the SETTLED prefix — the opener plus every already-committed
+/// sub-block (see [`WrappedBodyCache`]). Each newly committed sub-block folds in
+/// exactly once here, so the per-append cost is the new bytes plus the still-open
+/// tail, not a walk over every sub-block rendered so far. The emitted bytes are
+/// unchanged: the fold applies the same `cr()` in the same order the from-scratch
+/// rebuild did, and the body-leading `cr()` still keys off whether ANY block
+/// exists (`body.blocks` covers the committed ones, `active_blocks` the rest).
 fn assemble_wrapped_body(
-    wrapper_open: &str,
+    body: &mut WrappedBodyCache,
     lead_when_empty: bool,
     inner: &StreamParser,
     wrapper_close: &str,
 ) -> String {
-    let blocks: Vec<&Block> = inner.all_blocks().collect();
-    let body_len: usize = blocks.iter().map(|b| b.html.len() + 1).sum();
+    // Committed sub-blocks are append-only and frozen at commit, so this only
+    // ever grows — each block's html is read (and copied) exactly once.
+    for b in &inner.committed_blocks[body.blocks..] {
+        if body.blocks == 0 {
+            cr(&mut body.settled);
+        }
+        body.settled.push_str(&b.html);
+        cr(&mut body.settled);
+        body.blocks += 1;
+    }
+    let active = &inner.active_blocks;
+    let tail_len: usize = active.iter().map(|b| b.html.len() + 1).sum();
     let mut html =
-        String::with_capacity(wrapper_open.len() + 1 + body_len + wrapper_close.len());
-    html.push_str(wrapper_open);
-    if lead_when_empty || !blocks.is_empty() {
+        String::with_capacity(body.settled.len() + 1 + tail_len + wrapper_close.len());
+    html.push_str(&body.settled);
+    if body.blocks == 0 && (lead_when_empty || !active.is_empty()) {
         cr(&mut html);
     }
-    for b in &blocks {
+    for b in active {
         html.push_str(&b.html);
         cr(&mut html);
     }

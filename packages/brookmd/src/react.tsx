@@ -9,12 +9,13 @@ import {
   useSyncExternalStore,
   useDeferredValue,
   type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
   type ReactElement,
   type ReactNode,
 } from "react";
 import type { Align, Block, BlockComponentProps, Components, HeadingData, ListData, ListItemData, NestedBlock, TableData } from "./types";
 import { BrookClient } from "./client";
-import type { Decorator, ParserConfig, RenderMetricsHook, UrlTransform } from "./types-core";
+import type { Decorator, LinkClickInfo, ParserConfig, RenderMetricsHook, UrlTransform } from "./types-core";
 import { CodeBlock } from "./renderers/CodeBlock";
 import { MathBlock } from "./renderers/Math";
 import { Mermaid } from "./renderers/Mermaid";
@@ -246,6 +247,21 @@ interface BrookMarkdownProps {
    * supplied. Guard with `if (!block) return <>{children}</>`.
    */
   onBlockError?: (error: Error, info: BlockErrorInfo) => void;
+  /**
+   * Called when a rendered link is clicked — for in-app routing, analytics, or
+   * an "open citations in a drawer" affordance.
+   *
+   * DELEGATED: exactly ONE `onClick` sits on the `.brook-md` root and the anchor
+   * is resolved from the event target. No per-anchor prop is ever added, so this
+   * is invisible to the per-block memo — unlike `components` / `decorators`, a
+   * fresh closure each render re-renders NO blocks (hoisting is tidy, but costs
+   * you nothing here).
+   *
+   * The handler gets React's synthetic event, so `event.preventDefault()`
+   * cancels the navigation. A still-streaming anchor (`data-brook-pending`:
+   * label rendered, URL not yet arrived) is never reported.
+   */
+  onLinkClick?: (event: ReactMouseEvent<HTMLElement>, link: LinkClickInfo) => void;
 }
 
 /** Context handed to {@link BrookMarkdownProps.onBlockError}. */
@@ -350,6 +366,7 @@ function BrookMarkdownFromClient({
   decorators,
   urlTransform,
   onBlockError,
+  onLinkClick,
 }: BrookMarkdownProps & { client: BrookClient }) {
   const blocks = useSyncExternalStore(client.subscribe, client.getSnapshot, client.getSnapshot);
   // Dev-only stability tripwire: an unstable `decorators` / `urlTransform`
@@ -391,6 +408,30 @@ function BrookMarkdownFromClient({
         : undefined,
     [client, onRenderMetrics],
   );
+  // Delegated link clicks. The listener lives on the ROOT only — `onLinkClick`
+  // is deliberately NOT threaded down to BlockView, so its identity is invisible
+  // to the per-block memo and enabling it adds no per-block work. The anchor is
+  // resolved from the event target on the (rare) click, not at render time.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const handleLinkClick = onLinkClick
+    ? (e: ReactMouseEvent<HTMLElement>): void => {
+        const root = rootRef.current;
+        const el = e.target as Element | null;
+        // The target can be a text node in an exotic host; guard rather than
+        // throw out of a handler the app installed.
+        if (!root || !el || typeof el.closest !== "function") return;
+        const a = el.closest("a[href]");
+        // A `data-brook-pending` anchor (label rendered, URL still streaming)
+        // is excluded twice over: it carries no href, so `a[href]` already
+        // misses it, and the marker is checked explicitly.
+        if (!a || !root.contains(a) || a.hasAttribute("data-brook-pending")) return;
+        onLinkClick(e, {
+          href: a.getAttribute("href") ?? "",
+          text: a.textContent ?? "",
+          element: a as HTMLAnchorElement,
+        });
+      }
+    : undefined;
   const rootClass = isDeferring
     ? className
       ? `brook-md brook-deferred ${className}`
@@ -400,11 +441,13 @@ function BrookMarkdownFromClient({
       : "brook-md";
   return (
     <div
+      ref={rootRef}
       className={rootClass}
       id={id}
       role={role}
       aria-live={ariaLive}
       aria-atomic={ariaAtomic}
+      onClick={handleLinkClick}
     >
       {rendered.map((b, i) =>
         // The guard runs BEFORE `key={b.id}` is evaluated: a malformed entry

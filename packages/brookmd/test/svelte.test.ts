@@ -3,7 +3,7 @@ import { GlobalWindow } from "happy-dom";
 import { BrookClient, BrookPool } from "../src/client";
 import { brookMarkdown, brookMarkdownString, tailBlockId } from "../src/svelte";
 import { tailOpenBlockId } from "../src/dom";
-import type { Block, FromWorker, ToWorker, WorkerLike } from "../src/types";
+import type { Block, FromWorker, LinkClickInfo, ToWorker, WorkerLike } from "../src/types";
 
 // A no-op Worker stub for the brookMarkdownString tests below. Those tests use
 // the action's OWNED client, which joins the DEFAULT pool — whose factory calls
@@ -34,6 +34,8 @@ beforeAll(() => {
   g.HTMLElement = win.HTMLElement;
   g.Node = win.Node;
   g.navigator = win.navigator;
+  // Constructible click events for the delegated onLinkClick test.
+  g.MouseEvent = win.MouseEvent;
   g.Worker = FakeDefaultWorker as unknown as typeof Worker;
 });
 
@@ -380,5 +382,44 @@ test("string action: empty content + streaming omitted touches no Worker (setCon
   const action = brookMarkdownString(node, { content: "" });
   expect(node.querySelector(".brook-md")).not.toBeNull();
   expect(FakeDefaultWorker.instances.length).toBe(0);
+  action.destroy!();
+});
+
+// A settled link (the `data-brook-pending` streaming shape is covered in
+// test/link-click.test.tsx, which owns the hook's filtering rules).
+const LINK_HTML =
+  '<p>See the <a href="https://example.com/q3" target="_blank" rel="noopener noreferrer nofollow">Earnings Call</a> today.</p>';
+
+test("action spreads onLinkClick into the mount, and a changed handler remounts", () => {
+  const { client, worker } = makeClient();
+  client.append("");
+  const node = document.createElement("div");
+  const calls: LinkClickInfo[] = [];
+  const first = (_e: MouseEvent, link: LinkClickInfo) => {
+    calls.push(link);
+  };
+  const action = brookMarkdown(node, { client, onLinkClick: first });
+
+  drive(worker, patch([para(1, LINK_HTML)], []));
+  const a = node.querySelector("a[href]")!;
+  a.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  expect(calls.length).toBe(1);
+  expect(calls[0].href).toBe("https://example.com/q3");
+
+  // Same handler identity → no remount (the option is part of the compare set).
+  const root = node.firstChild;
+  action.update!({ client, onLinkClick: first });
+  expect(node.firstChild).toBe(root);
+
+  // A NEW handler identity remounts against it.
+  const later: LinkClickInfo[] = [];
+  action.update!({ client, onLinkClick: (_e, link) => later.push(link) });
+  expect(node.firstChild).not.toBe(root);
+  node
+    .querySelector("a[href]")!
+    .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  expect(later.length).toBe(1);
+  expect(calls.length).toBe(1); // the replaced handler is gone
+
   action.destroy!();
 });

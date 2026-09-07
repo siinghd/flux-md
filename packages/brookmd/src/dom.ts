@@ -3,7 +3,7 @@ import { highlightDeferred, type DeferredHighlight } from "./hi-defer";
 import { createInc, incHighlight, incSeed, type IncState } from "./hi-inc";
 import { morph } from "./morph";
 import { incView, newIncCode, paintIncCode, spliceHtml, spliceKeep, type IncCode, type TailMode } from "./splice";
-import type { Align, Block, BlockComponentProps, BlockKindTag, ContainerData, Decorator, ListData, RenderMetricsHook, TableData, UrlTransform } from "./types-core";
+import type { Align, Block, BlockComponentProps, BlockKindTag, ContainerData, Decorator, LinkClickInfo, ListData, RenderMetricsHook, TableData, UrlTransform } from "./types-core";
 import { blockProps, extractLang } from "./block-props";
 import { decorateSegments } from "./decorate";
 import { safeUrl } from "./url-safety";
@@ -46,6 +46,8 @@ export interface MountHandle {
    */
   openBlockId(): number | null;
 }
+
+export type { LinkClickInfo };
 
 export type DomBlockComponent = (props: BlockComponentProps) => HTMLElement | string;
 
@@ -129,6 +131,17 @@ export interface MountOptions {
    * scheme. O(1) per attribute.
    */
   urlTransform?: UrlTransform;
+  /**
+   * Called when a rendered link is clicked (parity with the React `onLinkClick`
+   * prop). Exactly ONE `click` listener is added to the renderer root and the
+   * anchor is resolved from the event target — never a listener per anchor, so
+   * this costs nothing per block and the streaming path is untouched. The
+   * listener is removed by {@link MountHandle.destroy}.
+   *
+   * `event.preventDefault()` cancels the navigation. A still-streaming anchor
+   * (`data-brook-pending`, no href yet) is never reported.
+   */
+  onLinkClick?: (event: MouseEvent, link: LinkClickInfo) => void;
   /** Appended to the root's `className` (the `brook-md` class is always present). */
   className?: string;
   /** Set on the root element. */
@@ -317,6 +330,24 @@ interface KeyedContainer {
   nested: string[];
 }
 
+/**
+ * Resolve the anchor a DELEGATED click landed on, or null when the click was
+ * not on a live link. Deliberately duplicated (six lines) by the JSX renderer
+ * rather than shared, so importing `brookmd/react` never pulls in the DOM
+ * renderer. A `data-brook-pending` anchor — label rendered, URL still streaming
+ * — is excluded twice over: it carries no `href`, so `a[href]` already misses
+ * it, and the attribute is checked explicitly.
+ */
+function linkFromEvent(target: EventTarget | null, root: HTMLElement): HTMLAnchorElement | null {
+  const el = target as Element | null;
+  // The target can be a text node (or, in an odd host, anything): guard the
+  // lookup instead of throwing out of a listener the app installed.
+  if (!el || typeof el.closest !== "function") return null;
+  const a = el.closest("a[href]");
+  if (!a || !root.contains(a) || a.hasAttribute("data-brook-pending")) return null;
+  return a as HTMLAnchorElement;
+}
+
 export function mountBrookMarkdown(
   client: BrookClient,
   container: HTMLElement,
@@ -329,7 +360,7 @@ export function mountBrookMarkdown(
   // Normalize "no overrides" to undefined so the fast path doesn't churn.
   const components =
     options.components && Object.keys(options.components).length > 0 ? options.components : undefined;
-  const { sanitize, virtualize, stickToBottom, onRenderMetrics } = options;
+  const { sanitize, virtualize, stickToBottom, onRenderMetrics, onLinkClick } = options;
   // Normalize "no decorators" to undefined so an empty array doesn't take the
   // walk path; both transforms move a block off the innerHTML fast path.
   const decorators =
@@ -361,6 +392,23 @@ export function mountBrookMarkdown(
     anchor.style.scrollSnapAlign = "end";
     root.appendChild(anchor);
   }
+
+  // Delegated link clicks: ONE listener on the root for the whole document, so
+  // no block render ever touches it and node reuse is unaffected. Held so
+  // destroy() can remove it (the root is removed too, but an app may keep a
+  // reference to a node inside it).
+  const linkClickListener = onLinkClick
+    ? (ev: Event): void => {
+        const a = linkFromEvent(ev.target, root);
+        if (!a) return;
+        onLinkClick(ev as MouseEvent, {
+          href: a.getAttribute("href") ?? "",
+          text: a.textContent ?? "",
+          element: a,
+        });
+      }
+    : null;
+  if (linkClickListener) root.addEventListener("click", linkClickListener);
 
   const mounted = new Map<number, MountedBlock>();
   let order: number[] = [];
@@ -1336,6 +1384,7 @@ export function mountBrookMarkdown(
         frame = 0;
       }
       unsubscribe();
+      if (linkClickListener) root.removeEventListener("click", linkClickListener);
       // Abandon any code block still tokenizing — its node is going away.
       for (const mb of mounted.values()) {
         if (mb.highlight) {

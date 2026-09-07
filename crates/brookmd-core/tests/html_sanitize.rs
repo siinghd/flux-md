@@ -623,7 +623,7 @@ fn block_html_needs_the_sanitizer_to_do_anything() {
 
 #[test]
 fn block_details_summary_renders_under_allowlist() {
-    // The react-markdown replacement shape: a model emits a disclosure widget.
+    // The disclosure-widget shape: a model emits <details>/<summary> raw HTML.
     let out = render_block_html(
         "<details>\n<summary>Sources</summary>\nthe body\n</details>\n",
         &["details", "summary"],

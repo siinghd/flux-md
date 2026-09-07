@@ -1,5 +1,5 @@
 //! `soft_breaks` — render a CommonMark SOFT line break (a bare `\n` inside
-//! inline content) as `<br>`, the `remark-breaks` / "GitHub comment"
+//! inline content) as `<br>`, the "GitHub comment"
 //! convention where one Enter is one visual line. Opt-in; strict CommonMark
 //! (the default) keeps a soft break as literal whitespace.
 //!

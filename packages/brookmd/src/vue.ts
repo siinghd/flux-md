@@ -6,6 +6,7 @@ import {
   mountBrookMarkdown,
   tailOpenBlockId,
   type DomComponents,
+  type LinkClickInfo,
   type MountHandle,
   type MountOptions,
 } from "./dom";
@@ -28,12 +29,12 @@ export type UseBrookMarkdownOptions = { client: BrookClient } & MountOptions;
  * `{ container }` — bind it as the `ref` of the element you want filled.
  *
  * `getOpts` must read its fields lazily (e.g. `() => ({ client: props.client,
- * ... })`) so the watcher sees live prop identities. We watch the five
+ * ... })`) so the watcher sees live prop identities. We watch the six
  * identities individually — `[client, components, sanitize, virtualize,
- * stickToBottom]` — rather than a freshly-composed object, which would change
- * identity every call and remount on every patch. On any of those changing we
- * destroy and remount; `batch`/`highlightCode` still flow through to the mount
- * but are intentionally not remount triggers.
+ * stickToBottom, onLinkClick]` — rather than a freshly-composed object, which
+ * would change identity every call and remount on every patch. On any of those
+ * changing we destroy and remount; `batch`/`highlightCode` still flow through to
+ * the mount but are intentionally not remount triggers.
  */
 export function useBrookMarkdown(getOpts: () => UseBrookMarkdownOptions): {
   container: Ref<HTMLElement | null>;
@@ -63,6 +64,7 @@ export function useBrookMarkdown(getOpts: () => UseBrookMarkdownOptions): {
       () => getOpts().sanitize,
       () => getOpts().virtualize,
       () => getOpts().stickToBottom,
+      () => getOpts().onLinkClick,
     ],
     () => {
       // Only after the initial onMounted has run does `handle` exist; before
@@ -107,6 +109,8 @@ export interface BrookMarkdownVueProps {
   sanitize?: (html: string) => string;
   virtualize?: boolean;
   stickToBottom?: boolean;
+  /** Delegated link-click hook (one listener on the root; see `MountOptions`). */
+  onLinkClick?: (event: MouseEvent, link: LinkClickInfo) => void;
 }
 
 /**
@@ -128,6 +132,12 @@ export const BrookMarkdown: DefineComponent<BrookMarkdownVueProps> = defineCompo
     sanitize: { type: Function as PropType<(html: string) => string>, default: undefined },
     virtualize: { type: Boolean, default: undefined },
     stickToBottom: { type: Boolean, default: undefined },
+    // Declared as a real prop (not an emit listener): Vue resolves a declared
+    // `onX` prop from `props` before it ever reaches `attrs`.
+    onLinkClick: {
+      type: Function as PropType<(event: MouseEvent, link: LinkClickInfo) => void>,
+      default: undefined,
+    },
   },
   setup(props) {
     // Read props inside the getter so the watch tracks their live identities;
@@ -138,6 +148,7 @@ export const BrookMarkdown: DefineComponent<BrookMarkdownVueProps> = defineCompo
       sanitize: props.sanitize,
       virtualize: props.virtualize,
       stickToBottom: props.stickToBottom,
+      onLinkClick: props.onLinkClick,
     }));
     return () => h("div", { ref: container });
   },

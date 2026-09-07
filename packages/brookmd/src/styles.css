@@ -23,6 +23,13 @@
   --brook-bg-inline: rgba(129, 139, 152, 0.16);
   --brook-bg-quote: rgba(129, 139, 152, 0.08);
   --brook-accent: #0969da;
+  /* alert accents (light) — `note` tracks --brook-accent, so re-theming the
+     link color re-themes the note alert with it. */
+  --brook-alert-note: var(--brook-accent);
+  --brook-alert-tip: #1a7f37;
+  --brook-alert-important: #8250df;
+  --brook-alert-warning: #9a6700;
+  --brook-alert-caution: #cf222e;
   /* syntax tokens (light) */
   --brook-t-kw: #cf222e;
   --brook-t-str: #0a3069;
@@ -38,6 +45,15 @@
   /* sizing */
   --brook-radius: 6px;
   --brook-gap: 16px;
+
+  /* Motion + caret. Mode-independent (the caret paints in `currentColor`, so it
+     tracks --brook-fg on its own), so unlike the palette these need no dark
+     twin — they sit on the always-matching base selector. Both animations are
+     routed through a variable so the ONE `prefers-reduced-motion` block at the
+     foot of this file switches every one of them off. */
+  --brook-caret: currentColor;
+  --brook-caret-anim: brook-caret-blink 1s steps(2, jump-none) infinite;
+  --brook-pill-anim: brook-pill-pulse 1.6s ease-in-out infinite;
 
   color: var(--brook-fg);
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -58,6 +74,10 @@
     --brook-bg-inline: rgba(101, 108, 118, 0.2);
     --brook-bg-quote: rgba(101, 108, 118, 0.1);
     --brook-accent: #4493f8;
+    --brook-alert-tip: #3fb950;
+    --brook-alert-important: #ab7df8;
+    --brook-alert-warning: #d29922;
+    --brook-alert-caution: #f85149;
     --brook-t-kw: #ff7b72;
     --brook-t-str: #a5d6ff;
     --brook-t-num: #79c0ff;
@@ -79,6 +99,10 @@
   --brook-bg-inline: rgba(101, 108, 118, 0.2);
   --brook-bg-quote: rgba(101, 108, 118, 0.1);
   --brook-accent: #4493f8;
+  --brook-alert-tip: #3fb950;
+  --brook-alert-important: #ab7df8;
+  --brook-alert-warning: #d29922;
+  --brook-alert-caution: #f85149;
   --brook-t-kw: #ff7b72;
   --brook-t-str: #a5d6ff;
   --brook-t-num: #79c0ff;
@@ -94,6 +118,25 @@
 /* ---- block rhythm ---------------------------------------------------------- */
 .brook-md > * { margin: 0 0 var(--brook-gap) 0; }
 .brook-md > *:last-child { margin-bottom: 0; }
+
+/* Every block the renderers emit on the generic path is wrapped in a
+   layout-transparent `<div class="brook-block brook-block-KIND">`, so the gap
+   above belongs to the WRAPPER and the wrapped element must not stack its own
+   leading/trailing margin on top of it (without this the last block's margin
+   escapes the root and `> *:last-child` above never bites). */
+.brook-md .brook-block > :first-child { margin-top: 0; }
+.brook-md .brook-block > :last-child { margin-bottom: 0; }
+/* …which would also flatten a heading's extra lead-in, so hand that to the
+   wrapper, where it collapses with the previous block's gap instead of adding
+   to it. */
+.brook-md .brook-block-heading { margin-top: 24px; }
+.brook-md > .brook-block-heading:first-child { margin-top: 0; }
+
+/* `brook-speculative` marks a block whose closing delimiter the parser GUESSED
+   and may retract. It is deliberately invisible: a speculative block that looks
+   different from the settled block it becomes would flash on every guess. Kept
+   as a declared hook so overriding it is a one-liner. */
+.brook-md .brook-speculative { --brook-speculative: 1; }
 
 /* ---- headings -------------------------------------------------------------- */
 .brook-md h1, .brook-md h2, .brook-md h3,
@@ -141,6 +184,31 @@
 }
 .brook-md blockquote > :last-child { margin-bottom: 0; }
 
+/* GitHub-style alerts (`> [!NOTE]` &c. — `gfmAlerts`). A colored left rule plus
+   a colored title; the body stays on the page background so a run of alerts
+   does not read as a wall of tinted boxes. */
+.brook-md .markdown-alert {
+  margin: 0 0 var(--brook-gap);
+  padding: 0.4em 1em;
+  border-left: 0.25em solid var(--brook-alert-note);
+  color: inherit;
+}
+.brook-md .markdown-alert > :last-child { margin-bottom: 0; }
+.brook-md .markdown-alert-title {
+  margin: 0 0 0.35em;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--brook-alert-note);
+}
+.brook-md .markdown-alert-tip { border-left-color: var(--brook-alert-tip); }
+.brook-md .markdown-alert-tip > .markdown-alert-title { color: var(--brook-alert-tip); }
+.brook-md .markdown-alert-important { border-left-color: var(--brook-alert-important); }
+.brook-md .markdown-alert-important > .markdown-alert-title { color: var(--brook-alert-important); }
+.brook-md .markdown-alert-warning { border-left-color: var(--brook-alert-warning); }
+.brook-md .markdown-alert-warning > .markdown-alert-title { color: var(--brook-alert-warning); }
+.brook-md .markdown-alert-caution { border-left-color: var(--brook-alert-caution); }
+.brook-md .markdown-alert-caution > .markdown-alert-title { color: var(--brook-alert-caution); }
+
 /* ---- tables ---------------------------------------------------------------- */
 .brook-md table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
 .brook-md th, .brook-md td { padding: 6px 13px; border: 1px solid var(--brook-border); }
@@ -186,3 +254,230 @@
 .brook-md .t-var  { color: var(--brook-t-var); }
 .brook-md .t-pun  { color: var(--brook-t-pun); }
 .brook-md .t-txt  { color: inherit; }
+
+/* ---- fenced-block chrome (code / math / mermaid) --------------------------- */
+/* The built-in CodeBlock, MathBlock and Mermaid renderers all emit the same
+   three-part shape:
+     <div class="brook-CHROME-block [brook-streaming]">
+       <div class="brook-CHROME-header">
+         <span class="brook-CHROME-lang">…</span>
+         <span class="brook-code-streaming-pill">streaming</span>   (open)
+         <button class="brook-code-copy">…</button>                 (closed, code only)
+       </div>
+       <div class="brook-CHROME-body">…</div>
+     </div>
+   The container owns the border, the radius and the background; the header is
+   the top edge; the body's `pre` gives all of that up so there is no second
+   frame drawn inside the first. */
+.brook-md .brook-code-block,
+.brook-md .brook-math-block,
+.brook-md .brook-mermaid-block {
+  border: 1px solid var(--brook-border);
+  border-radius: var(--brook-radius);
+  background: var(--brook-bg-code);
+  /* Clips the body's square corners back to the container's radius. */
+  overflow: hidden;
+}
+
+.brook-md .brook-code-header,
+.brook-md .brook-math-header,
+.brook-md .brook-mermaid-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 8px 4px 12px;
+  border-bottom: 1px solid var(--brook-border);
+}
+
+.brook-md .brook-code-lang,
+.brook-md .brook-math-lang,
+.brook-md .brook-mermaid-lang {
+  font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 0.75em;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--brook-fg-muted);
+  /* The label is the flex item that may need to shrink; never let a long
+     language name push the copy button off the right edge. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Copy button. Ghost by default so the chrome stays quiet until pointed at. */
+.brook-md .brook-code-copy {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 5px;
+  margin: 0;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 0.75em;
+  line-height: 1.5;
+  color: var(--brook-fg-muted);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--brook-radius);
+  cursor: pointer;
+}
+.brook-md .brook-code-copy:hover {
+  color: var(--brook-fg);
+  background: var(--brook-bg-inline);
+  border-color: var(--brook-border);
+}
+.brook-md .brook-code-copy:focus-visible {
+  outline: 2px solid var(--brook-accent);
+  outline-offset: 1px;
+}
+/* The "copied" state is carried on `aria-label` — the React renderer swaps the
+   prop, the DOM renderer setAttribute()s it — so the accessible name IS the
+   selector. Both adapters revert it after ~1.5s. */
+.brook-md .brook-code-copy[aria-label="Copied"] {
+  color: var(--brook-accent);
+  border-color: currentColor;
+}
+.brook-md .brook-code-copy svg { display: block; flex: none; }
+
+/* "streaming" pill, shown in place of the copy button while a fence is open. */
+.brook-md .brook-code-streaming-pill {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 2px 9px;
+  font-size: 0.7em;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--brook-fg-muted);
+  background: var(--brook-bg-inline);
+  border-radius: 999px;
+  animation: var(--brook-pill-anim);
+}
+
+/* `brook-streaming` (the open-fence modifier) is intentionally inert: the pill
+   above already says "still arriving", and restyling the frame mid-stream would
+   make every fence twitch as it closes. Declared as an override hook. */
+.brook-md .brook-streaming { --brook-streaming: 1; }
+
+/* Body: the `pre` hands its frame to the container and keeps only its padding
+   and its own horizontal scroll. */
+.brook-md .brook-code-body pre,
+.brook-md .brook-mermaid-body pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+.brook-md .brook-math-body {
+  padding: 14px 16px;
+  overflow-x: auto;
+}
+/* The scrollable code region is focusable (tabIndex=0 on the `pre`, or on the
+   wrapping div before highlighting lands) so it can be scrolled from the
+   keyboard — inset the ring so the clipped container does not eat it. */
+.brook-md .brook-code-body pre:focus-visible,
+.brook-md .brook-code-body > div:focus-visible,
+.brook-md .brook-mermaid-body pre:focus-visible {
+  outline: 2px solid var(--brook-accent);
+  outline-offset: -2px;
+}
+
+/* ---- math ------------------------------------------------------------------ */
+/* Defaults for the zero-dep output (the raw LaTeX in a `.math` node). Kept
+   deliberately thin — no font or color of its own — so dropping a typesetter
+   over these nodes replaces the content without fighting the theme. */
+.brook-md .math.math-display {
+  display: block;
+  overflow-x: auto;
+  text-align: center;
+  margin: var(--brook-gap) 0;
+}
+/* Inside the math chrome the body already supplies the padding. */
+.brook-md .brook-math-body > .math.math-display { margin: 0; }
+.brook-md .math.math-inline { display: inline; }
+
+/* ---- footnotes ------------------------------------------------------------- */
+.brook-md .footnotes {
+  padding-top: var(--brook-gap);
+  border-top: 1px solid var(--brook-border);
+  font-size: 0.875em;
+  color: var(--brook-fg-muted);
+}
+.brook-md .footnotes ol { padding-left: 1.6em; }
+.brook-md .footnotes li { margin: 0.4em 0; }
+.brook-md .footnotes li:target { background: var(--brook-bg-quote); }
+.brook-md sup.footnote-ref { line-height: 0; }
+.brook-md sup.footnote-ref > a { padding: 0 0.15em; text-decoration: none; }
+.brook-md .footnote-backref { margin-left: 0.25em; text-decoration: none; }
+
+/* ---- task lists ------------------------------------------------------------ */
+/* GFM task boxes are rendered `disabled` (they mirror the source, they do not
+   edit it). Keep them legible rather than greyed out, and drop the
+   not-allowed cursor a disabled control would otherwise show. */
+.brook-md input[type="checkbox"][disabled] { opacity: 1; cursor: default; }
+
+/* ---- scroll sentinel ------------------------------------------------------- */
+/* `stickToBottom` appends an empty aria-hidden anchor as the last child of the
+   root. It is a scroll-snap target, not content: it must occupy no space, which
+   means opting out of the root's block gap as well as having no height. */
+.brook-md .brook-bottom-anchor { height: 0; margin: 0; }
+
+/* ---- streaming caret ------------------------------------------------------- */
+/* Opt in per root: `<div class="brook-md brook-caret">`. Draws one blinking bar
+   at the tail of the block still being streamed (`brook-open`). Deliberately
+   NOT drawn inside code/math/mermaid fences — those show the "streaming" pill
+   instead — and each selector below is anchored so exactly one element in an
+   open block can match (a bare `p:last-child` would light up every paragraph in
+   a loose list). Retint with `--brook-caret`, or switch it off wholesale with
+   `.brook-md.brook-caret ::after { content: none }`. */
+.brook-md.brook-caret .brook-open > p:last-child::after,
+.brook-md.brook-caret .brook-open > :is(h1, h2, h3, h4, h5, h6):last-child::after,
+.brook-md.brook-caret .brook-open > blockquote > :last-child:not(pre)::after,
+.brook-md.brook-caret .brook-open > :is(ul, ol) > li:last-child > p:last-child::after,
+.brook-md.brook-caret .brook-open > :is(ul, ol) > li:last-child > :is(ul, ol) > li:last-child > p:last-child::after,
+.brook-md.brook-caret .brook-open table tr:last-child > td:last-child::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-left: 0.08em;
+  vertical-align: text-bottom;
+  background: var(--brook-caret);
+  animation: var(--brook-caret-anim);
+}
+/* Tight list items (no <p> wrapper) need `:has()` to tell "last leaf item" from
+   "item that contains a nested list". A selector list is all-or-nothing, so
+   these two live in their own rule: an engine without `:has()` drops only the
+   tight-list caret, not the paragraph/heading/quote/table ones above. */
+.brook-md.brook-caret .brook-open > :is(ul, ol) > li:last-child:not(:has(> :is(p, ul, ol)))::after,
+.brook-md.brook-caret .brook-open > :is(ul, ol) > li:last-child > :is(ul, ol) > li:last-child:not(:has(> :is(p, ul, ol)))::after {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-left: 0.08em;
+  vertical-align: text-bottom;
+  background: var(--brook-caret);
+  animation: var(--brook-caret-anim);
+}
+
+/* ---- animations ------------------------------------------------------------ */
+@keyframes brook-caret-blink {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes brook-pill-pulse {
+  50% { opacity: 0.45; }
+}
+/* One switch for every animation in this file: both are applied through a
+   custom property, and custom properties inherit into `::after`, so redefining
+   them on the root turns the caret and the pill off together. */
+@media (prefers-reduced-motion: reduce) {
+  .brook-md {
+    --brook-caret-anim: none;
+    --brook-pill-anim: none;
+  }
+}

@@ -2,7 +2,13 @@ import type { ActionReturn } from "svelte/action";
 import { readable, type Readable } from "svelte/store";
 import { BrookClient } from "./client";
 import type { ParserConfig } from "./types-core";
-import { mountBrookMarkdown, tailOpenBlockId, type DomComponents, type MountOptions } from "./dom";
+import {
+  mountBrookMarkdown,
+  tailOpenBlockId,
+  type DomComponents,
+  type LinkClickInfo,
+  type MountOptions,
+} from "./dom";
 
 /**
  * Svelte action that mounts a streaming {@link BrookClient} into the host node.
@@ -21,6 +27,9 @@ export interface BrookMarkdownParams {
   sanitize?: (h: string) => string;
   virtualize?: boolean;
   stickToBottom?: boolean;
+  /** Delegated link-click hook — ONE listener on the renderer root, never per
+   *  anchor (see `MountOptions.onLinkClick`). */
+  onLinkClick?: (event: MouseEvent, link: LinkClickInfo) => void;
 }
 
 export function brookMarkdown(
@@ -41,7 +50,8 @@ export function brookMarkdown(
         next.components === options.components &&
         next.sanitize === options.sanitize &&
         next.virtualize === options.virtualize &&
-        next.stickToBottom === options.stickToBottom
+        next.stickToBottom === options.stickToBottom &&
+        next.onLinkClick === options.onLinkClick
       ) {
         return;
       }
@@ -108,7 +118,8 @@ export function tailBlockId(client: BrookClient): Readable<number | null> {
  * Lifecycle differs from {@link brookMarkdown}: this action constructs the client
  * once (a later `config` change is ignored, like a created-once instance) and
  * `destroy()`s it on teardown — it OWNS the client. The mount-option reconcile
- * (`components`/`sanitize`/`virtualize`/`stickToBottom`) matches `brookMarkdown`,
+ * (`components`/`sanitize`/`virtualize`/`stickToBottom`/`onLinkClick`) matches
+ * `brookMarkdown`,
  * but the remount reuses the SAME client so its `setContent` diff baseline
  * survives.
  */
@@ -161,7 +172,8 @@ export function brookMarkdownString(
         next.components === options.components &&
         next.sanitize === options.sanitize &&
         next.virtualize === options.virtualize &&
-        next.stickToBottom === options.stickToBottom
+        next.stickToBottom === options.stickToBottom &&
+        next.onLinkClick === options.onLinkClick
       ) {
         return;
       }

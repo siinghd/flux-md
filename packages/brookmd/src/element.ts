@@ -1,5 +1,5 @@
 import { BrookClient } from "./client";
-import { mountBrookMarkdown, type DomComponents, type MountHandle } from "./dom";
+import { mountBrookMarkdown, type DomComponents, type LinkClickInfo, type MountHandle } from "./dom";
 import type { ParserConfig } from "./types-core";
 
 /**
@@ -50,6 +50,16 @@ const CONFIG_ATTRS = [
   "retain-committed-html",
 ];
 
+// Renderer (MountOption) attributes, as opposed to CONFIG_ATTRS. They configure
+// the DOM renderer, not the parser, so a change REMOUNTS — exactly what the
+// `components` / `sanitize` setters do — instead of rebuilding the client. That
+// also means they are honoured alongside a caller-owned client: no ParserConfig
+// is touched, so the "config is immutable per stream" warning does not apply.
+const MOUNT_ATTRS = ["stick-to-bottom", "virtualize"];
+
+/** The `onLinkClick` handler shape, mirroring `MountOptions.onLinkClick`. */
+export type LinkClickHandler = (event: MouseEvent, link: LinkClickInfo) => void;
+
 export function defineBrookMarkdown(tag = "brook-markdown"): void {
   // SSR-safe: no custom-element registry => nothing to define.
   if (typeof customElements === "undefined") return;
@@ -61,13 +71,14 @@ export function defineBrookMarkdown(tag = "brook-markdown"): void {
   // guards above keeps the module import side-effect-free.
   class BrookMarkdownElement extends HTMLElement {
     static get observedAttributes(): string[] {
-      return ["markdown", "src", "component-tags", "allow-schemes", ...CONFIG_ATTRS];
+      return ["markdown", "src", "component-tags", "allow-schemes", ...MOUNT_ATTRS, ...CONFIG_ATTRS];
     }
 
     #client: BrookClient | null = null;
     #ownsClient = false;
     #components: DomComponents | undefined = undefined;
     #sanitize: ((html: string) => string) | undefined = undefined;
+    #onLinkClick: LinkClickHandler | undefined = undefined;
     #handle: MountHandle | null = null;
     #connected = false;
     // In-flight `src` fetch supersession. A self-owned client is REUSED across
@@ -112,6 +123,15 @@ export function defineBrookMarkdown(tag = "brook-markdown"): void {
       if (this.#connected) this.#remount();
     }
 
+    get onLinkClick(): LinkClickHandler | undefined {
+      return this.#onLinkClick;
+    }
+    set onLinkClick(value: LinkClickHandler | undefined) {
+      if (value === this.#onLinkClick) return; // no-op re-assign: don't remount
+      this.#onLinkClick = value;
+      if (this.#connected) this.#remount();
+    }
+
     // --- Self-owned-client methods -------------------------------------------
 
     append(chunk: string): void {
@@ -148,11 +168,13 @@ export function defineBrookMarkdown(tag = "brook-markdown"): void {
       this.#connected = true;
 
       // Property-upgrade dance: a framework may set `el.client`/`components`/
-      // `sanitize` BEFORE the element is upgraded, leaving an own data property
-      // that shadows the accessor. Capture, delete, re-assign through the setter.
+      // `sanitize`/`onLinkClick` BEFORE the element is upgraded, leaving an own
+      // data property that shadows the accessor. Capture, delete, re-assign
+      // through the setter.
       this.#upgradeProperty("client");
       this.#upgradeProperty("components");
       this.#upgradeProperty("sanitize");
+      this.#upgradeProperty("onLinkClick");
 
       // Mount synchronously if we already have a client (caller-owned, or one a
       // pre-connect append() created). append/finalize are postMessage and the
@@ -182,6 +204,15 @@ export function defineBrookMarkdown(tag = "brook-markdown"): void {
         if (!this.#client || this.#ownsClient) {
           this.#resolveInitialContent();
         }
+        return;
+      }
+
+      if (MOUNT_ATTRS.includes(name)) {
+        // Renderer-only option (`stick-to-bottom` / `virtualize`): remount
+        // against the new value, exactly as the `components` / `sanitize`
+        // setters do. No client rebuild — ParserConfig is untouched — so this
+        // applies to a caller-owned client too.
+        this.#remount();
         return;
       }
 
@@ -219,7 +250,7 @@ export function defineBrookMarkdown(tag = "brook-markdown"): void {
 
     // --- Internals -----------------------------------------------------------
 
-    #upgradeProperty(prop: "client" | "components" | "sanitize"): void {
+    #upgradeProperty(prop: "client" | "components" | "sanitize" | "onLinkClick"): void {
       if (Object.prototype.hasOwnProperty.call(this, prop)) {
         const value = (this as unknown as Record<string, unknown>)[prop];
         delete (this as unknown as Record<string, unknown>)[prop];
@@ -249,8 +280,9 @@ export function defineBrookMarkdown(tag = "brook-markdown"): void {
       set("soft-breaks", "softBreaks");
       set("a11y", "a11y");
       set("unsafe-html", "unsafeHtml");
-      // Only meaningful alongside the sanitizer (`html-allowlist` / drop list),
-      // which this element exposes via its `config` property, not an attribute.
+      // Only meaningful once the safe raw-HTML sanitizer is engaged, i.e. with
+      // `htmlAllowlist` / `dropHtmlTags` — string ARRAYS, so they are set on a
+      // caller-owned client's ParserConfig, not through an attribute here.
       set("block-html", "blockHtml");
       // Escape hatch for a host that wants the parser to keep the whole rendered
       // document in WASM; the streaming path drops it by default.
@@ -292,6 +324,11 @@ export function defineBrookMarkdown(tag = "brook-markdown"): void {
       this.#handle = mountBrookMarkdown(this.#client, this, {
         components: this.#components,
         sanitize: this.#sanitize,
+        onLinkClick: this.#onLinkClick,
+        // Renderer options read fresh on every mount (MOUNT_ATTRS remounts on a
+        // change); `undefined` = absent = the renderer's own default.
+        stickToBottom: parseTriBool(this.getAttribute("stick-to-bottom")),
+        virtualize: parseTriBool(this.getAttribute("virtualize")),
       });
     }
 

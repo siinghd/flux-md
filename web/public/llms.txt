@@ -1,0 +1,41 @@
+# brookmd
+
+> Streaming markdown for the browser and beyond. One Rust core — incremental
+> parse with speculative closure for mid-stream constructs, stable block
+> identities so unchanged blocks never re-reconcile — compiled to WASM for the
+> web and to native libraries for mobile and desktop. 100% CommonMark 0.31 + GFM,
+> byte-exact (652/652 and 24/24). Zero runtime dependencies. In the browser the
+> parser runs in a pooled Web Worker per stream, so many concurrent LLM streams
+> render without blocking the UI thread.
+
+Install with `npm i brookmd`. Renderers ship for React, Vue 3, Svelte 4/5,
+Solid, a `<brook-markdown>` Web Component, vanilla DOM, and a worker-free
+synchronous server/RSC entry. The agent skill below is the fastest way to get a
+coding agent productive with the library: `npx skills add siinghd/brookmd`.
+
+## Agent skill
+
+- [SKILL.md](https://raw.githubusercontent.com/siinghd/brookmd/main/skills/brookmd/SKILL.md): Quick setup, basic usage, chat-UI defaults, key props, ParserConfig defaults, framework one-liners, common gotchas.
+- [API reference](https://raw.githubusercontent.com/siinghd/brookmd/main/skills/brookmd/references/api.md): Subpath export map, every `<BrookMarkdown>` prop, `BrookClient` methods and options, full `ParserConfig`, the `components` two-contract rules, `BlockComponentProps` and the per-kind `blockData` shapes.
+- [Frameworks & bundlers](https://raw.githubusercontent.com/siinghd/brookmd/main/skills/brookmd/references/frameworks.md): React, Vue, Svelte, Solid, Web Component, vanilla DOM, server/RSC, Vite, Next.js App Router, React Native, CSP.
+- [Styling](https://raw.githubusercontent.com/siinghd/brookmd/main/skills/brookmd/references/styling.md): `styles.css`, the `--brook-*` variables, dark mode, the block-state class contract, the opt-in streaming caret, code-block chrome, Tailwind.
+- [Security](https://raw.githubusercontent.com/siinghd/brookmd/main/skills/brookmd/references/security.md): URL scheme policy, `allowSchemes`, the four raw-HTML tiers, the `sanitize` hook, trusted surfaces, `onLinkClick`.
+- [Recipes](https://raw.githubusercontent.com/siinghd/brookmd/main/skills/brookmd/references/recipes.md): Vercel AI SDK `useChat`, KaTeX, Mermaid, Shiki, `registerLanguage`, CSV table toolbars, interactive checkboxes, lazy images, accessible chat, persist/hydrate, metrics.
+- [Troubleshooting](https://raw.githubusercontent.com/siinghd/brookmd/main/skills/brookmd/references/troubleshooting.md): Symptom → cause → fix for blank output, worker/WASM load failures, bundler issues, hydration mismatches, re-render storms.
+
+## Documentation
+
+- [Package README](https://raw.githubusercontent.com/siinghd/brookmd/main/packages/brookmd/README.md): The complete narrative documentation — API, per-stream config, framework bindings, security model, scaling helpers.
+- [Repository README](https://raw.githubusercontent.com/siinghd/brookmd/main/README.md): Project overview, repository layout, platform matrix, conformance floors.
+- [CHANGELOG](https://raw.githubusercontent.com/siinghd/brookmd/main/packages/brookmd/CHANGELOG.md): Release-by-release history of the npm package.
+
+## Protocol
+
+- [WIRE.md](https://raw.githubusercontent.com/siinghd/brookmd/main/crates/brookmd-core/WIRE.md): The versioned JSON wire contract between the parser core and any renderer, including `html_delta` splices.
+
+## Optional
+
+- [llms-full.txt](https://md.hsingh.app/llms-full.txt): The package README plus every skill reference concatenated into one file.
+- [Live demo](https://md.hsingh.app/): Streaming playground and data-studio demo.
+- [npm package](https://www.npmjs.com/package/brookmd): `brookmd`.
+- [Rust core on crates.io](https://crates.io/crates/brookmd-core): `brookmd-core`.

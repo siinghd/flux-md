@@ -65,6 +65,27 @@ export type UrlTransform = (
   ctx: { tag: string; attr: "href" | "src" | "poster" },
 ) => string;
 
+/**
+ * The link a delegated click landed on, handed to every renderer's
+ * `onLinkClick` hook alongside the raw event.
+ *
+ * The hook is DELEGATED by design: ONE listener sits on the renderer's
+ * `.brook-md` root and resolves the anchor from the event target, so turning it
+ * on adds no per-block and no per-anchor work — the streaming path is untouched
+ * and no block's memo/node reuse is affected.
+ *
+ * A still-streaming anchor (`data-brook-pending`: label rendered, URL not yet
+ * arrived) is never reported — there is no `href` to hand you yet.
+ */
+export interface LinkClickInfo {
+  /** The anchor's `href` attribute verbatim, as the core emitted it. */
+  href: string;
+  /** The anchor's rendered text content. */
+  text: string;
+  /** The live `<a>` element that was clicked. */
+  element: HTMLAnchorElement;
+}
+
 /** Column alignment from the `|:--|:-:|--:|` delimiter row; `null` = unset. */
 export type Align = "left" | "center" | "right" | null;
 
@@ -429,7 +450,7 @@ export interface ParserConfig {
   lenientLists?: boolean;
   /**
    * Render a CommonMark SOFT line break (a bare `\n` inside inline content) as
-   * a `<br>` — the `remark-breaks` / "GitHub comment" convention, where one
+   * a `<br>` — the "GitHub comment" convention, where one
    * Enter is one visual line. Default false (strict CommonMark: a soft break is
    * whitespace). Hard breaks (two trailing spaces, or a trailing `\`) are `<br>`
    * either way, so enabling this only ADDS breaks — it never removes one. Chat

@@ -669,7 +669,7 @@ fn render_inline_core(input: &str, opts: &RenderOpts, out: &mut String, track: b
                 }
                 trim_line_end_ws(out, out_floor);
                 if hard || opts.soft_breaks {
-                    // `remark-breaks` parity: a soft break renders as a visible
+                    // Soft-break mode: a soft break renders as a visible
                     // line break. The `\n` still follows the tag so the emitted
                     // markup keeps its line structure (and byte-parity with the
                     // hard-break arm above).
