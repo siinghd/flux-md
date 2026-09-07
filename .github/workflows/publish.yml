@@ -25,7 +25,7 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: write # create the GitHub Release for the tag (see the last step)
   id-token: write # OIDC: lets npm authenticate to the registry + attach provenance
 
 jobs:
@@ -146,3 +146,34 @@ jobs:
         # failure, the Trusted Publisher hasn't been configured on npmjs.com yet
         # (see the one-time setup block at the top of this file).
         run: npm publish --access public
+
+      # GitHub Releases used to be created by hand and drifted five versions
+      # behind the tags. Now every vX.Y.Z tag gets a Release whose body is that
+      # version's CHANGELOG section (title = the section's opening bold phrase).
+      # Idempotent: a tag that already has a Release is left alone, so re-running
+      # the workflow never duplicates or overwrites hand-edited notes.
+      - name: Create the GitHub Release from the CHANGELOG section
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ver="${TAG#v}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists — leaving it alone."; exit 0
+          fi
+          node - "$ver" > /tmp/relnotes.md <<'NODE'
+            const fs = require("fs");
+            const ver = process.argv[2];
+            const src = fs.readFileSync("packages/brookmd/CHANGELOG.md", "utf8");
+            const re = new RegExp("^## " + ver.replace(/\./g, "\\.") + "\\b[^\n]*\n([\\s\\S]*?)(?=^## |(?![\\s\\S]))", "m");
+            const m = re.exec(src);
+            if (!m) { console.error("no CHANGELOG section for " + ver); process.exit(1); }
+            const body = m[1].trim();
+            const bold = /\*\*(.+?)\*\*/.exec(body);
+            const headline = (bold ? bold[1] : body.split(".")[0]).replace(/\.$/, "").trim();
+            fs.writeFileSync("/tmp/reltitle.txt", "brookmd " + ver + " — " + headline);
+            process.stdout.write(body + "\n");
+          NODE
+          gh release create "$TAG" --verify-tag --title "$(cat /tmp/reltitle.txt)" --notes-file /tmp/relnotes.md
