@@ -4,6 +4,148 @@ Notable changes to brookmd (formerly `flux-md`). Format based on
 [Keep a Changelog](https://keepachangelog.com/); this project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## 0.30.0 — 2026-09-07
+
+**Agent-ready, chat-ready.** brookmd now ships as an installable agent skill,
+and the surface a chat UI needs on day one — a styled theme for the code
+chrome, a streaming caret, a link-click hook, a highlighter you can teach new
+languages, and copy-pasteable recipes for the AI SDK, KaTeX, Mermaid, and
+table toolbars — is in the package and the docs instead of the demo app.
+Requires `brookmd-core` 0.27.0 (parser-side performance fix below; the wire
+contract is unchanged at v1.2.0).
+
+### Added
+
+- **Agent skill.** `npx skills add siinghd/brookmd` installs a `brookmd` skill
+  into any coding agent that reads the `SKILL.md` format (Claude Code, Cursor,
+  Codex, …); `/plugin marketplace add siinghd/brookmd` does the same through
+  Claude Code's plugin marketplace. The skill (`skills/brookmd/`) carries a
+  trigger-listing description, quick setup, the chat-UI defaults, a props
+  table with real defaults, twelve gotchas, six reference documents (API,
+  frameworks, styling, security, recipes, troubleshooting) and seven typed
+  examples. `llms.txt` at the repo root and `llms.txt` / `llms-full.txt` on
+  the demo site give agents an index without cloning. Every API fact in the
+  skill was verified against source, not the README — and stays that way: CI
+  typechecks the examples against `src/`, and `test/skill-docs.test.ts` fails
+  on malformed frontmatter, a dead relative link, an import of a
+  `brookmd/<subpath>` the package does not export, or a public doc that names
+  another rendering library.
+- **`onLinkClick`** on `<BrookMarkdown>` (React), `mountBrookMarkdown`
+  (`MountOptions`), the Vue / Svelte / Solid bindings and the
+  `<brook-markdown>` element (`.onLinkClick` property): one delegated listener
+  on the `.brook-md` root hands back `(event, { href, text, element })`
+  (`LinkClickInfo`, exported from `brookmd`, `brookmd/types` and
+  `brookmd/dom`); `event.preventDefault()` cancels navigation, so link
+  interstitials and in-app routing need no per-anchor override. Links still
+  streaming their URL (`<a data-brook-pending>`) are never reported. The hook
+  adds zero per-block or per-anchor work — a changing handler identity
+  re-renders no blocks (pinned by test).
+- **`registerLanguage(names, { pats, kw })`** on `brookmd/highlight` (also
+  re-exported from `brookmd`): teach the built-in streaming highlighter a
+  language at runtime, under one name or several aliases. Regexes must be
+  sticky, token classes must be ones the stylesheet colours (`ident` is the
+  class a `kw` set refines), and re-registering a name replaces it. A
+  registered language highlights identically to a built-in one once its block
+  closes; while streaming it re-tokenizes instead of growing a frozen prefix,
+  since a caller's table does not say which of its forms can run past a
+  newline.
+- **Twelve more built-in language families**: yaml/yml, toml, diff, java, c,
+  cpp/c++, cs/csharp, php, rb/ruby, swift, kt/kotlin and dockerfile — 36
+  language keys in total. Language lookup is now a prototype-free table, so a
+  fence tagged `constructor` or `__proto__` is an ordinary miss. The ReDoS
+  suite runs 17 adversarial inputs against *every* supported language under a
+  per-input time budget, so a new table cannot land a quadratic pattern.
+- **The theme finally styles the fenced-block chrome.** `brookmd/styles.css`
+  now gives the built-in code, math and mermaid renderers a bordered
+  container, a header bar with the language label, a ghost copy button (hover,
+  focus ring, copied state) and a pulsing "streaming" pill — previously the
+  theme left a bare button stack above every fence. Also new: GitHub-style
+  alerts for all five kinds (`--brook-alert-*` variables in light and dark),
+  footnote sections and references, block/inline math, disabled task-list
+  checkboxes. A contract test collects every `brook-*` class the renderers
+  emit and fails if the theme does not style it.
+- **Opt-in streaming caret.** Add `brook-caret` to the root
+  (`<BrookMarkdown className="brook-caret" />`) and the block still streaming
+  gets a blinking cursor at its tail (`--brook-caret` retints it). Fences show
+  the streaming pill instead. Both animations route through
+  `--brook-caret-anim` / `--brook-pill-anim` and switch off under
+  `prefers-reduced-motion: reduce`.
+- **Block-state classes are now a documented, stable styling contract**:
+  `brook-block`, `brook-block-<kind>`, `brook-open`, `brook-speculative`, and
+  `brook-streaming` on the code/math/mermaid slots.
+- `<brook-markdown>` honours the **`stick-to-bottom`** and **`virtualize`**
+  attributes the README had advertised; changing either after mount re-applies
+  it, including with a caller-owned client.
+
+### Fixed
+
+- **Streaming parity: a table delimiter row still being typed no longer
+  freezes the paragraph above it** (`brookmd-core` 0.27.0). With
+  `| name | value |` / `value |` / `|:-----|--`, the moment the buffer held
+  `|:-` the parser saw a one-column delimiter under the one-column line
+  `value |`, formed a table, and committed `<p>| name | value |</p>` as a
+  separate block; one byte later the delimiter widened, the table dissolved,
+  but the commit could not be taken back — so the finalized document differed
+  from the one-shot parse (one paragraph). A table whose delimiter row sits on
+  the buffer's unterminated final line is now held speculative until that line
+  completes, matching the existing guard for provisionally classified blocks.
+  Found by the coverage-guided parity fuzzer; pinned by a regression test
+  across every chunking of 1–8 bytes; a 240 s fuzz run afterwards found
+  nothing new.
+- The generic block wrapper was eating the theme's spacing rules: the last
+  block's margin escaped the root and the first heading sat indented from the
+  top. `.brook-bottom-anchor` (the `stickToBottom` sentinel) no longer occupies
+  a full block gap of dead space at the end of the document.
+- README corrections, each verified against source: `<brook-markdown
+  stick-to-bottom>` (now real — see above), the root class is `brook-md` (not
+  `brookmd`), `new BrookClient({ pool })` (not `new BrookClient(pool)`),
+  `MountHandle` also has `openBlockId()`, the real `Components` and
+  `BlockComponentProps` declarations, the Blockquote/Alert `{ nested }` →
+  `props.container` and `ListData.items` / `ListItemData.start` rows in the
+  `blockData` table, and the previously undocumented surface — `deferTail`,
+  `childMemo`, `onRenderMetrics`, `onStreamError`, `streamConfig`, `coalesce`,
+  `reattach()`, `retainCommittedHtml`, `bootTimeoutMs`, `supportedLangs()`,
+  and the `brookmd/types`, `brookmd/html-to-react`, `brookmd/block-props`,
+  `brookmd/worker-core` entry points. `SHIPPING.md` no longer claims the
+  package ships as source (compiled ESM since 0.17.0).
+- `brookmd-react-native` now depends on `brookmd ^0.30.0` (it pinned `^0.26.0`,
+  which a 0.x caret resolves to `<0.27`, so its workspace install had been
+  fetching an old brookmd from the registry instead of the sibling package).
+
+### Performance
+
+- **Open blockquote / alert / component bodies keep a settled HTML prefix**
+  (`brookmd-core` 0.27.0). The assembler for a structured container or a
+  component block used to re-walk every committed inner sub-block and re-copy
+  its HTML on *every* append — the residual wall-clock cliff documented since
+  0.28.0. Each committed sub-block is now folded into a per-cache prefix once
+  (one prefix per nested-parser twin on the component path, since the settled
+  twin's committed HTML differs) and re-emitted as one contiguous copy; only
+  the active tail is rebuilt. A streaming component body of paragraphs is
+  1.9–5.3× faster at 256 KB (2,048-paragraph body 152 ms → 66 ms; dense
+  small-paragraph body 571 ms → 107 ms, growth 34× → 11× over 32→256 KB).
+  Output is byte-identical: 652/652 CommonMark + 24/24 GFM byte-exact, every
+  parity suite green, and a differential harness hashing the full document
+  after every append found no difference from the previous implementation
+  across 896 hand-written cases and 20,000 randomized container/component
+  documents × 4 chunkings. A new wall-clock scaling guard
+  (`wrapper_body_prefix_is_wall_linear`, control-twin primary, retry-once)
+  pins the shape — the work counters are structurally blind to this class —
+  and was verified to fail on the pre-fix tree. Blockquote/alert bodies whose
+  nested parser commits nothing (one giant list) see no change; their residual
+  cost is the two unavoidable O(body) `Block.html` materializations per append.
+
+### Docs
+
+- New README sections written for someone building a chat UI: **Chat UI
+  defaults** (`softBreaks`, `dirAuto`, `a11y`, `blockData`, `gfmMath`, hoisted
+  `components`, `warm()`, the caret), **With the Vercel AI SDK (`useChat`)**
+  including the `streaming: false`-on-finish rule and why brookmd refuses to
+  infer it, **Accessible chat**, **Tailwind / design systems** (and why
+  `@tailwindcss/typography` users should skip the theme import), and recipes
+  for KaTeX, Mermaid, a custom highlighter, interactive task lists, lazy
+  images, and a CSV/copy table toolbar over `props.table`.
+
 ## 0.29.1 — 2026-07-31
 
 Performance only; rendered bytes unchanged (asserted: settled markup identical

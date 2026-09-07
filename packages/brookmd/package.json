@@ -1,6 +1,6 @@
 {
   "name": "brookmd",
-  "version": "0.29.1",
+  "version": "0.30.0",
   "description": "Zero-dep streaming markdown for the browser. Rust→WASM core, Web Worker per stream, incremental parse with speculative closure.",
   "type": "module",
   "sideEffects": ["./dist/worker.js", "./dist/styles.css"],

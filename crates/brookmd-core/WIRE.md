@@ -9,7 +9,7 @@ layer in any language. The current JavaScript renderer is one consumer; native
 consumers (for example a React Native, Swift, or Kotlin binding) can implement
 against this document alone.
 
-Covered releases: **npm `brookmd` 0.29.1** and **crate `brookmd-core` 0.26.0**.
+Covered releases: **npm `brookmd` 0.30.0** and **crate `brookmd-core` 0.27.0**.
 
 The contract version tracks the *wire shape*, not the library version. It changes
 independently: a library release that leaves every shape below byte-identical

@@ -7,7 +7,7 @@
     },
     "packages/brookmd": {
       "name": "brookmd",
-      "version": "0.29.1",
+      "version": "0.30.0",
       "devDependencies": {
         "@types/bun": "^1.3.14",
         "@types/react": "^18.3.12",
@@ -39,7 +39,7 @@
       "version": "0.1.7",
       "dependencies": {
         "@ubjs/core": "0.31.0-3",
-        "brookmd": "^0.26.0",
+        "brookmd": "^0.30.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.14",
@@ -737,8 +737,6 @@
     "@vue/compiler-core/estree-walker": ["estree-walker@2.0.2", "", {}, "sha512-Rfkk/Mp/DL7JVje3u18FxFujQlTNR2q6QfMSMB7AvCBx91NGj/ba3kCfza0f6dVDbw7YlRf/nDrn7pQrCCyQ/w=="],
 
     "@vue/compiler-sfc/estree-walker": ["estree-walker@2.0.2", "", {}, "sha512-Rfkk/Mp/DL7JVje3u18FxFujQlTNR2q6QfMSMB7AvCBx91NGj/ba3kCfza0f6dVDbw7YlRf/nDrn7pQrCCyQ/w=="],
-
-    "brookmd-react-native/brookmd": ["brookmd@0.26.1", "", { "peerDependencies": { "react": ">=18", "solid-js": "^1.8.0", "svelte": ">=4", "vue": ">=3" }, "optionalPeers": ["react", "solid-js", "svelte", "vue"] }, "sha512-OnkDbwZQOvFefN9mrAtKQyn82oVQ1LUYYWNXvMbasQywj+Rryfjs3M97qQUSOdcBi86gV5LMYwjxmKs4gNqfWg=="],
 
     "chalk/ansi-styles": ["ansi-styles@4.3.0", "", { "dependencies": { "color-convert": "^2.0.1" } }, "sha512-zbB9rCJAT1rbjiVDb2hqKFHNYLxgtk8NURxZ3IZwD3F6NtxbXZQCnnSi1Lkx+IDohdPlFp222wVALIheZJQSEg=="],
 

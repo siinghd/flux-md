@@ -56,7 +56,7 @@
   },
   "dependencies": {
     "@ubjs/core": "0.31.0-3",
-    "brookmd": "^0.26.0"
+    "brookmd": "^0.30.0"
   },
   "peerDependencies": {
     "react": ">=18",
