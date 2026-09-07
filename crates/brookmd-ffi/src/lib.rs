@@ -97,7 +97,7 @@ pub struct BrookConfig {
     // below no longer tracks `build_parser`'s setter order (that one mirrors the JS
     // worker's `makeParser`; see below).
     /// Render a CommonMark SOFT line break (a bare `\n` in inline content) as a
-    /// `<br>` — the `remark-breaks` convention. Off by default (strict CommonMark:
+    /// `<br>` — the "GitHub comment" convention. Off by default (strict CommonMark:
     /// a soft break is whitespace). Only ever ADDS breaks; hard breaks are `<br>`
     /// either way.
     #[uniffi(default = false)]

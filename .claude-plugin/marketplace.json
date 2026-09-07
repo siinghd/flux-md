@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "brookmd",
-      "source": "./",
+      "source": "./skills",
       "displayName": "brookmd",
       "description": "Streaming markdown for the browser — Rust→WASM core in a Web Worker, incremental parse with speculative closure, stable block identities. Covers setup (Vite/Next.js/SSR), React/Vue/Svelte/Solid/Web Component/DOM bindings, components overrides, math and Mermaid, syntax highlighting, security, styling, performance and troubleshooting.",
       "version": "0.30.0",
@@ -36,7 +36,9 @@
         "rust",
         "ssr"
       ],
-      "skills": ["./skills/brookmd"]
+      "skills": [
+        "./brookmd"
+      ]
     }
   ]
 }

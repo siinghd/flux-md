@@ -112,7 +112,7 @@ struct BrookConfig {
     // POSITIONALLY. Keep the two field lists append-identical so the snake_case
     // key set stays a 1:1 map of the uniffi record.
     /// Render a CommonMark SOFT line break (a bare `\n`) as a `<br>` — the
-    /// `remark-breaks` convention. Off by default (strict CommonMark).
+    /// "GitHub comment" convention. Off by default (strict CommonMark).
     soft_breaks: bool,
     /// Un-block URL schemes blocked by DEFAULT — bare scheme names without the
     /// colon (`["file"]`), case-insensitive. `None` = built-in policy unchanged.

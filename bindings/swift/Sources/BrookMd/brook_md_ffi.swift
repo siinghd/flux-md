@@ -857,7 +857,7 @@ public struct BrookConfig: Equatable, Hashable {
     public var wireDelta: Bool
     /**
      * Render a CommonMark SOFT line break (a bare `\n` in inline content) as a
-     * `<br>` — the `remark-breaks` convention. Off by default (strict CommonMark:
+     * `<br>` — the "GitHub comment" convention. Off by default (strict CommonMark:
      * a soft break is whitespace). Only ever ADDS breaks; hard breaks are `<br>`
      * either way.
      */
@@ -938,7 +938,7 @@ public struct BrookConfig: Equatable, Hashable {
          */wireDelta: Bool = false, 
         /**
          * Render a CommonMark SOFT line break (a bare `\n` in inline content) as a
-         * `<br>` — the `remark-breaks` convention. Off by default (strict CommonMark:
+         * `<br>` — the "GitHub comment" convention. Off by default (strict CommonMark:
          * a soft break is whitespace). Only ever ADDS breaks; hard breaks are `<br>`
          * either way.
          */softBreaks: Bool = false, 

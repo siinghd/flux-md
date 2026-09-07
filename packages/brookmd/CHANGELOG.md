@@ -375,7 +375,7 @@ Requires `brookmd-core` 0.25.0.
 
 - **`softBreaks` — a soft line break renders as `<br>`.** Strict CommonMark
   treats a bare `\n` inside a paragraph as whitespace, so a model that writes one
-  thought per line gets one reflowed blob. This is the `remark-breaks` /
+  thought per line gets one reflowed blob. This is the
   chat-comment convention where one Enter is one visual line, and it is what most
   chat UIs actually want. Off by default; it only ever *adds* breaks (a hard break
   is `<br>` either way), so no existing output loses a line.

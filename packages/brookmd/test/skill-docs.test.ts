@@ -135,12 +135,15 @@ describe("skills/brookmd — installable agent skill", () => {
   });
 
   test("Claude Code plugin manifests point at the skill", () => {
-    const plugin = path.join(ROOT, ".claude-plugin/plugin.json");
+    // The plugin root is `skills/` (not the repo root), so a marketplace install
+    // copies only the skill, not a clone of the whole repository.
+    const plugin = path.join(ROOT, "skills/.claude-plugin/plugin.json");
     const market = path.join(ROOT, ".claude-plugin/marketplace.json");
     expect(existsSync(plugin)).toBe(true);
     expect(existsSync(market)).toBe(true);
     const p = JSON.parse(readFileSync(plugin, "utf8")) as { name?: string };
     expect(p.name).toBe("brookmd");
-    JSON.parse(readFileSync(market, "utf8")); // must be valid JSON
+    const m = JSON.parse(readFileSync(market, "utf8")) as { plugins: Array<{ source: string }> };
+    expect(m.plugins[0].source).toBe("./skills");
   });
 });

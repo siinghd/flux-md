@@ -1,6 +1,6 @@
 {
   "name": "brookmd-react-native",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Streaming markdown for React Native. Rust core over uniffi (JSI TurboModule), incremental parse, RN-native renderer.",
   "author": "siinghd",
   "license": "MIT",

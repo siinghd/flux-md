@@ -1628,7 +1628,7 @@ data class BrookConfig (
     , 
     /**
      * Render a CommonMark SOFT line break (a bare `\n` in inline content) as a
-     * `<br>` — the `remark-breaks` convention. Off by default (strict CommonMark:
+     * `<br>` — the "GitHub comment" convention. Off by default (strict CommonMark:
      * a soft break is whitespace). Only ever ADDS breaks; hard breaks are `<br>`
      * either way.
      */

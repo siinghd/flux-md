@@ -118,7 +118,7 @@ class BrookConfig {
   final bool? wireDelta;
 
   /// Render a CommonMark SOFT line break (a bare `\n`) as a `<br>` — the
-  /// `remark-breaks` convention. Default off (strict CommonMark).
+  /// "GitHub comment" convention. Default off (strict CommonMark).
   final bool? softBreaks;
 
   /// Un-block URL schemes blocked by DEFAULT — bare scheme names without the
